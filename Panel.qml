@@ -58,6 +58,13 @@ Panel {
     root.expandedUid = (root.expandedUid === uid) ? "" : String(uid || "")
   }
 
+  property string expandedNoteSlug: ""
+
+  function toggleExpandedNote(slug) {
+    root.expandedNoteSlug = (root.expandedNoteSlug === slug) ? "" : String(slug || "")
+  }
+
+
   readonly property string mode: stateData && stateData.mode ? stateData.mode : "dual"
   readonly property string modeLabel: mode === "mic_only" ? "somente microfone" : "microfone + chamada"
 
@@ -262,7 +269,7 @@ Panel {
   Process {
     id: notesProcess
     running: false
-    command: ["castanha", "notes", "--json", "--limit", "4"]
+    command: ["castanha", "notes", "--json", "--limit", "6"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -294,6 +301,22 @@ Panel {
     root.syncingSlug = slug
     syncProcess.command = ["castanha", "sync", slug]
     syncProcess.running = true
+  }
+
+  Process {
+    id: deleteRecProcess
+    running: false
+    onExited: {
+      root.refreshNotes()
+    }
+  }
+
+  function deleteRecording(slug, filename) {
+    if (!slug || deleteRecProcess.running) return
+    var args = ["castanha", "delete-recording", String(slug)]
+    if (filename) args.push(String(filename))
+    deleteRecProcess.command = args
+    deleteRecProcess.running = true
   }
 
   Process {
@@ -362,8 +385,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(340))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+    contentWidth: panel.fittedContentWidth(Style.space(360))
+    contentHeight: panel.fittedContentHeight(panelFlick.contentHeight, Style.space(620))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -373,10 +396,18 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: column
-        width: parent.width
-        spacing: Style.space(12)
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+
+        Column {
+          id: column
+          width: parent.width
+          spacing: Style.space(12)
 
         // ---------- Hero ----------
         PanelHero {
@@ -605,6 +636,7 @@ Panel {
       }
     }
   }
+}
 
   // ------------------------------------------------------------------ linhas
 
@@ -876,13 +908,16 @@ Panel {
     }
   }
 
-  // Uma reunião já gravada: clicar abre as notas em Markdown.
-  component NoteRow: Item {
+  // Uma reunião já gravada: clicar expande os detalhes com resumo executivo,
+  // participantes, gravações de áudio com atalho de exclusão, e links para notas e transcrição.
+  component NoteRow: Column {
     id: noteRow
     property var note: null
 
+    readonly property bool aberta: !!note && root.expandedNoteSlug === note.slug
     readonly property bool comProblema: !!(note && note.audio_status && note.audio_status !== "ok"
-                                           && note.audio_status !== "desconhecido")
+                                           && note.audio_status !== "desconhecido"
+                                           && note.audio_status !== "audio_apagado")
 
     // O destino do Zinom vem do metadata da própria reunião, e não do estado
     // da sessão: assim toda linha sabe o seu, não só a mais recente.
@@ -890,91 +925,187 @@ Panel {
     readonly property bool precisaSync: !!zinomInfo && zinomInfo.status !== "ok" && zinomInfo.status !== "skipped"
     readonly property bool sincronizando: !!note && root.syncingSlug === note.slug
 
-    implicitHeight: noteCol.implicitHeight + Style.space(8)
+    readonly property var participantes: (note && note.attendees) ? note.attendees : []
+    readonly property var gravacoes: (note && note.recordings) ? note.recordings : []
 
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: noteHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
-    }
+    spacing: 0
 
-    Column {
-      id: noteCol
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(1)
+    // ---- cabeçalho ------------------------------------------------------
+    Item {
+      id: noteCabecalho
+      width: noteRow.width
+      implicitHeight: noteCabecalhoCol.implicitHeight + Style.space(8)
 
-      Row {
-        width: parent.width
-        spacing: Style.space(8)
+      Rectangle {
+        anchors.fill: parent
+        radius: Style.cornerRadius
+        color: noteHover.containsMouse || noteRow.aberta
+               ? root.alpha(root.foreground, 0.06) : "transparent"
+      }
 
-        Text {
-          textFormat: Text.PlainText
-          text: "󰈙"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-        }
+      Column {
+        id: noteCabecalhoCol
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        spacing: Style.space(1)
 
-        Text {
-          textFormat: Text.PlainText
-          text: noteRow.note && noteRow.note.title ? noteRow.note.title : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-          width: Math.max(0, parent.width - Style.space(24) - Style.space(8)
-                          - Math.max(quando.implicitWidth, Style.space(20)))
-        }
-
-        Item {
-          width: Math.max(quando.implicitWidth, Style.space(20))
-          height: Math.max(quando.implicitHeight, sincronizar.height)
-          anchors.verticalCenter: parent.verticalCenter
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
 
           Text {
-            id: quando
-            anchors.centerIn: parent
             textFormat: Text.PlainText
-            opacity: sincronizar.opacity > 0 ? 0 : 1
-            text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
-            color: root.dim
+            text: noteRow.aberta ? "󰅀" : "󰈙"
+            color: noteRow.aberta ? root.foreground : root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            Behavior on opacity { NumberAnimation { duration: 120 } }
+            font.pixelSize: Style.font.body
           }
 
-          // Segunda chance para a reunião que não entrou no Zinom.
-          PanelActionButton {
-            id: sincronizar
-            anchors.centerIn: parent
-            opacity: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando) ? 1 : 0
-            enabled: opacity > 0 && !noteRow.sincronizando
-            iconText: "󰑐"
-            tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
-            Behavior on opacity { NumberAnimation { duration: 120 } }
+          Text {
+            textFormat: Text.PlainText
+            text: noteRow.note && noteRow.note.title ? noteRow.note.title : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: noteRow.aberta
+            elide: Text.ElideRight
+            width: Math.max(0, parent.width - Style.space(24) - Style.space(8)
+                            - Math.max(quando.implicitWidth, Style.space(20)))
           }
+
+          Item {
+            width: Math.max(quando.implicitWidth, Style.space(20))
+            height: Math.max(quando.implicitHeight, sincronizar.height)
+            anchors.verticalCenter: parent.verticalCenter
+
+            Text {
+              id: quando
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              opacity: sincronizar.opacity > 0 ? 0 : 1
+              text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+
+            // Segunda chance para a reunião que não entrou no Zinom.
+            PanelActionButton {
+              id: sincronizar
+              anchors.centerIn: parent
+              opacity: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando) ? 1 : 0
+              enabled: opacity > 0 && !noteRow.sincronizando
+              iconText: "󰑐"
+              tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+          }
+        }
+
+        // Subtítulo quando fechado: resumo de duração / status / participantes
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: !noteRow.aberta && text !== ""
+          text: {
+            if (!noteRow.note) return ""
+            var partes = []
+            if (noteRow.note.duration_seconds > 0)
+              partes.push(root.formatDuration(noteRow.note.duration_seconds))
+            if (noteRow.participantes.length > 0)
+              partes.push(noteRow.participantes.length + (noteRow.participantes.length === 1 ? " participante" : " participantes"))
+            if (noteRow.note.recordings_count !== undefined) {
+              if (noteRow.note.recordings_count === 0) partes.push("sem áudio")
+              else if (noteRow.note.recordings_count > 1) partes.push(noteRow.note.recordings_count + " gravações")
+            }
+            return partes.join(" · ")
+          }
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: noteRow.comProblema && !noteRow.aberta
+          text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: text !== "" && !noteRow.aberta
+          text: {
+            if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
+            var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
+            if (linha === "") return ""
+            return (noteRow.precisaSync ? "󰀦  " : "󰄬  ") + linha
+          }
+          color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
       }
 
+      MouseArea {
+        id: noteHover
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.toggleExpandedNote(noteRow.note ? noteRow.note.slug : "")
+      }
+
+      PanelToolTip {
+        visible: noteHover.containsMouse
+        text: noteRow.aberta ? "Recolher detalhes da reunião" : "Ver detalhes da reunião"
+        fontFamily: root.fontFamily
+      }
+    }
+
+    // ---- detalhe expandido ----------------------------------------------
+    Column {
+      id: noteDetalhe
+      visible: noteRow.aberta
+      width: noteRow.width - Style.space(18)
+      x: Style.space(12)
+      topPadding: Style.space(4)
+      bottomPadding: Style.space(10)
+      spacing: Style.space(6)
+
+      // Meta: data, duração e modo
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        visible: noteRow.comProblema
-        text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
-        color: root.urgent
+        text: {
+          if (!noteRow.note) return ""
+          var partes = []
+          if (noteRow.note.when) partes.push(root.formatWhen(noteRow.note.when))
+          if (noteRow.note.duration_seconds > 0) partes.push(root.formatDuration(noteRow.note.duration_seconds))
+          if (noteRow.note.mode) partes.push("modo " + (noteRow.note.mode === "mic_only" ? "microfone" : "chamada"))
+          return partes.join("  ·  ")
+        }
+        color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
       }
 
+      // Status Zinom
       Text {
         textFormat: Text.PlainText
         width: parent.width
@@ -990,20 +1121,273 @@ Panel {
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
       }
-    }
 
-    MouseArea {
-      id: noteHover
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.openPath(noteRow.note ? noteRow.note.silver_path : "")
-    }
+      // Diagnóstico de áudio se houver
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: !!(noteRow.note && noteRow.note.audio_diagnostico && noteRow.note.audio_status !== "ok")
+        text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
+        color: noteRow.note && noteRow.note.audio_status === "audio_apagado" ? root.dim : root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
 
-    PanelToolTip {
-      visible: noteHover.containsMouse
-      text: "Abrir as notas desta reunião"
-      fontFamily: root.fontFamily
+      // Preview do Resumo Executivo
+      Column {
+        width: parent.width
+        visible: !!(noteRow.note && noteRow.note.summary_preview)
+        spacing: Style.space(2)
+
+        PanelSectionHeader {
+          width: parent.width
+          text: "RESUMO"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Rectangle {
+          width: parent.width
+          implicitHeight: summaryText.implicitHeight + Style.space(12)
+          color: root.alpha(root.foreground, 0.04)
+          radius: Style.cornerRadius
+
+          Text {
+            id: summaryText
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(6)
+            text: noteRow.note && noteRow.note.summary_preview ? noteRow.note.summary_preview : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+            maximumLineCount: 5
+            elide: Text.ElideRight
+          }
+        }
+      }
+
+      // Participantes
+      Column {
+        width: parent.width
+        visible: noteRow.participantes.length > 0
+        spacing: Style.space(3)
+
+        PanelSectionHeader {
+          width: parent.width
+          text: noteRow.participantes.length === 1
+                ? "1 PARTICIPANTE" : noteRow.participantes.length + " PARTICIPANTES"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Repeater {
+          model: noteRow.participantes
+
+          Item {
+            id: pItem
+            required property var modelData
+            width: noteDetalhe.width
+            implicitHeight: pNome.implicitHeight + Style.space(3)
+
+            Text {
+              id: pIcon
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(16)
+              text: "󰀉"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              id: pNome
+              textFormat: Text.PlainText
+              anchors.left: pIcon.right
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: typeof modelData === "string" ? modelData
+                    : ((modelData.name || modelData.email || "") + (modelData.organizer ? "  (organizador)" : ""))
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            MouseArea {
+              id: pHover
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.NoButton
+            }
+
+            PanelToolTip {
+              visible: pHover.containsMouse && !!(typeof modelData === "object" && modelData.email)
+              text: typeof modelData === "object" ? String(modelData.email || "") : ""
+              fontFamily: root.fontFamily
+            }
+          }
+        }
+      }
+
+      // Gravações de Áudio
+      Column {
+        width: parent.width
+        spacing: Style.space(3)
+
+        PanelSectionHeader {
+          width: parent.width
+          text: noteRow.gravacoes.length === 1
+                ? "1 GRAVAÇÃO DE ÁUDIO"
+                : (noteRow.gravacoes.length === 0 ? "ÁUDIO" : noteRow.gravacoes.length + " GRAVAÇÕES DE ÁUDIO")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: noteRow.gravacoes.length === 0
+          text: "Áudio removido para liberar espaço (notas e transcrição preservadas)."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        Repeater {
+          model: noteRow.gravacoes
+
+          Item {
+            id: recItem
+            required property var modelData
+            width: noteDetalhe.width
+            implicitHeight: Math.max(Style.space(24), recFilename.implicitHeight + Style.space(6))
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: recHover.containsMouse ? root.alpha(root.foreground, 0.05) : "transparent"
+            }
+
+            Text {
+              id: recIcon
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "󰓃"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              id: recFilename
+              textFormat: Text.PlainText
+              anchors.left: recIcon.right
+              anchors.leftMargin: Style.space(6)
+              anchors.right: recSize.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData.filename || "audio.ogg"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
+            Text {
+              id: recSize
+              textFormat: Text.PlainText
+              anchors.right: recPlayBtn.left
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData.size_human || ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            PanelActionButton {
+              id: recPlayBtn
+              anchors.right: recDelBtn.left
+              anchors.rightMargin: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰐊"
+              tooltipText: "Ouvir gravação"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.openPath(modelData.path)
+            }
+
+            PanelActionButton {
+              id: recDelBtn
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(4)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰆴"
+              tooltipText: "Apagar este áudio (mantém notas e transcrição)"
+              foreground: root.urgent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              enabled: !deleteRecProcess.running
+              onClicked: root.deleteRecording(noteRow.note ? noteRow.note.slug : "", modelData.filename)
+            }
+
+            MouseArea {
+              id: recHover
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.NoButton
+            }
+          }
+        }
+      }
+
+      // Botões de ação principais (Notas, Transcrição, Pasta)
+      Row {
+        spacing: Style.space(8)
+        topPadding: Style.space(4)
+
+        Button {
+          text: "Notas"
+          iconText: "󰈙"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          onClicked: root.openPath(noteRow.note ? noteRow.note.silver_path : "")
+        }
+
+        Button {
+          visible: !!(noteRow.note && noteRow.note.has_transcript)
+          text: "Transcrição"
+          iconText: "󰗊"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          onClicked: root.openPath(noteRow.note ? noteRow.note.transcript_path : "")
+        }
+
+        Button {
+          visible: !!(noteRow.note && noteRow.note.bronze_dir)
+          text: "Pasta"
+          iconText: "󰉋"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.openPath(noteRow.note ? noteRow.note.bronze_dir : "")
+        }
+      }
     }
   }
 }

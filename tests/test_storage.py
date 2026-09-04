@@ -68,5 +68,85 @@ class TestStorage(unittest.TestCase):
         slug3 = self.storage.create_meeting_slug("Alinhamento")
         self.assertEqual(slug3, f"{slug1}-3")
 
+    def test_multiple_recordings_and_deletion(self):
+        slug = "2026-09-04_1100_planejamento"
+        fake_audio1 = self.temp_dir / "sample1.ogg"
+        fake_audio1.write_bytes(b"audio-part-1")
+        
+        metadata = {
+            "title": "Planejamento Trimestral",
+            "recorded_at": "2026-09-04T11:00:00Z",
+            "duration_seconds": 60,
+            "attendees": [{"name": "Bruno", "email": "bruno@example.com"}],
+        }
+        self.storage.save_bronze(
+            slug=slug,
+            audio_source_path=fake_audio1,
+            metadata=metadata,
+            raw_transcript="Transcrição parte 1.",
+        )
+        self.storage.save_silver(
+            slug=slug,
+            markdown_content="# Planejamento\n\n## 📌 Resumo Executivo\nDefinidas metas do Q4 com sucesso.",
+        )
+        self.storage.save_gold(slug=slug, gold_data={"facts": []})
+
+        # Deve listar 1 gravação
+        recs = self.storage.list_meeting_recordings(slug)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["filename"], "audio.ogg")
+
+        # Adiciona segunda gravação na mesma reunião
+        fake_audio2 = self.temp_dir / "sample2.ogg"
+        fake_audio2.write_bytes(b"audio-part-2-longer")
+        added = self.storage.add_recording(
+            slug=slug,
+            audio_source_path=fake_audio2,
+            metadata_update={"duration_seconds": 120, "audio_status": "ok"},
+            raw_transcript="Transcrição parte 2.",
+        )
+        self.assertEqual(added["filename"], "audio_2.ogg")
+
+        # Agora a reunião tem 2 gravações
+        recs = self.storage.list_meeting_recordings(slug)
+        self.assertEqual(len(recs), 2)
+        m = self.storage.get_meeting(slug)
+        self.assertEqual(m["recordings_count"], 2)
+        self.assertTrue(m["has_audio"])
+        self.assertEqual(len(m["attendees"]), 1)
+        self.assertIn("Definidas metas do Q4", m["summary_preview"])
+
+        # Tentar apagar sem especificar arquivo quando há múltiplos deve retornar erro
+        err_del = self.storage.delete_recording(slug)
+        self.assertEqual(err_del["status"], "error")
+        self.assertIn("múltiplas gravações", err_del["message"])
+
+        # Apagar a gravação 1 especificando o nome
+        del1 = self.storage.delete_recording(slug, "audio.ogg")
+        self.assertEqual(del1["status"], "ok")
+        self.assertEqual(del1["deleted_file"], "audio.ogg")
+        self.assertFalse((self.storage.bronze_dir / slug / "audio.ogg").exists())
+        self.assertTrue((self.storage.bronze_dir / slug / "audio_2.ogg").exists())
+
+        # Notas Silver e Transcrição permanecem intactas
+        self.assertTrue((self.storage.silver_dir / f"{slug}.md").exists())
+        transcript_text = (self.storage.bronze_dir / slug / "transcript_raw.txt").read_text()
+        self.assertIn("Transcrição parte 1.", transcript_text)
+        self.assertIn("Transcrição parte 2.", transcript_text)
+
+        # Apagar a gravação restante (agora há só 1, não precisa passar nome)
+        del2 = self.storage.delete_recording(slug)
+        self.assertEqual(del2["status"], "ok")
+        self.assertEqual(del2["deleted_file"], "audio_2.ogg")
+        self.assertEqual(del2["remaining_count"], 0)
+
+        # Confirmar que a reunião continua existindo com suas notas
+        m_after = self.storage.get_meeting(slug)
+        self.assertIsNotNone(m_after)
+        self.assertFalse(m_after["has_audio"])
+        self.assertEqual(m_after["audio_status"], "audio_apagado")
+        self.assertTrue(m_after["has_transcript"])
+        self.assertTrue(Path(m_after["silver_path"]).exists())
+
 if __name__ == "__main__":
     unittest.main()

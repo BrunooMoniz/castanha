@@ -190,6 +190,39 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["result"]["problemas"], [])
 
+    def test_engine_delete_recording(self):
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Alinhamento")
+        res, _ = self._stop(engine, _levels(mic_silent=False, sys_silent=False))
+        slug = res["result"]["slug"]
+
+        del_res = engine.delete_recording(slug)
+        self.assertEqual(del_res["status"], "ok")
+        self.assertEqual(del_res["remaining_count"], 0)
+
+        # last_result no estado reflete audio_apagado
+        state = engine.get_status()
+        self.assertEqual(state["last_result"]["audio_status"], "audio_apagado")
+
+    def test_engine_append_recording_to_existing_meeting(self):
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião Longa")
+        res1, _ = self._stop(engine, _levels(mic_silent=False, sys_silent=False))
+        slug = res1["result"]["slug"]
+
+        # Inicia nova gravação vinculada ao mesmo slug
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", meeting_slug=slug)
+        res2, _ = self._stop(engine, _levels(mic_silent=False, sys_silent=False))
+
+        # O slug permaneceu o mesmo e acumulou gravações
+        self.assertEqual(res2["result"]["slug"], slug)
+        m = engine.storage.get_meeting(slug)
+        self.assertEqual(m["recordings_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

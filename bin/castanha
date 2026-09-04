@@ -20,11 +20,14 @@ from castanha.storage import MeetingStorage
 def cmd_start(args):
     engine = CastanhaEngine()
     mode = "mic_only" if args.mic_only else (args.mode or "dual")
-    res = engine.start_recording(mode=mode, title=args.title)
+    meeting_slug = getattr(args, "meeting", None)
+    res = engine.start_recording(mode=mode, title=args.title, meeting_slug=meeting_slug)
     if res.get("status") == "recording":
         print(f"🌰 Gravação iniciada com sucesso! [PID: {res.get('pid')}]")
         print(f"📌 Título: {res.get('title')}")
         print(f"🎙️ Modo: {mode}")
+        if meeting_slug:
+            print(f"🔗 Vinculada à reunião: {meeting_slug}")
         if res.get("mic_muted"):
             print("🔇 ATENÇÃO: o microfone está MUDO no sistema/teclado. Desmute antes de falar.")
     else:
@@ -143,6 +146,39 @@ def cmd_config(args):
 
 def cmd_notes(args):
     storage = MeetingStorage()
+    slug = getattr(args, "slug", None)
+    if slug:
+        meeting = storage.get_meeting(slug)
+        if not meeting:
+            print(f"Reunião '{slug}' não encontrada.")
+            sys.exit(1)
+        if getattr(args, "json", False):
+            print(json.dumps(meeting, indent=2, ensure_ascii=False))
+            return
+        print(f"📌 {meeting['title']}")
+        print(f"   Data: {meeting['when']} · Duração: {meeting['duration_seconds']}s · Modo: {meeting['mode']}")
+        print(f"   Status do áudio: {meeting['audio_status']}")
+        if meeting.get("attendees"):
+            print("   Participantes:")
+            for a in meeting["attendees"]:
+                nome = a.get("name") or a.get("email") or "Sem nome"
+                email = f" <{a['email']}>" if a.get("email") and a.get("name") else ""
+                print(f"     · {nome}{email}")
+        if meeting.get("recordings"):
+            print("   Gravações de áudio:")
+            for r in meeting["recordings"]:
+                print(f"     · {r['filename']} ({r['size_human']}) -> {r['path']}")
+        else:
+            print("   Gravações de áudio: (nenhuma no disco / apagada)")
+        if meeting.get("summary_preview"):
+            print(f"   Resumo Executivo:\n     {meeting['summary_preview']}")
+        print(f"   Notas Silver: {meeting['silver_path']}")
+        if meeting.get("has_transcript"):
+            print(f"   Transcrição: {meeting['transcript_path']}")
+        if meeting.get("gold_path"):
+            print(f"   Fatos Gold: {meeting['gold_path']}")
+        return
+
     notes = storage.list_recent_meetings(limit=args.limit)
 
     if args.json:
@@ -156,9 +192,54 @@ def cmd_notes(args):
         return
     print("Últimas reuniões registradas:")
     for idx, n in enumerate(notes, 1):
-        print(f" {idx}. {n['title']} ({n['when']}) -> {n['silver_path']}")
+        recs = f" ({n.get('recordings_count', 0)} gravação/ões)" if n.get('recordings_count') else ""
+        print(f" {idx}. {n['title']} ({n['when']}){recs} -> {n['silver_path']}")
     if args.open:
         subprocess.Popen(["xdg-open", str(storage.silver_dir)])
+
+
+def cmd_delete_recording(args):
+    engine = CastanhaEngine()
+    slug = args.slug
+    if slug in ("last", "latest"):
+        recentes = engine.storage.list_recent_meetings(limit=1)
+        if not recentes:
+            print("Nenhuma reunião encontrada.")
+            sys.exit(1)
+        slug = recentes[0]["slug"]
+
+    res = engine.delete_recording(slug, getattr(args, "arquivo", None))
+    if getattr(args, "json", False):
+        print(json.dumps(res, ensure_ascii=False))
+        if res.get("status") != "ok":
+            sys.exit(1)
+        return
+
+    if res.get("status") == "ok":
+        print(f"🗑️ Gravação '{res.get('deleted_file')}' apagada com sucesso da reunião '{slug}'.")
+        rem = res.get("remaining_count", 0)
+        if rem > 0:
+            print(f"   Ainda restam {rem} gravação(ões) nesta reunião.")
+        else:
+            print("   As notas em Silver, transcrição e dados no Zinom foram preservados.")
+    else:
+        print(f"❌ Erro: {res.get('message')}")
+        sys.exit(1)
+
+
+def cmd_recordings_list(args):
+    storage = MeetingStorage()
+    recs = storage.list_meeting_recordings(args.slug)
+    if getattr(args, "json", False):
+        print(json.dumps({"recordings": recs}, ensure_ascii=False))
+        return
+    if not recs:
+        print(f"Nenhuma gravação de áudio encontrada para '{args.slug}'.")
+        return
+    print(f"Gravações da reunião '{args.slug}':")
+    for idx, r in enumerate(recs, 1):
+        print(f" {idx}. {r['filename']} ({r['size_human']}) -> {r['path']}")
+
 
 
 def cmd_sync(args):
@@ -289,6 +370,7 @@ def main():
     p_start.add_argument("--mode", choices=["dual", "mic_only"], default=None, help="Modo de gravação")
     p_start.add_argument("--mic-only", action="store_true", help="Atalho para modo apenas microfone (presencial)")
     p_start.add_argument("--title", type=str, default=None, help="Título da reunião")
+    p_start.add_argument("--meeting", "--append", type=str, default=None, help="Slug de reunião existente para adicionar a gravação")
     p_start.set_defaults(func=cmd_start)
 
     # Stop
@@ -306,6 +388,7 @@ def main():
     p_toggle.add_argument("--mode", choices=["dual", "mic_only"], default=None)
     p_toggle.add_argument("--mic-only", action="store_true")
     p_toggle.add_argument("--title", type=str, default=None)
+    p_toggle.add_argument("--meeting", "--append", type=str, default=None)
     p_toggle.set_defaults(func=cmd_toggle)
 
     # Status
@@ -326,11 +409,32 @@ def main():
     p_config.set_defaults(func=cmd_config)
 
     # Notes
-    p_notes = subparsers.add_parser("notes", help="Lista as últimas reuniões")
+    p_notes = subparsers.add_parser("notes", help="Lista as últimas reuniões ou exibe detalhes de uma reunião")
+    p_notes.add_argument("slug", nargs="?", default=None, help="Slug da reunião para ver detalhes completos")
     p_notes.add_argument("--open", action="store_true", help="Abre a pasta de notas no gerenciador de arquivos")
     p_notes.add_argument("--json", action="store_true", help="Saída em JSON (usada pelo plugin do Omarchy)")
     p_notes.add_argument("--limit", type=int, default=10, help="Quantas reuniões listar")
     p_notes.set_defaults(func=cmd_notes)
+
+    # Delete Recording (atalho direto)
+    p_del = subparsers.add_parser("delete-recording", aliases=["del-rec", "delete-audio"], help="Apaga uma gravação de áudio de uma reunião sem apagar as notas")
+    p_del.add_argument("slug", help="Slug da reunião (ou 'last' para a última)")
+    p_del.add_argument("arquivo", nargs="?", default=None, help="Nome do arquivo de áudio específico (ex: audio.ogg)")
+    p_del.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_del.set_defaults(func=cmd_delete_recording)
+
+    # Recordings (subcomando)
+    p_recs = subparsers.add_parser("recordings", help="Gerencia gravações de áudio das reuniões")
+    recs_sub = p_recs.add_subparsers(dest="recordings_cmd")
+    p_recs_list = recs_sub.add_parser("list", help="Lista gravações de áudio de uma reunião")
+    p_recs_list.add_argument("slug", help="Slug da reunião")
+    p_recs_list.add_argument("--json", action="store_true")
+    p_recs_list.set_defaults(func=cmd_recordings_list)
+    p_recs_del = recs_sub.add_parser("delete", help="Apaga uma gravação de áudio de uma reunião")
+    p_recs_del.add_argument("slug", help="Slug da reunião")
+    p_recs_del.add_argument("arquivo", nargs="?", default=None)
+    p_recs_del.add_argument("--json", action="store_true")
+    p_recs_del.set_defaults(func=cmd_delete_recording)
 
     # Sync
     p_sync = subparsers.add_parser("sync", help="Reenvia uma reunião ao Zinom (a última, por padrão)")

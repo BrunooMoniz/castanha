@@ -55,6 +55,7 @@ class CastanhaEngine:
         mode: Optional[str] = None,
         title: Optional[str] = None,
         meeting_event: Optional[MeetingEvent] = None,
+        meeting_slug: Optional[str] = None,
     ) -> Dict[str, Any]:
         state = self.state_mgr.read()
         if state.get("status") in ["recording", "paused"]:
@@ -80,19 +81,29 @@ class CastanhaEngine:
         proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate)
 
         current_meeting_info = None
-        if meeting_event:
-            current_meeting_info = meeting_event.to_dict()
-        elif title:
-            current_meeting_info = {
-                "title": title,
-                "start": datetime.now().isoformat(),
-                "attendees": [],
-            }
-        else:
-            # Tenta pegar da próxima reunião do calendário se estiver no horário
-            next_m = state.get("next_meeting")
-            if next_m:
-                current_meeting_info = next_m
+        if meeting_slug:
+            existing = self.storage.get_meeting(meeting_slug)
+            if existing:
+                current_meeting_info = {
+                    "title": existing.get("title") or "Reunião",
+                    "slug": meeting_slug,
+                    "start": existing.get("when") or datetime.now().isoformat(),
+                    "attendees": existing.get("attendees", []),
+                }
+        if not current_meeting_info:
+            if meeting_event:
+                current_meeting_info = meeting_event.to_dict()
+            elif title:
+                current_meeting_info = {
+                    "title": title,
+                    "start": datetime.now().isoformat(),
+                    "attendees": [],
+                }
+            else:
+                # Tenta pegar da próxima reunião do calendário se estiver no horário
+                next_m = state.get("next_meeting")
+                if next_m:
+                    current_meeting_info = next_m
 
         meeting_title = current_meeting_info.get("title") if current_meeting_info else "Reunião Avulsa"
 
@@ -104,6 +115,7 @@ class CastanhaEngine:
             "started_at": datetime.now().isoformat(),
             "elapsed_seconds": 0,
             "current_meeting": current_meeting_info,
+            "target_meeting_slug": meeting_slug,
             "mic_muted_at_start": mic_muted,
             "error": None,
         })
@@ -230,32 +242,48 @@ class CastanhaEngine:
                     provider_name = "failed"
 
         # 3. Metadados e Bronze
-        slug = self.storage.create_meeting_slug(title)
-        metadata = {
-            "slug": slug,
-            "title": title,
-            "recorded_at": state.get("started_at") or datetime.now().isoformat(),
-            # Duração medida no arquivo: o cronômetro do daemon fica em zero
-            # quando o daemon não está rodando.
-            "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
-            "mode": mode,
-            "transcription_provider": provider_name,
-            "audio_status": audio_status,
-            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
-            "audio_levels": audio_levels,
-            "transcription_error": transcription_error,
-            "mic_muted_at_start": state.get("mic_muted_at_start"),
-            "calendar_event": current_meeting,
-        }
-
-        bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, raw_transcript)
+        target_slug = state.get("target_meeting_slug")
+        if target_slug and (self.storage.bronze_dir / target_slug).exists():
+            slug = target_slug
+            self.storage.add_recording(
+                slug,
+                audio_path,
+                metadata_update={
+                    "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
+                    "audio_status": audio_status,
+                },
+                raw_transcript=raw_transcript,
+            )
+            bronze_dir = self.storage.bronze_dir / slug
+            meta = self.storage._read_bronze_metadata(slug)
+            full_transcript_file = bronze_dir / "transcript_raw.txt"
+            full_transcript = full_transcript_file.read_text(encoding="utf-8") if full_transcript_file.exists() else raw_transcript
+            metadata = meta
+        else:
+            slug = self.storage.create_meeting_slug(title)
+            metadata = {
+                "slug": slug,
+                "title": title,
+                "recorded_at": state.get("started_at") or datetime.now().isoformat(),
+                "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
+                "mode": mode,
+                "transcription_provider": provider_name,
+                "audio_status": audio_status,
+                "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+                "audio_levels": audio_levels,
+                "transcription_error": transcription_error,
+                "mic_muted_at_start": state.get("mic_muted_at_start"),
+                "calendar_event": current_meeting,
+            }
+            bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, raw_transcript)
+            full_transcript = raw_transcript
 
         # 4. Processamento Silver (Markdown)
-        silver_content = self.summarizer.generate_silver(metadata, raw_transcript)
+        silver_content = self.summarizer.generate_silver(metadata, full_transcript)
         silver_path = self.storage.save_silver(slug, silver_content)
 
         # 5. Processamento Gold (Fatos para Zinom / LLM Wiki)
-        gold_data = self.summarizer.generate_gold(metadata, silver_content, raw_transcript)
+        gold_data = self.summarizer.generate_gold(metadata, silver_content, full_transcript)
         gold_path = self.storage.save_gold(slug, gold_data)
 
         # 6. Ingestão Zinom (se habilitado)
@@ -326,3 +354,17 @@ class CastanhaEngine:
             return self.stop_recording()
         else:
             return self.start_recording()
+
+    def delete_recording(self, slug: str, recording_name: Optional[str] = None) -> Dict[str, Any]:
+        """Apaga uma gravação de áudio de uma reunião preservando suas notas e transcrição."""
+        res = self.storage.delete_recording(slug, recording_name)
+        if res.get("status") == "ok":
+            state = self.state_mgr.read()
+            last_res = state.get("last_result")
+            if last_res and last_res.get("slug") == slug:
+                if res.get("remaining_count", 0) == 0:
+                    last_res["audio_status"] = "audio_apagado"
+                    last_res["audio_diagnostico"] = "Gravação de áudio apagada (notas e transcrição preservadas)"
+                    self.state_mgr.write({"last_result": last_res})
+        return res
+
