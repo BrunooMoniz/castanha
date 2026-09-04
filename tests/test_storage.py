@@ -59,5 +59,14 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0]["slug"], slug)
 
+    def test_create_meeting_slug_collision(self):
+        slug1 = self.storage.create_meeting_slug("Alinhamento")
+        (self.storage.bronze_dir / slug1).mkdir(parents=True, exist_ok=True)
+        slug2 = self.storage.create_meeting_slug("Alinhamento")
+        self.assertEqual(slug2, f"{slug1}-2")
+        (self.storage.bronze_dir / slug2).mkdir(parents=True, exist_ok=True)
+        slug3 = self.storage.create_meeting_slug("Alinhamento")
+        self.assertEqual(slug3, f"{slug1}-3")
+
 if __name__ == "__main__":
     unittest.main()

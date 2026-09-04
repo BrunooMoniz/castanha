@@ -46,7 +46,13 @@ class MeetingStorage:
             dt = datetime.now()
         timestamp = dt.strftime("%Y-%m-%d_%H%M")
         slug = slugify(title)
-        return f"{timestamp}_{slug}"
+        base_slug = f"{timestamp}_{slug}"
+        candidate = base_slug
+        counter = 1
+        while (self.bronze_dir / candidate).exists() or (self.silver_dir / f"{candidate}.md").exists():
+            counter += 1
+            candidate = f"{base_slug}-{counter}"
+        return candidate
 
     def save_bronze(
         self,

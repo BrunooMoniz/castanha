@@ -171,6 +171,15 @@ class CastanhaEngine:
                     if not os.path.exists(f"/proc/{pid}"):
                         break
                     time.sleep(0.1)
+                # Fallback se o FFmpeg/PipeWire travar: força SIGKILL
+                if os.path.exists(f"/proc/{pid}"):
+                    os.kill(pid, signal.SIGKILL)
+                    for _ in range(10):
+                        if not os.path.exists(f"/proc/{pid}"):
+                            break
+                        time.sleep(0.1)
+            except ProcessLookupError:
+                pass
             except Exception:
                 pass
 

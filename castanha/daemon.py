@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Set
 
@@ -129,7 +130,12 @@ class CastanhaDaemon:
 
                         if 0 <= time_until <= (notify_before_min * 60) and next_m.uid not in self.notified_meeting_uids:
                             self.notified_meeting_uids.add(next_m.uid)
-                            self._trigger_meeting_alert(next_m)
+                            threading.Thread(
+                                target=self._trigger_meeting_alert,
+                                args=(next_m,),
+                                daemon=True,
+                                name=f"alert-{next_m.uid}",
+                            ).start()
                 except Exception as e:
                     print(f"[Castanha Daemon] Erro ao checar calendário: {e}")
                     self.state_mgr.write({"agenda_error": str(e)})

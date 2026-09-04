@@ -101,6 +101,26 @@ class TestSyncMeeting(unittest.TestCase):
         self.assertEqual(resultados, [])
         adapter.return_value.ingest_meeting.assert_not_called()
 
+    def test_reuniao_legada_sem_audio_status_classifica_antes_de_enviar(self):
+        # Remove audio_status do metadata
+        meta = self._metadata()
+        del meta["audio_status"]
+        (self.storage.bronze_dir / self.slug / "metadata.json").write_text(
+            json.dumps(meta), encoding="utf-8")
+
+        fake_audio = self.storage.bronze_dir / self.slug / "audio.ogg"
+        fake_audio.write_bytes(b"dummy")
+
+        with patch("castanha.audio.measure_channel_levels") as mock_levels, \
+             patch("castanha.audio.classify_audio", return_value="sem_audio"), \
+             patch("castanha.sync.ZinomAdapter") as adapter:
+            adapter.return_value.ingest_meeting.return_value = {
+                "status": "skipped", "reason": "Gravação sem áudio, nada para lembrar"}
+            saida = sync_meeting(self.slug, self.storage)
+
+        self.assertEqual(saida["status"], "skipped")
+        self.assertEqual(self._metadata()["audio_status"], "sem_audio")
+
 
 if __name__ == "__main__":
     unittest.main()

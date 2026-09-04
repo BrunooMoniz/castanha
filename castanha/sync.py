@@ -44,6 +44,25 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     silver_file = storage.silver_dir / f"{slug}.md"
     gold_file = storage.gold_dir / f"{slug}.json"
 
+    # Reunião legada gravada antes da checagem de áudio: reavalia se houver áudio
+    if "audio_status" not in metadata:
+        audio_file = None
+        if metadata.get("bronze_audio_file") and Path(metadata["bronze_audio_file"]).exists():
+            audio_file = Path(metadata["bronze_audio_file"])
+        elif (bronze / "audio.ogg").exists():
+            audio_file = bronze / "audio.ogg"
+        else:
+            candidates = list(bronze.glob("audio.*"))
+            if candidates:
+                audio_file = candidates[0]
+
+        if audio_file:
+            from castanha.audio import AUDIO_STATUS_MESSAGES, classify_audio, measure_channel_levels
+            levels = measure_channel_levels(audio_file, mode=metadata.get("mode", "dual"))
+            st = classify_audio(levels)
+            metadata["audio_status"] = st
+            metadata["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(st, "")
+
     silver = silver_file.read_text(encoding="utf-8") if silver_file.exists() else ""
     gold = _read_json(gold_file)
 

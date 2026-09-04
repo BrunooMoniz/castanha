@@ -75,7 +75,7 @@ class MeetingSummarizer:
         llm_cfg = cfg.get("llm", {})
         self.provider = llm_cfg.get("provider", "groq")
         self.api_key = llm_cfg.get("api_key") or os.environ.get("GROQ_API_KEY", "")
-        self.model = llm_cfg.get("model", "llama-3.3-70b-versatile")
+        self.model = llm_cfg.get("model", "openai/gpt-oss-120b")
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         if not self.api_key:

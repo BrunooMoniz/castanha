@@ -867,7 +867,7 @@ Panel {
           visible: !!(meetingRow.meeting && meetingRow.meeting.html_link)
           text: "No Google"
           iconText: "󰏌"
-          foreground: root.fontFamily ? root.foreground : root.foreground
+          foreground: root.foreground
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           onClicked: root.openPath(meetingRow.meeting.html_link)
