@@ -10,11 +10,11 @@
     "bar-widget"
   ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "Castanha Reuniões",
-    "description": "Indicador de gravação com timer ao vivo e acesso rápido à esteira de reuniões.",
+    "description": "Indicador de gravação com timer ao vivo e painel popout para reuniões.",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "right"

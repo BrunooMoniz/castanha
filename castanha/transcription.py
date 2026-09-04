@@ -95,6 +95,18 @@ class GroqTranscriber(BaseTranscriber):
                 end=seg.get("end", 0.0),
             ))
 
+        # Registra consumo no Budget
+        try:
+            from castanha.budget import BudgetManager
+            budget_mgr = BudgetManager()
+            duration_sec = data.get("duration", 0.0)
+            if not duration_sec and utterances:
+                duration_sec = utterances[-1].end
+            if duration_sec > 0:
+                budget_mgr.record_usage(duration_sec)
+        except Exception:
+            pass
+
         return TranscriptionResult(
             text=full_text,
             utterances=utterances,
@@ -165,6 +177,46 @@ class DeepgramTranscriber(BaseTranscriber):
             raw_response=data,
         )
 
+class VpsSshTranscriber(BaseTranscriber):
+    def __init__(self, host: str = "zinom-vps-2"):
+        self.host = host
+
+    def transcribe(self, audio_path: Path, mode: str = "dual") -> TranscriptionResult:
+        import time, uuid
+        remote_tmp = f"/tmp/castanha_{uuid.uuid4().hex[:8]}.ogg"
+
+        # 1. Copia áudio para a VPS via SCP
+        scp_cmd = ["scp", "-o", "ConnectTimeout=10", str(audio_path), f"{self.host}:{remote_tmp}"]
+        res_scp = subprocess.run(scp_cmd, capture_output=True, text=True)
+        if res_scp.returncode != 0:
+            raise RuntimeError(f"Falha ao enviar áudio para a VPS: {res_scp.stderr}")
+
+        # 2. Executa a transcrição com Whisper large-v3 na VPS
+        ssh_cmd = [
+            "ssh", "-o", "ConnectTimeout=15", self.host,
+            f"/root/castanha-transcribe.py {remote_tmp} && rm -f {remote_tmp}"
+        ]
+        res_ssh = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=600)
+        if res_ssh.returncode != 0:
+            raise RuntimeError(f"Falha na transcrição remota na VPS: {res_ssh.stderr}")
+
+        data = json.loads(res_ssh.stdout.strip())
+        utterances: List[Utterance] = []
+        for s in data.get("segments", []):
+            utterances.append(Utterance(
+                speaker="Falante",
+                text=s.get("text", ""),
+                start=s.get("start", 0.0),
+                end=s.get("end", 0.0),
+            ))
+
+        return TranscriptionResult(
+            text=data.get("text", ""),
+            utterances=utterances,
+            provider="vps_whisper_large_v3",
+            raw_response=data,
+        )
+
 class VpsTranscriber(BaseTranscriber):
     def __init__(self, endpoint: str, auth_token: str = ""):
         self.endpoint = endpoint
@@ -218,23 +270,25 @@ class MockTranscriber(BaseTranscriber):
             raw_response={"status": "mocked"},
         )
 
-def get_transcriber() -> BaseTranscriber:
+def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
     cfg = load_config()
     t_cfg = cfg.get("transcription", {})
-    provider = t_cfg.get("provider", "groq")
+    groq_key = t_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
 
-    if provider == "groq":
-        api_key = t_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
-        if api_key:
-            return GroqTranscriber(api_key, t_cfg.get("groq_model", "whisper-large-v3-turbo"))
-    elif provider == "deepgram":
-        api_key = t_cfg.get("deepgram_api_key") or os.environ.get("DEEPGRAM_API_KEY", "")
-        if api_key:
-            return DeepgramTranscriber(api_key, t_cfg.get("deepgram_model", "nova-2"))
-    elif provider == "vps":
-        endpoint = t_cfg.get("vps_endpoint")
-        if endpoint:
-            return VpsTranscriber(endpoint, t_cfg.get("vps_auth_token", ""))
+    # 1. Verifica se Groq está configurada e se o budget de R$ 5,00 não estourou
+    from castanha.budget import BudgetManager
+    budget_mgr = BudgetManager()
+    if groq_key and budget_mgr.can_use_groq(estimated_duration_sec):
+        return GroqTranscriber(groq_key, t_cfg.get("groq_model", "whisper-large-v3-turbo"))
 
-    # Fallback elegante caso nenhuma chave de API esteja configurada no momento
+    # 2. Fallback / Primário: Modelo Pesado Local na VPS (Whisper large-v3 via SSH)
+    vps_host = t_cfg.get("vps_ssh_host", "zinom-vps-2")
+    try:
+        test = subprocess.run(["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", vps_host, "true"], capture_output=True)
+        if test.returncode == 0:
+            return VpsSshTranscriber(vps_host)
+    except Exception:
+        pass
+
+    # 3. Fallback mock elegante
     return MockTranscriber()
