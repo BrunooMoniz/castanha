@@ -245,5 +245,15 @@ def _parse_attendees(lista: Any) -> List[Attendee]:
         nome = str(a.get("name") or "").strip()
         if not (email or nome):
             continue
-        pessoas.append(Attendee(name=nome or _nome_de_email(email), email=email))
+        pessoas.append(Attendee(
+            name=nome or _nome_de_email(email),
+            email=email,
+            response=str(a.get("response") or ""),
+            organizer=bool(a.get("organizer")),
+            optional=bool(a.get("optional")),
+        ))
+    # Organizador primeiro, depois quem aceitou, e por fim quem não respondeu:
+    # é a ordem em que a informação é útil ao olhar a reunião.
+    ordem = {"accepted": 1, "tentative": 2, "needsAction": 3, "declined": 4}
+    pessoas.sort(key=lambda p: (0 if p.organizer else 1, ordem.get(p.response, 5), p.name.lower()))
     return pessoas

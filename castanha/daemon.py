@@ -1,6 +1,7 @@
 """Daemon de monitoramento em segundo plano (atualizador de status, relógio e calendário)."""
 
 import datetime
+import errno
 import os
 import signal
 import subprocess
@@ -8,10 +9,63 @@ import sys
 import time
 from typing import Set
 
+from castanha.config import get_state_dir
+
 from castanha.agenda import collect_upcoming
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.state import StateManager
+
+def pid_file():
+    return get_state_dir() / "daemon.pid"
+
+
+def running_daemon_pid():
+    """PID do daemon vivo, ou None. Serve para não subir dois."""
+    arquivo = pid_file()
+    try:
+        pid = int(arquivo.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+    if pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return None
+        if e.errno == errno.EPERM:
+            return pid  # existe, é de outro usuário
+        return None
+    return pid
+
+
+def claim_pid_file() -> bool:
+    """True se este processo virou O daemon.
+
+    Dois daemons brigam pelo mesmo state.json e o mais velho vence por último:
+    em 04/09 um daemon que subiu antes de um deploy ficou sobrescrevendo a
+    agenda boa com a versão pobre, e a reunião do Bruno apareceu sem os
+    participantes. Uma instância, sempre.
+    """
+    outro = running_daemon_pid()
+    if outro is not None:
+        print(f"[Castanha] Já existe um daemon rodando (PID {outro}). Este não sobe.")
+        return False
+    arquivo = pid_file()
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    arquivo.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def release_pid_file() -> None:
+    arquivo = pid_file()
+    try:
+        if arquivo.exists() and arquivo.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            arquivo.unlink()
+    except Exception:
+        pass
+
 
 class CastanhaDaemon:
     def __init__(self):
@@ -109,8 +163,12 @@ class CastanhaDaemon:
                 subprocess.Popen(["xdg-open", conf_url])
 
 def run_daemon():
-    daemon = CastanhaDaemon()
-    daemon.run()
+    if not claim_pid_file():
+        return
+    try:
+        CastanhaDaemon().run()
+    finally:
+        release_pid_file()
 
 if __name__ == "__main__":
     run_daemon()

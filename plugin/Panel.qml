@@ -51,6 +51,13 @@ Panel {
   // As notas saem da CLI, que é quem sabe onde o acervo mora.
   property var recentNotes: []
 
+  // Uma reunião aberta por vez. Vazio = nenhuma.
+  property string expandedUid: ""
+
+  function toggleExpanded(uid) {
+    root.expandedUid = (root.expandedUid === uid) ? "" : String(uid || "")
+  }
+
   readonly property string mode: stateData && stateData.mode ? stateData.mode : "dual"
   readonly property string modeLabel: mode === "mic_only" ? "somente microfone" : "microfone + chamada"
 
@@ -166,6 +173,31 @@ Panel {
     root.close()
   }
 
+  // Como o Google chama, e como se diz em português.
+  function respostaLabel(resposta) {
+    if (resposta === "accepted") return "aceitou"
+    if (resposta === "declined") return "recusou"
+    if (resposta === "tentative") return "talvez"
+    if (resposta === "needsAction") return "sem resposta"
+    return ""
+  }
+
+  function respostaGlyph(resposta) {
+    if (resposta === "accepted") return "󰄬"
+    if (resposta === "declined") return "󰅖"
+    if (resposta === "tentative") return "󰔟"
+    // Círculo vazio para quem ainda não respondeu: a caixa do close-box-outline
+    // não desenha nesta fonte e saía como quadrado.
+    return "󰄰"
+  }
+
+  function intervalo(m) {
+    if (!m) return ""
+    var ini = formatClock(m.start)
+    var fim = formatClock(m.end)
+    return fim && fim !== ini ? ini + " às " + fim : ini
+  }
+
   // "hoje 10:42", "ontem 18:03", "02/09 14:00".
   function formatWhen(iso) {
     var ms = parseIso(iso)
@@ -278,16 +310,22 @@ Panel {
     hideProcess.running = true
   }
 
-  onOpenedChanged: if (opened) refreshNotes()
+  onOpenedChanged: if (opened) {
+    stateFile.reload()
+    refreshNotes()
+  }
 
-  // Só corre enquanto há o que contar.
+  // Relê SEMPRE, e não só com o painel aberto. O estado é escrito de forma
+  // atômica (grava .tmp e renomeia por cima), e um observador de arquivo segue
+  // o inode antigo depois da primeira troca: sem esta releitura, o painel
+  // mostrava a agenda de meia hora atrás, foi o que escondeu o Marco Túlio.
   Timer {
-    interval: 1000
-    running: root.isBusy || root.opened
+    interval: root.isBusy || root.opened ? 1000 : 10000
+    running: true
     repeat: true
     onTriggered: {
       root.nowMs = Date.now()
-      if (root.opened) stateFile.reload()
+      stateFile.reload()
     }
   }
 
@@ -572,87 +610,230 @@ Panel {
 
   // Uma reunião da agenda: hora, título, e de qual conta ela vem. Clicar entra
   // na chamada quando há link, e abre o evento no Google quando não há.
-  component MeetingRow: Item {
+  // Uma reunião da agenda. O cabeçalho é sempre visível; clicar abre o detalhe
+  // com quem vai, onde é e como entrar, aqui dentro, sem mandar para o navegador.
+  component MeetingRow: Column {
     id: meetingRow
     property var meeting: null
 
-    readonly property string destino: {
-      if (!meeting) return ""
-      return meeting.conference_url || meeting.html_link || ""
-    }
+    readonly property bool aberta: !!meeting && root.expandedUid === meeting.uid
+    readonly property var participantes: (meeting && meeting.attendees) ? meeting.attendees : []
 
-    implicitHeight: rowCol.implicitHeight + Style.space(8)
+    spacing: 0
 
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: rowHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
-    }
+    // ---- cabeçalho ------------------------------------------------------
+    Item {
+      id: cabecalho
+      width: meetingRow.width
+      implicitHeight: rowCol.implicitHeight + Style.space(8)
 
-    Column {
-      id: rowCol
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(1)
+      Rectangle {
+        anchors.fill: parent
+        radius: Style.cornerRadius
+        color: rowHover.containsMouse || meetingRow.aberta
+               ? root.alpha(root.foreground, 0.06) : "transparent"
+      }
 
-      Row {
-        width: parent.width
-        spacing: Style.space(8)
+      Column {
+        id: rowCol
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        spacing: Style.space(1)
 
-        Text {
-          textFormat: Text.PlainText
-          text: meetingRow.meeting ? root.formatClock(meetingRow.meeting.start) : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.bold: true
-          width: Style.space(38)
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          text: meetingRow.meeting && meetingRow.meeting.title ? meetingRow.meeting.title : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-          width: Math.max(0, parent.width - Style.space(46) - Style.space(20))
-        }
-
-        // Slot de largura fixa: o ícone de chamada e o botão de esconder se
-        // revezam DENTRO dele, então entrar com o mouse não reflui a linha.
-        Item {
-          width: Style.space(20)
-          height: acaoEsconder.height
-          anchors.verticalCenter: parent.verticalCenter
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
 
           Text {
-            anchors.centerIn: parent
             textFormat: Text.PlainText
-            opacity: !!(meetingRow.meeting && meetingRow.meeting.conference_url) && !rowHover.containsMouse ? 1 : 0
-            text: "󰏌"
-            color: root.dim
+            text: meetingRow.meeting ? root.formatClock(meetingRow.meeting.start) : ""
+            color: root.foreground
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            Behavior on opacity { NumberAnimation { duration: 120 } }
+            font.pixelSize: Style.font.body
+            font.bold: true
+            width: Style.space(38)
           }
 
-          // Agenda cheia de botão vira ruído: só acende com o mouse em cima.
-          PanelActionButton {
-            id: acaoEsconder
-            anchors.centerIn: parent
-            opacity: rowHover.containsMouse ? 1 : 0
-            enabled: rowHover.containsMouse
-            iconText: "󰈉"
-            tooltipText: "Não mostrar mais este evento (a série inteira)"
-            foreground: root.foreground
+          Text {
+            textFormat: Text.PlainText
+            text: meetingRow.meeting && meetingRow.meeting.title ? meetingRow.meeting.title : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            elide: Text.ElideRight
+            width: Math.max(0, parent.width - Style.space(46) - Style.space(20))
+          }
+
+          // Slot de largura fixa: o ícone de chamada e o botão de esconder se
+          // revezam DENTRO dele, então entrar com o mouse não reflui a linha.
+          Item {
+            width: Style.space(20)
+            height: acaoEsconder.height
+            anchors.verticalCenter: parent.verticalCenter
+
+            Text {
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              opacity: !!(meetingRow.meeting && meetingRow.meeting.conference_url) && !rowHover.containsMouse ? 1 : 0
+              text: "󰕧"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+
+            PanelActionButton {
+              id: acaoEsconder
+              anchors.centerIn: parent
+              opacity: rowHover.containsMouse ? 1 : 0
+              enabled: rowHover.containsMouse
+              iconText: "󰈉"
+              tooltipText: "Não mostrar mais este evento (a série inteira)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.hideMeeting(meetingRow.meeting)
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: text !== "" && !meetingRow.aberta
+          text: {
+            if (!meetingRow.meeting) return ""
+            var partes = []
+            if (meetingRow.meeting.account) partes.push(meetingRow.meeting.account)
+            var n = meetingRow.participantes.length
+            if (n > 0) partes.push(n + (n === 1 ? " participante" : " participantes"))
+            return partes.join(" · ")
+          }
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      MouseArea {
+        id: rowHover
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.toggleExpanded(meetingRow.meeting ? meetingRow.meeting.uid : "")
+      }
+
+      PanelToolTip {
+        visible: rowHover.containsMouse && !meetingRow.aberta
+        text: "Ver os detalhes da reunião"
+        fontFamily: root.fontFamily
+      }
+    }
+
+    // ---- detalhe --------------------------------------------------------
+    Column {
+      id: detalhe
+      visible: meetingRow.aberta
+      width: meetingRow.width - Style.space(18)
+      x: Style.space(12)
+      topPadding: Style.space(4)
+      bottomPadding: Style.space(8)
+      spacing: Style.space(5)
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        text: root.intervalo(meetingRow.meeting)
+              + (meetingRow.meeting && meetingRow.meeting.calendar_name
+                 ? "  ·  " + meetingRow.meeting.calendar_name : "")
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: !!(meetingRow.meeting && meetingRow.meeting.location)
+        text: "󰖎  " + (meetingRow.meeting ? String(meetingRow.meeting.location || "") : "")
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      PanelSectionHeader {
+        width: parent.width
+        visible: meetingRow.participantes.length > 0
+        text: meetingRow.participantes.length === 1
+              ? "1 PARTICIPANTE" : meetingRow.participantes.length + " PARTICIPANTES"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Repeater {
+        model: meetingRow.participantes
+
+        Item {
+          required property var modelData
+          width: detalhe.width
+          implicitHeight: pessoaNome.implicitHeight + Style.space(3)
+
+          Text {
+            id: pessoaResposta
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(16)
+            text: root.respostaGlyph(modelData.response)
+            color: modelData.response === "declined" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            id: pessoaEstado
+            textFormat: Text.PlainText
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.respostaLabel(modelData.response)
+            color: modelData.response === "declined" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            id: pessoaNome
+            textFormat: Text.PlainText
+            anchors.left: pessoaResposta.right
+            anchors.right: pessoaEstado.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            text: (modelData.name || modelData.email || "")
+                  + (modelData.organizer ? "  (organizador)" : "")
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
+          MouseArea {
+            id: pessoaHover
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+          }
+
+          PanelToolTip {
+            visible: pessoaHover.containsMouse && !!modelData.email
+            text: modelData.email
             fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            onClicked: root.hideMeeting(meetingRow.meeting)
-            Behavior on opacity { NumberAnimation { duration: 120 } }
           }
         }
       }
@@ -660,36 +841,38 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        visible: text !== ""
-        text: {
-          if (!meetingRow.meeting) return ""
-          var partes = []
-          if (meetingRow.meeting.account) partes.push(meetingRow.meeting.account)
-          var n = meetingRow.meeting.attendees ? meetingRow.meeting.attendees.length : 0
-          if (n > 0) partes.push(n + (n === 1 ? " participante" : " participantes"))
-          return partes.join(" · ")
-        }
+        visible: meetingRow.participantes.length === 0
+        text: "Sem convidados neste evento."
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
       }
-    }
 
-    MouseArea {
-      id: rowHover
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: meetingRow.destino !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
-      enabled: meetingRow.destino !== ""
-      onClicked: root.openPath(meetingRow.destino)
-    }
+      Row {
+        spacing: Style.space(8)
+        topPadding: Style.space(3)
 
-    PanelToolTip {
-      visible: rowHover.containsMouse && meetingRow.destino !== ""
-      text: meetingRow.meeting && meetingRow.meeting.conference_url
-            ? "Entrar na chamada" : "Abrir o evento no Google Calendar"
-      fontFamily: root.fontFamily
+        Button {
+          visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url)
+          text: "Entrar na chamada"
+          iconText: "󰕧"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          onClicked: root.openPath(meetingRow.meeting.conference_url)
+        }
+
+        Button {
+          visible: !!(meetingRow.meeting && meetingRow.meeting.html_link)
+          text: "No Google"
+          iconText: "󰏌"
+          foreground: root.fontFamily ? root.foreground : root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.openPath(meetingRow.meeting.html_link)
+        }
+      }
     }
   }
 
@@ -800,7 +983,7 @@ Panel {
           if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
           var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
           if (linha === "") return ""
-          return (noteRow.precisaSync ? "󰀦  " : "󰧘  ") + linha
+          return (noteRow.precisaSync ? "󰀦  " : "󰄬  ") + linha
         }
         color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
         font.family: root.fontFamily

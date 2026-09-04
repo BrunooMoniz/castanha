@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo
 class Attendee:
     name: str
     email: str
+    # Só a agenda do Google traz isto; o iCal deixa em branco.
+    response: str = ""
+    organizer: bool = False
+    optional: bool = False
 
 @dataclass
 class MeetingEvent:

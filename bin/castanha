@@ -106,7 +106,28 @@ def cmd_status(args):
         print(f"Próxima reunião: {next_m.get('title')} ({next_m.get('start')})")
 
 def cmd_daemon(args):
-    from castanha.daemon import run_daemon
+    from castanha.daemon import run_daemon, running_daemon_pid
+
+    if args.stop:
+        import signal as _sig
+        pid = running_daemon_pid()
+        if pid is None:
+            print("Nenhum daemon rodando.")
+            return
+        os.kill(pid, _sig.SIGTERM)
+        print(f"🌰 Daemon encerrado (PID {pid}).")
+        return
+
+    if args.status:
+        pid = running_daemon_pid()
+        print(f"🌰 Daemon rodando (PID {pid})." if pid else "Nenhum daemon rodando.")
+        return
+
+    ja = running_daemon_pid()
+    if ja is not None:
+        print(f"🌰 Já existe um daemon rodando (PID {ja}). Nada a fazer.")
+        return
+
     if args.background:
         subprocess.Popen([sys.executable, "-m", "castanha.daemon"], cwd=str(project_root), start_new_session=True)
         print("🌰 Daemon do Castanha iniciado em segundo plano.")
@@ -295,6 +316,8 @@ def main():
     # Daemon
     p_daemon = subparsers.add_parser("daemon", help="Gerencia o daemon em background")
     p_daemon.add_argument("--background", "-b", action="store_true", help="Roda em segundo plano desanexado")
+    p_daemon.add_argument("--stop", action="store_true", help="Encerra o daemon que estiver rodando")
+    p_daemon.add_argument("--status", action="store_true", help="Diz se há daemon rodando, e qual PID")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # Config
