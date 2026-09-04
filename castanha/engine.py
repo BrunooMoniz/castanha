@@ -7,7 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from castanha.audio import AudioRecorder, RecordingResult
+from castanha.audio import (
+    AUDIO_STATUS_MESSAGES,
+    AudioRecorder,
+    RecordingResult,
+    classify_audio,
+    is_default_source_muted,
+    measure_channel_levels,
+    probe_duration_seconds,
+)
 from castanha.calendar import MeetingEvent
 from castanha.config import load_config
 from castanha.state import StateManager
@@ -56,6 +64,18 @@ class CastanhaEngine:
         chosen_mode = mode or audio_cfg.get("default_mode", "dual")
         bitrate = audio_cfg.get("bitrate", "64k")
 
+        # O microfone mudo no teclado é invisível para o ffmpeg: ele grava
+        # silêncio digital sem reclamar. Avisar aqui é a diferença entre perder
+        # a reunião e perder dois segundos.
+        mic_muted = is_default_source_muted()
+        if mic_muted:
+            notify(
+                "Microfone mudo! 🔇",
+                "O microfone está mudo no sistema ou no teclado. Desmute antes de falar, "
+                "senão a gravação sai em silêncio.",
+                timeout=10000,
+            )
+
         temp_audio = Path(f"/tmp/castanha_rec_{int(time.time())}.ogg")
         proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate)
 
@@ -84,12 +104,18 @@ class CastanhaEngine:
             "started_at": datetime.now().isoformat(),
             "elapsed_seconds": 0,
             "current_meeting": current_meeting_info,
+            "mic_muted_at_start": mic_muted,
             "error": None,
         })
 
         mode_label = "Microfone + Chamada" if chosen_mode == "dual" else "Somente Microfone"
         notify("Gravação Iniciada 🌰", f"{meeting_title}\nModo: {mode_label}")
-        return {"status": "recording", "pid": proc.pid, "title": meeting_title}
+        return {
+            "status": "recording",
+            "pid": proc.pid,
+            "title": meeting_title,
+            "mic_muted": mic_muted,
+        }
 
     def pause_recording(self) -> Dict[str, Any]:
         state = self.state_mgr.read()
@@ -156,46 +182,69 @@ class CastanhaEngine:
         title = current_meeting.get("title") or "Reunião"
         mode = state.get("mode", "dual")
 
-        # 1. Transcrição (Whisper na Groq / VPS)
-        transcriber = get_transcriber(estimated_duration_sec=state.get("elapsed_seconds", 60))
-        try:
-            trans_res = transcriber.transcribe(audio_path, mode=mode)
-            raw_transcript = trans_res.text
-            provider_name = getattr(trans_res, "provider", getattr(transcriber, "__class__", {}).__name__)
-        except Exception as e:
-            print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...")
-            try:
-                from castanha.transcription import VpsSshTranscriber
-                trans_res = VpsSshTranscriber().transcribe(audio_path, mode=mode)
-                raw_transcript = trans_res.text
-                provider_name = trans_res.provider
-            except Exception as err2:
-                raw_transcript = f"[Erro na transcrição: {err2}]"
-                provider_name = "failed"
+        # 1. Sanidade do áudio antes de qualquer coisa cara.
+        # Whisper alucina em cima de silêncio ("Thank you. Thank you."), então
+        # gravação muda não vai para transcrição nenhuma.
+        levels = measure_channel_levels(audio_path, mode=mode)
+        audio_status = classify_audio(levels)
+        audio_levels = [
+            {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
+             "max_db": ch.max_db, "silencio": ch.silent}
+            for ch in levels
+        ]
+        real_duration = probe_duration_seconds(audio_path)
 
-        # 2. Metadados e Bronze
+        # 2. Transcrição (Whisper na Groq / VPS)
+        if audio_status == "sem_audio":
+            raw_transcript = ""
+            provider_name = "nenhum (áudio em silêncio)"
+        else:
+            estimated = real_duration or state.get("elapsed_seconds") or 60
+            transcriber = get_transcriber(estimated_duration_sec=estimated)
+            try:
+                trans_res = transcriber.transcribe(audio_path, mode=mode)
+                raw_transcript = trans_res.text
+                provider_name = getattr(trans_res, "provider", getattr(transcriber, "__class__", {}).__name__)
+            except Exception as e:
+                print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...")
+                try:
+                    from castanha.transcription import VpsSshTranscriber
+                    trans_res = VpsSshTranscriber().transcribe(audio_path, mode=mode)
+                    raw_transcript = trans_res.text
+                    provider_name = trans_res.provider
+                except Exception as err2:
+                    raw_transcript = f"[Erro na transcrição: {err2}]"
+                    provider_name = "failed"
+
+        # 3. Metadados e Bronze
         slug = self.storage.create_meeting_slug(title)
         metadata = {
             "slug": slug,
             "title": title,
             "recorded_at": state.get("started_at") or datetime.now().isoformat(),
-            "duration_seconds": state.get("elapsed_seconds", 0),
+            # Duração medida no arquivo: o cronômetro do daemon fica em zero
+            # quando o daemon não está rodando.
+            "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
             "mode": mode,
             "transcription_provider": provider_name,
+            "audio_status": audio_status,
+            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+            "audio_levels": audio_levels,
+            "mic_muted_at_start": state.get("mic_muted_at_start"),
             "calendar_event": current_meeting,
         }
 
         bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, raw_transcript)
 
-        # 3. Processamento Silver (Markdown)
+        # 4. Processamento Silver (Markdown)
         silver_content = self.summarizer.generate_silver(metadata, raw_transcript)
         silver_path = self.storage.save_silver(slug, silver_content)
 
-        # 4. Processamento Gold (Fatos para Zinom / LLM Wiki)
+        # 5. Processamento Gold (Fatos para Zinom / LLM Wiki)
         gold_data = self.summarizer.generate_gold(metadata, silver_content, raw_transcript)
         gold_path = self.storage.save_gold(slug, gold_data)
 
-        # 5. Ingestão Zinom (se habilitado)
+        # 6. Ingestão Zinom (se habilitado)
         zinom_status = self.zinom.ingest_meeting(metadata, silver_content, gold_data)
 
         # Limpa arquivo temporário
@@ -211,6 +260,8 @@ class CastanhaEngine:
             "bronze_dir": str(bronze_dir),
             "silver_file": str(silver_path),
             "gold_file": str(gold_path),
+            "audio_status": audio_status,
+            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
             "zinom": zinom_status,
         }
 
@@ -219,11 +270,20 @@ class CastanhaEngine:
             "pid": None,
             "audio_path": None,
             "current_meeting": None,
+            "mic_muted_at_start": None,
             "last_result": result_summary,
             "elapsed_seconds": 0,
         })
 
-        notify("Notas Prontas! 🌰", f"Reunião: {title}\nSalvo em {silver_path.name}")
+        # A notificação diz o que realmente aconteceu: "Notas prontas" em cima de
+        # uma gravação muda foi exatamente o que enganou no teste de 04/09.
+        if audio_status == "sem_audio":
+            notify("Gravação sem áudio 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['sem_audio']}", timeout=10000)
+        elif audio_status == "mic_mudo":
+            notify("Notas prontas, sem o seu microfone 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['mic_mudo']}", timeout=10000)
+        else:
+            notify("Notas Prontas! 🌰", f"Reunião: {title}\nSalvo em {silver_path.name}")
+
         return {"status": "success", "result": result_summary}
 
     def toggle_recording(self) -> Dict[str, Any]:

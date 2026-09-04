@@ -25,6 +25,8 @@ def cmd_start(args):
         print(f"🌰 Gravação iniciada com sucesso! [PID: {res.get('pid')}]")
         print(f"📌 Título: {res.get('title')}")
         print(f"🎙️ Modo: {mode}")
+        if res.get("mic_muted"):
+            print("🔇 ATENÇÃO: o microfone está MUDO no sistema/teclado. Desmute antes de falar.")
     else:
         print(f"❌ Erro: {res.get('message')}")
         sys.exit(1)
@@ -35,7 +37,18 @@ def cmd_stop(args):
     res = engine.stop_recording()
     if res.get("status") == "success":
         result = res.get("result", {})
-        print("✅ Reunião finalizada com sucesso!")
+        audio_status = result.get("audio_status", "ok")
+        if audio_status == "sem_audio":
+            print("🔇 Reunião finalizada SEM ÁUDIO.")
+        elif audio_status == "mic_mudo":
+            print("🔇 Reunião finalizada, mas o seu microfone saiu em silêncio.")
+        else:
+            print("✅ Reunião finalizada com sucesso!")
+        if result.get("audio_diagnostico") and audio_status != "ok":
+            print(f"   {result['audio_diagnostico']}")
+        zinom = result.get("zinom") or {}
+        for err in zinom.get("errors", []):
+            print(f"⚠️  Zinom: {err}")
         print(f"📁 Bronze: {result.get('bronze_dir')}")
         print(f"📝 Silver (Notas): {result.get('silver_file')}")
         print(f"🧠 Gold (Fatos): {result.get('gold_file')}")

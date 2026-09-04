@@ -15,6 +15,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "started_at": None,
     "elapsed_seconds": 0,
     "current_meeting": None,
+    "mic_muted_at_start": None,
     "next_meeting": None,
     "last_result": None,
     "error": None,

@@ -6,7 +6,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 @dataclass
 class AudioDeviceInfo:
@@ -151,3 +151,155 @@ class AudioRecorder:
             mode=self.mode,
             format=self.output_path.suffix.lstrip("."),
         )
+
+
+# ---------------------------------------------------------------------------
+# Verificação de sanidade do áudio
+#
+# O teste de 2026-09-04 gravou 35s com o microfone mudo no teclado da Dell: o
+# canal do mic saiu em silêncio digital (-91 dB) e o Whisper alucinou
+# "Thank you. Thank you." em cima do nada. O Castanha declarou sucesso.
+# As funções abaixo existem para que isso nunca mais passe calado.
+# ---------------------------------------------------------------------------
+
+# Um canal só conta como mudo quando as duas coisas valem: energia média
+# praticamente nula E nenhum pico perto de nível de fala. O par é necessário
+# porque o Opus vaza um pouco do canal alto no canal mudo (medido: canal em
+# silêncio absoluto sobe para pico -38 dB quando o outro está em 0 dBFS), e
+# porque só a média derrubaria uma reunião em que alguém falou três segundos.
+#
+# Referências medidas em gravações reais:
+#   mic mudo no teclado ....... média -91,0 / pico -91,0
+#   som do sistema com bipes .. média -48,5 / pico -10,6
+#   fala normal ............... média -34,4 / pico -14,1
+SILENCE_MEAN_DB = -60.0
+SILENCE_MAX_DB = -35.0
+
+
+def is_silent(mean_db: float, max_db: float) -> bool:
+    return mean_db <= SILENCE_MEAN_DB and max_db <= SILENCE_MAX_DB
+
+
+@dataclass
+class ChannelLevels:
+    channel: int
+    label: str
+    mean_db: float
+    max_db: float
+    silent: bool
+
+
+def is_default_source_muted() -> Optional[bool]:
+    """True/False se der para saber pelo PipeWire; None se não der."""
+    try:
+        res = subprocess.run(
+            ["pactl", "get-source-mute", "@DEFAULT_SOURCE@"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if res.returncode != 0:
+            return None
+        out = res.stdout.strip().lower()
+        if "yes" in out:
+            return True
+        if "no" in out:
+            return False
+    except Exception:
+        pass
+    return None
+
+
+def probe_duration_seconds(audio_path: Path) -> Optional[float]:
+    """Duração real do arquivo, medida no container (não no cronômetro do daemon)."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return round(float(res.stdout.strip()), 2)
+    except Exception:
+        pass
+    return None
+
+
+def probe_channel_count(audio_path: Path) -> int:
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=channels",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return int(res.stdout.strip())
+    except Exception:
+        pass
+    return 1
+
+
+def _channel_label(index: int, mode: str, total: int) -> str:
+    if mode == "dual" and total >= 2:
+        return "microfone" if index == 0 else "sistema"
+    return "microfone"
+
+
+def measure_channel_levels(audio_path: Path, mode: str = "dual") -> List[ChannelLevels]:
+    """Nível de cada canal via ffmpeg volumedetect. Lista vazia se não der para medir."""
+    total = probe_channel_count(audio_path)
+    levels: List[ChannelLevels] = []
+    for idx in range(total):
+        try:
+            res = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(audio_path),
+                 "-af", f"pan=mono|c0=c{idx},volumedetect", "-f", "null", "-"],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception:
+            continue
+
+        mean_db, max_db = None, None
+        for line in res.stderr.splitlines():
+            if "mean_volume:" in line:
+                mean_db = _parse_db(line)
+            elif "max_volume:" in line:
+                max_db = _parse_db(line)
+        if max_db is None:
+            continue
+
+        mean_value = mean_db if mean_db is not None else max_db
+        levels.append(ChannelLevels(
+            channel=idx,
+            label=_channel_label(idx, mode, total),
+            mean_db=mean_value,
+            max_db=max_db,
+            silent=is_silent(mean_value, max_db),
+        ))
+    return levels
+
+
+def _parse_db(line: str) -> Optional[float]:
+    try:
+        return float(line.split(":")[-1].replace("dB", "").strip())
+    except Exception:
+        return None
+
+
+def classify_audio(levels: List[ChannelLevels]) -> str:
+    """'ok' | 'mic_mudo' | 'sem_audio' | 'desconhecido'."""
+    if not levels:
+        return "desconhecido"
+    if all(ch.silent for ch in levels):
+        return "sem_audio"
+    mic = next((ch for ch in levels if ch.label == "microfone"), None)
+    if mic is not None and mic.silent:
+        return "mic_mudo"
+    return "ok"
+
+
+AUDIO_STATUS_MESSAGES = {
+    "ok": "Áudio capturado nos dois canais.",
+    "mic_mudo": "O canal do microfone saiu em silêncio: o mic estava mudo (teclado ou sistema). Só o áudio da chamada foi gravado.",
+    "sem_audio": "Nenhum canal captou áudio: a gravação está em silêncio do início ao fim.",
+    "desconhecido": "Não foi possível medir os níveis do áudio.",
+}
