@@ -8,7 +8,7 @@ import sys
 import time
 from typing import Set
 
-from castanha.calendar import get_next_meeting, get_upcoming_meetings
+from castanha.agenda import collect_upcoming
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.state import StateManager
@@ -33,6 +33,10 @@ class CastanhaDaemon:
         poll_interval = cal_cfg.get("poll_interval_sec", 60)
         notify_before_min = cal_cfg.get("notify_minutes_before", 2)
         feeds = cal_cfg.get("feeds", [])
+        zinom_cfg = cal_cfg.get("zinom", {}) or {}
+        agenda_ligada = bool(cal_cfg.get("enabled", True)) and (
+            bool(feeds) or bool(zinom_cfg.get("enabled", True))
+        )
 
         while self.running:
             now = time.time()
@@ -51,26 +55,30 @@ class CastanhaDaemon:
                     except Exception:
                         pass
 
-            # 2. Verificação periódica de calendário
-            if feeds and (now - last_calendar_check > poll_interval):
+            # 2. Verificação periódica de calendário (iCal + contas Google do Zinom)
+            if agenda_ligada and (now - last_calendar_check > poll_interval):
                 last_calendar_check = now
                 try:
-                    next_m = get_next_meeting(feeds)
-                    if next_m:
-                        self.state_mgr.write({"next_meeting": next_m.to_dict()})
+                    proximas = collect_upcoming(self.config)
+                    self.state_mgr.write({
+                        "next_meeting": proximas[0].to_dict() if proximas else None,
+                        "upcoming_meetings": [m.to_dict() for m in proximas],
+                        "agenda_error": None,
+                    })
 
-                        # Checa se está a <= notify_before_min do início
+                    if proximas:
+                        next_m = proximas[0]
                         now_utc = datetime.datetime.now(datetime.timezone.utc)
-                        time_until = (next_m.start - now_utc).total_seconds()
+                        inicio = next_m.start if next_m.start.tzinfo else next_m.start.replace(
+                            tzinfo=datetime.timezone.utc)
+                        time_until = (inicio - now_utc).total_seconds()
 
-                        # Notifica se faltar entre 0 e (notify_before_min * 60) segundos
                         if 0 <= time_until <= (notify_before_min * 60) and next_m.uid not in self.notified_meeting_uids:
                             self.notified_meeting_uids.add(next_m.uid)
                             self._trigger_meeting_alert(next_m)
-                    else:
-                        self.state_mgr.write({"next_meeting": None})
                 except Exception as e:
                     print(f"[Castanha Daemon] Erro ao checar calendário: {e}")
+                    self.state_mgr.write({"agenda_error": str(e)})
 
             time.sleep(1)
 

@@ -122,15 +122,42 @@ def cmd_config(args):
 
 def cmd_notes(args):
     storage = MeetingStorage()
-    notes = storage.list_recent_meetings(limit=10)
+    notes = storage.list_recent_meetings(limit=args.limit)
+
+    if args.json:
+        # É por aqui que o painel do Omarchy lista as últimas reuniões.
+        print(json.dumps({"notes": notes, "silver_dir": str(storage.silver_dir)},
+                         ensure_ascii=False))
+        return
+
     if not notes:
         print("Nenhuma nota de reunião gravada ainda.")
         return
     print("Últimas reuniões registradas:")
     for idx, n in enumerate(notes, 1):
-        print(f" {idx}. {n['slug']} -> {n['silver_path']}")
+        print(f" {idx}. {n['title']} ({n['when']}) -> {n['silver_path']}")
     if args.open:
         subprocess.Popen(["xdg-open", str(storage.silver_dir)])
+
+
+def cmd_agenda(args):
+    from castanha.agenda import collect_upcoming
+    proximas = collect_upcoming(window_minutes=args.horas * 60)
+
+    if args.json:
+        print(json.dumps({"meetings": [m.to_dict() for m in proximas]}, ensure_ascii=False))
+        return
+
+    if not proximas:
+        print(f"Nenhuma reunião nas próximas {args.horas}h.")
+        return
+    print(f"Próximas reuniões ({args.horas}h):")
+    for m in proximas:
+        hora = m.start.astimezone().strftime("%d/%m %H:%M")
+        conta = f" · {m.account}" if m.account else ""
+        pessoas = f" · {len(m.attendees)} participantes" if m.attendees else ""
+        chamada = f"\n      {m.conference_url}" if m.conference_url else ""
+        print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -181,7 +208,15 @@ def main():
     # Notes
     p_notes = subparsers.add_parser("notes", help="Lista as últimas reuniões")
     p_notes.add_argument("--open", action="store_true", help="Abre a pasta de notas no gerenciador de arquivos")
+    p_notes.add_argument("--json", action="store_true", help="Saída em JSON (usada pelo plugin do Omarchy)")
+    p_notes.add_argument("--limit", type=int, default=10, help="Quantas reuniões listar")
     p_notes.set_defaults(func=cmd_notes)
+
+    # Agenda
+    p_agenda = subparsers.add_parser("agenda", help="Próximas reuniões das contas Google conectadas no Zinom")
+    p_agenda.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_agenda.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_agenda.set_defaults(func=cmd_agenda)
 
     args = parser.parse_args()
     if not args.command:

@@ -24,6 +24,12 @@ class MeetingEvent:
     conference_url: Optional[str] = None
     description: Optional[str] = None
     location: Optional[str] = None
+    # Vindos da agenda do Zinom (Google), sem equivalente no iCal.
+    html_link: Optional[str] = None
+    calendar_name: Optional[str] = None
+    account: Optional[str] = None
+    conference_provider: Optional[str] = None
+    source: str = "ics"
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

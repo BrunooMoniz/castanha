@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from castanha.config import load_config
 
+def _title_from_slug(slug: str) -> str:
+    """Fallback para reunião cujo Bronze sumiu: '2026-09-04_1042_reuniao' -> 'reuniao'."""
+    partes = slug.split("_", 2)
+    return partes[2].replace("-", " ").strip().capitalize() if len(partes) == 3 else slug
+
+
 def slugify(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^\w\s-]", "", text)
@@ -91,15 +97,35 @@ class MeetingStorage:
         return target_file
 
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """As últimas reuniões, com o que o painel precisa para listá-las.
+
+        Título e diagnóstico saem do metadata.json do Bronze; o slug é o
+        vínculo entre as três camadas.
+        """
         results = []
         if not self.silver_dir.exists():
             return results
 
         files = sorted(self.silver_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
         for f in files[:limit]:
+            slug = f.stem
+            meta = self._read_bronze_metadata(slug)
             results.append({
-                "slug": f.stem,
+                "slug": slug,
+                "title": meta.get("title") or _title_from_slug(slug),
+                "when": meta.get("recorded_at") or "",
+                "duration_seconds": meta.get("duration_seconds") or 0,
+                "audio_status": meta.get("audio_status") or "ok",
+                "audio_diagnostico": meta.get("audio_diagnostico") or "",
                 "silver_path": str(f),
+                "bronze_dir": str(self.bronze_dir / slug),
                 "modified": f.stat().st_mtime,
             })
         return results
+
+    def _read_bronze_metadata(self, slug: str) -> Dict[str, Any]:
+        arquivo = self.bronze_dir / slug / "metadata.json"
+        try:
+            return json.loads(arquivo.read_text(encoding="utf-8"))
+        except Exception:
+            return {}

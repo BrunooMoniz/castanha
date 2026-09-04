@@ -17,6 +17,8 @@ DEFAULT_STATE: Dict[str, Any] = {
     "current_meeting": None,
     "mic_muted_at_start": None,
     "next_meeting": None,
+    "upcoming_meetings": [],
+    "agenda_error": None,
     "last_result": None,
     "error": None,
     "updated_at": 0,
@@ -57,8 +59,10 @@ class StateManager:
         return current
 
     def reset(self) -> Dict[str, Any]:
-        next_meeting = self.read().get("next_meeting")
+        # A agenda não é estado da gravação: sobrevive ao reset.
+        atual = self.read()
         state = dict(DEFAULT_STATE)
-        state["next_meeting"] = next_meeting
+        for chave in ("next_meeting", "upcoming_meetings", "agenda_error"):
+            state[chave] = atual.get(chave)
         state["updated_at"] = int(time.time())
         return self.write(state)

@@ -44,6 +44,13 @@ Panel {
   readonly property var lastResult: stateData ? stateData.last_result : null
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
 
+  // A agenda vem do daemon, que a busca nas contas Google conectadas no Zinom.
+  readonly property var upcoming: (stateData && stateData.upcoming_meetings) ? stateData.upcoming_meetings : []
+  readonly property string agendaError: (stateData && stateData.agenda_error) ? String(stateData.agenda_error) : ""
+
+  // As notas saem da CLI, que é quem sabe onde o acervo mora.
+  property var recentNotes: []
+
   readonly property string mode: stateData && stateData.mode ? stateData.mode : "dual"
   readonly property string modeLabel: mode === "mic_only" ? "somente microfone" : "microfone + chamada"
 
@@ -117,14 +124,24 @@ Panel {
   readonly property string barText: {
     if (isRecording || isPaused) return glyph + "  " + formatTime(elapsedSeconds)
     if (isProcessing) return glyph + "  salvando"
-    if (nextMeeting && nextMeeting.title) {
+    // Reunião de amanhã na barra vira letreiro. Só entra o que é iminente.
+    if (nextMeetingSoon) {
       var t = String(nextMeeting.title)
-      var hora = formatClock(nextMeeting.start)
-      var curto = t.length > 18 ? t.substring(0, 17) + "…" : t
-      return "󰻱  " + (hora ? hora + " " : "") + curto
+      var curto = t.length > 14 ? t.substring(0, 13) + "…" : t
+      return "󰻱  " + formatClock(nextMeeting.start) + " " + curto
     }
     return glyph
   }
+
+  // Trinta minutos: perto o bastante para valer o espaço na barra.
+  readonly property int minutosParaProxima: {
+    if (!nextMeeting || !nextMeeting.start) return -1
+    var ms = parseIso(nextMeeting.start)
+    if (ms <= 0) return -1
+    return Math.round((ms - nowMs) / 60000)
+  }
+  readonly property bool nextMeetingSoon: !!(nextMeeting && nextMeeting.title)
+    && minutosParaProxima >= -5 && minutosParaProxima <= 30
 
   readonly property string statusLabel: {
     if (isRecording) return "gravando"
@@ -137,10 +154,57 @@ Panel {
     if (isRecording || isPaused) return formatTime(elapsedSeconds) + " · " + modeLabel
     if (isProcessing) return "transcrevendo e escrevendo as notas"
     if (micMuted) return "microfone mudo no sistema"
+    if (nextMeetingSoon) return "próxima reunião em " + Math.max(0, minutosParaProxima) + " min"
     return "pronto para gravar"
   }
 
   function run(cmd) { if (root.bar) root.bar.run(cmd) }
+
+  function openPath(path) {
+    if (!path) return
+    root.run("xdg-open '" + String(path).replace(/'/g, "'\\''") + "'")
+    root.close()
+  }
+
+  // "hoje 10:42", "ontem 18:03", "02/09 14:00".
+  function formatWhen(iso) {
+    var ms = parseIso(iso)
+    if (ms <= 0) return ""
+    var d = new Date(ms)
+    var hoje = new Date()
+    var mesmoDia = function(a, b) {
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+    }
+    var ontem = new Date(hoje.getTime() - 86400000)
+    var hora = pad(d.getHours()) + ":" + pad(d.getMinutes())
+    if (mesmoDia(d, hoje)) return "hoje " + hora
+    if (mesmoDia(d, ontem)) return "ontem " + hora
+    return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + " " + hora
+  }
+
+  // O aviso do Zinom em português, e não um triângulo sem legenda.
+  function zinomLine(result) {
+    if (!result) return ""
+    var z = result.zinom
+    if (!z) return ""
+    if (z.status === "skipped") return "Não enviado ao Zinom: " + (z.reason || "sem motivo declarado")
+    if (z.errors && z.errors.length > 0) {
+      // "Erro no remember: HTTP 406..." é linguagem de log, não de produto.
+      var motivo = String(z.errors[0]).replace(/^Erro no \w+( para .+?)?: /, "")
+      if (motivo.length > 60) motivo = motivo.substring(0, 59) + "…"
+      return "Não salvou no Zinom (" + motivo + ")"
+    }
+    var fatos = z.facts_ingested || 0
+    if (fatos > 0) return "Salvo no Zinom, com " + fatos + (fatos === 1 ? " fato" : " fatos")
+    if (z.remember) return "Salvo no Zinom"
+    return ""
+  }
+
+  function zinomFalhou(result) {
+    if (!result || !result.zinom) return false
+    var z = result.zinom
+    return (z.errors && z.errors.length > 0) || z.status === "error"
+  }
 
   function toggleRecording() {
     run(root.isBusy ? "castanha stop" : "castanha start")
@@ -161,6 +225,27 @@ Panel {
       } catch (e) {}
     }
   }
+
+  Process {
+    id: notesProcess
+    running: false
+    command: ["castanha", "notes", "--json", "--limit", "4"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          root.recentNotes = data.notes || []
+        } catch (e) {
+          root.recentNotes = []
+        }
+      }
+    }
+  }
+
+  function refreshNotes() { if (!notesProcess.running) notesProcess.running = true }
+
+  onOpenedChanged: if (opened) refreshNotes()
 
   // Só corre enquanto há o que contar.
   Timer {
@@ -188,6 +273,7 @@ Panel {
       if (root.isPaused) return "Gravação pausada em " + root.formatTime(root.elapsedSeconds)
       if (root.isProcessing) return "Processando as notas da reunião"
       if (root.micMuted) return "Castanha · o microfone está mudo"
+      if (root.nextMeetingSoon) return root.nextMeeting.title + " em " + Math.max(0, root.minutosParaProxima) + " min"
       return "Castanha · clique para o painel, direito para gravar"
     }
 
@@ -349,112 +435,304 @@ Panel {
           }
         }
 
-        // ---------- Reunião ----------
-        PanelSeparator { width: parent.width; foreground: root.foreground }
-
-        Column {
-          width: parent.width
-          spacing: Style.space(6)
-
-          PanelSectionHeader {
-            width: parent.width
-            text: root.isBusy ? "REUNIÃO ATUAL" : "PRÓXIMA REUNIÃO"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            text: root.meeting && root.meeting.title ? root.meeting.title : "Nenhuma reunião no calendário"
-            color: root.meeting && root.meeting.title ? root.foreground : root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            visible: text !== ""
-            text: {
-              if (!root.meeting) return ""
-              var partes = []
-              var hora = root.formatClock(root.meeting.start)
-              if (hora) partes.push(hora)
-              var convidados = root.meeting.attendees ? root.meeting.attendees.length : 0
-              if (convidados > 0) partes.push(convidados + (convidados === 1 ? " participante" : " participantes"))
-              return partes.join(" · ")
-            }
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
-
-        // ---------- Última reunião ----------
+        // ---------- Reunião em curso ----------
         PanelSeparator {
           width: parent.width
-          visible: !!root.lastResult
+          visible: root.isBusy
           foreground: root.foreground
         }
 
         Column {
           width: parent.width
-          visible: !!root.lastResult
-          spacing: Style.space(6)
+          visible: root.isBusy
+          spacing: Style.space(4)
 
           PanelSectionHeader {
             width: parent.width
-            text: "ÚLTIMA REUNIÃO"
+            text: "REUNIÃO ATUAL"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
 
-          Item {
-            width: parent.width
-            implicitHeight: Math.max(lastTitle.implicitHeight, lastMeta.implicitHeight)
-
-            Text {
-              id: lastTitle
-              textFormat: Text.PlainText
-              text: root.lastResult && root.lastResult.title ? root.lastResult.title : ""
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              elide: Text.ElideRight
-              anchors.left: parent.left
-              anchors.right: lastMeta.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
-              id: lastMeta
-              textFormat: Text.PlainText
-              text: root.lastZinomErrors > 0 ? "󰀦 Zinom" : (root.lastResult && root.lastResult.zinom && root.lastResult.zinom.facts_ingested > 0 ? "󰧘 " + root.lastResult.zinom.facts_ingested : "")
-              visible: text !== ""
-              color: root.lastZinomErrors > 0 ? root.urgent : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-            }
-          }
-
-          // O diagnóstico do áudio só aparece quando há o que dizer.
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            visible: root.lastHadProblem
-            text: "󰀦  " + (root.lastResult && root.lastResult.audio_diagnostico ? root.lastResult.audio_diagnostico : "")
-            color: root.urgent
+            text: root.currentMeeting && root.currentMeeting.title ? root.currentMeeting.title : "Gravação avulsa"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        // ---------- Próximas reuniões ----------
+        PanelSeparator { width: parent.width; foreground: root.foreground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "PRÓXIMAS REUNIÕES"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            visible: root.upcoming.length === 0
+            text: root.agendaError !== "" ? "Agenda indisponível: " + root.agendaError
+                                          : "Nada nas próximas horas"
+            color: root.agendaError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
+
+          Repeater {
+            model: root.upcoming.slice(0, 4)
+            MeetingRow {
+              required property var modelData
+              width: parent.width
+              meeting: modelData
+            }
+          }
+        }
+
+        // ---------- Notas recentes ----------
+        PanelSeparator {
+          width: parent.width
+          visible: root.recentNotes.length > 0
+          foreground: root.foreground
+        }
+
+        Column {
+          width: parent.width
+          visible: root.recentNotes.length > 0
+          spacing: Style.space(4)
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "NOTAS RECENTES"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Repeater {
+            model: root.recentNotes
+            NoteRow {
+              required property var modelData
+              required property int index
+              width: parent.width
+              note: modelData
+              // O destino do Zinom só vale para a reunião mais recente: é a
+              // única que o estado ainda descreve.
+              zinomText: index === 0 ? root.zinomLine(root.lastResult) : ""
+              zinomFailed: index === 0 && root.zinomFalhou(root.lastResult)
+            }
+          }
         }
       }
+    }
+  }
+
+  // ------------------------------------------------------------------ linhas
+
+  // Uma reunião da agenda: hora, título, e de qual conta ela vem. Clicar entra
+  // na chamada quando há link, e abre o evento no Google quando não há.
+  component MeetingRow: Item {
+    id: meetingRow
+    property var meeting: null
+
+    readonly property string destino: {
+      if (!meeting) return ""
+      return meeting.conference_url || meeting.html_link || ""
+    }
+
+    implicitHeight: rowCol.implicitHeight + Style.space(8)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: rowHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
+    }
+
+    Column {
+      id: rowCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(1)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          text: meetingRow.meeting ? root.formatClock(meetingRow.meeting.start) : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+          width: Style.space(38)
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: meetingRow.meeting && meetingRow.meeting.title ? meetingRow.meeting.title : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+          width: parent.width - Style.space(46) - (chamadaGlyph.visible ? Style.space(18) : 0)
+        }
+
+        Text {
+          id: chamadaGlyph
+          textFormat: Text.PlainText
+          visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url)
+          text: "󰏌"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: text !== ""
+        text: {
+          if (!meetingRow.meeting) return ""
+          var partes = []
+          if (meetingRow.meeting.account) partes.push(meetingRow.meeting.account)
+          var n = meetingRow.meeting.attendees ? meetingRow.meeting.attendees.length : 0
+          if (n > 0) partes.push(n + (n === 1 ? " participante" : " participantes"))
+          return partes.join(" · ")
+        }
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+
+    MouseArea {
+      id: rowHover
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: meetingRow.destino !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+      enabled: meetingRow.destino !== ""
+      onClicked: root.openPath(meetingRow.destino)
+    }
+
+    PanelToolTip {
+      visible: rowHover.containsMouse && meetingRow.destino !== ""
+      text: meetingRow.meeting && meetingRow.meeting.conference_url
+            ? "Entrar na chamada" : "Abrir o evento no Google Calendar"
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // Uma reunião já gravada: clicar abre as notas em Markdown.
+  component NoteRow: Item {
+    id: noteRow
+    property var note: null
+    property string zinomText: ""
+    property bool zinomFailed: false
+
+    readonly property bool comProblema: !!(note && note.audio_status && note.audio_status !== "ok"
+                                           && note.audio_status !== "desconhecido")
+
+    implicitHeight: noteCol.implicitHeight + Style.space(8)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: noteHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
+    }
+
+    Column {
+      id: noteCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(1)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          text: "󰈙"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          text: noteRow.note && noteRow.note.title ? noteRow.note.title : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+          width: Math.max(0, parent.width - Style.space(24) - quando.implicitWidth - Style.space(8))
+        }
+
+        Text {
+          id: quando
+          textFormat: Text.PlainText
+          text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: noteRow.comProblema
+        text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: noteRow.zinomText !== ""
+        text: (noteRow.zinomFailed ? "󰀦  " : "󰧘  ") + noteRow.zinomText
+        color: noteRow.zinomFailed ? root.urgent : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+    }
+
+    MouseArea {
+      id: noteHover
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.openPath(noteRow.note ? noteRow.note.silver_path : "")
+    }
+
+    PanelToolTip {
+      visible: noteHover.containsMouse
+      text: "Abrir as notas desta reunião"
+      fontFamily: root.fontFamily
     }
   }
 }

@@ -1,13 +1,13 @@
 """Agenda pelo hub Zinom, que é onde as contas Google do Bruno estão conectadas.
 
-Por que aqui e não um cliente de Google Calendar: ele usa cinco contas Google e
-quem resolve isso é o Zinom. O Castanha não guarda credencial de ninguém, só
-fala com o hub.
+Por que aqui e não um cliente de Google Calendar próprio: ele usa cinco contas
+Google, e quem já resolve isso é o Zinom. O Castanha não guarda credencial de
+ninguém, só fala com o hub.
 
-Limite conhecido da tool `list_events`: ela devolve título, início, fim, local
-e o link do evento, e **não** devolve participantes nem o link da chamada.
-Essas duas coisas existem no acervo indexado do Zinom, então a próxima reunião
-(só ela, que é onde isso importa) é enriquecida por uma busca estrita lá.
+Usa `list_event_details`, que devolve o evento inteiro (participantes,
+organizador e o link da chamada já resolvido). A `list_events` fica como
+segunda opção, para o caso de o hub ainda não ter a tool nova: aí a reunião
+aparece com título e horário, sem participantes e sem link.
 """
 
 import datetime
@@ -18,23 +18,15 @@ from typing import Any, Dict, List, Optional
 
 from castanha.calendar import Attendee, MeetingEvent, extract_conference_url
 from castanha.config import load_config
-from castanha.zinom_adapter import ZinomError, ZinomMcpClient, _tool_text
+from castanha.zinom_adapter import ZinomError, ZinomMcpClient, tool_json
 
 # A lista de agendas quase não muda; os eventos mudam.
 CALENDARS_TTL_SEC = 3600
 
 
-def _tool_payload(result: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        data = json.loads(_tool_text(result))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def _parse_google_dt(node: Optional[Dict[str, Any]]) -> Optional[datetime.datetime]:
     """Aceita o par {dateTime, timeZone} e o {date} de evento de dia inteiro."""
-    if not node:
+    if not isinstance(node, dict):
         return None
     raw = node.get("dateTime")
     if raw:
@@ -56,8 +48,12 @@ def _is_all_day(event: Dict[str, Any]) -> bool:
     return "date" in (event.get("start") or {})
 
 
-def _normalize(text: str) -> str:
+def _normalize(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def _nome_de_email(email: str) -> str:
+    return email.split("@")[0].replace(".", " ").replace("_", " ").title()
 
 
 class ZinomCalendar:
@@ -73,14 +69,20 @@ class ZinomCalendar:
         self.enabled = bool(c_cfg.get("enabled", True)) and bool(self.token)
         self.window_hours = int(c_cfg.get("window_hours", 12))
         self.skip_all_day = bool(c_cfg.get("skip_all_day", True))
-        self.enrich_next = bool(c_cfg.get("enrich_next", True))
         # Vazio quer dizer "a agenda principal de cada conta conectada": é o que
-        # sobra de reunião de verdade quando se tira feriado e aniversário.
+        # sobra de reunião de verdade depois de tirar feriado e aniversário.
         self.wanted = [str(x) for x in (c_cfg.get("calendars") or [])]
+
+        # A agenda não muda de minuto em minuto, e o endpoint tem rate limit
+        # de 60 requisições por minuto para tudo o que o Bruno usa.
+        self.poll_interval_sec = int(c_cfg.get("poll_interval_sec", 300))
 
         self._client: Optional[ZinomMcpClient] = None
         self._calendars: List[Dict[str, Any]] = []
         self._calendars_at: float = 0.0
+        self._detalhe_disponivel: Optional[bool] = None
+        self._cache: List[MeetingEvent] = []
+        self._cache_at: float = 0.0
 
     # ------------------------------------------------------------- transporte
     def _connect(self) -> ZinomMcpClient:
@@ -93,11 +95,11 @@ class ZinomCalendar:
 
     def _call(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            return _tool_payload(self._connect().call_tool(name, args))
+            return tool_json(self._connect().call_tool(name, args))
         except ZinomError:
-            # Sessão morta ou expirada: uma segunda tentativa com sessão nova.
+            # Uma segunda tentativa com sessão nova antes de desistir.
             self._client = None
-            return _tool_payload(self._connect().call_tool(name, args))
+            return tool_json(self._connect().call_tool(name, args))
 
     # ---------------------------------------------------------------- agendas
     def calendars(self, force: bool = False) -> List[Dict[str, Any]]:
@@ -116,21 +118,17 @@ class ZinomCalendar:
             return [c for c in todas if c.get("primary")]
 
         alvo = {_normalize(w) for w in self.wanted}
-        escolhidas = []
-        for c in todas:
-            chaves = {
-                _normalize(c.get("calendar_ref")),
-                _normalize(c.get("summary")),
-                _normalize(c.get("email")),
-            }
-            if chaves & alvo:
-                escolhidas.append(c)
-        return escolhidas
+        return [
+            c for c in todas
+            if {_normalize(c.get("calendar_ref")), _normalize(c.get("summary")), _normalize(c.get("email"))} & alvo
+        ]
 
     # ---------------------------------------------------------------- eventos
-    def upcoming(self, window_hours: Optional[int] = None) -> List[MeetingEvent]:
+    def upcoming(self, window_hours: Optional[int] = None, force: bool = False) -> List[MeetingEvent]:
         if not self.enabled:
             return []
+        if not force and self._cache_at and (time.time() - self._cache_at) < self.poll_interval_sec:
+            return self._cache
 
         horas = window_hours if window_hours is not None else self.window_hours
         agora = datetime.datetime.now().astimezone()
@@ -144,15 +142,7 @@ class ZinomCalendar:
             ref = cal.get("calendar_ref")
             if not ref:
                 continue
-            try:
-                payload = self._call("list_events", {
-                    "calendar_ref": ref, "time_min": t_min, "time_max": t_max,
-                })
-            except Exception as e:
-                print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
-                continue
-
-            for raw in payload.get("events", []) or []:
+            for raw in self._events_for(ref, t_min, t_max, cal):
                 if self.skip_all_day and _is_all_day(raw):
                     continue
                 evento = self._to_meeting(raw, cal)
@@ -162,7 +152,35 @@ class ZinomCalendar:
                 eventos.append(evento)
 
         eventos.sort(key=lambda e: e.start)
+        self._cache = eventos
+        self._cache_at = time.time()
         return eventos
+
+    def _events_for(self, ref: str, t_min: str, t_max: str, cal: Dict[str, Any]) -> List[Dict[str, Any]]:
+        args = {"calendar_ref": ref, "time_min": t_min, "time_max": t_max}
+
+        if self._detalhe_disponivel is not False:
+            try:
+                payload = self._call("list_event_details", args)
+                self._detalhe_disponivel = True
+                return payload.get("events", []) or []
+            except ZinomError as e:
+                # Hub antigo, sem a tool: cai para a listagem magra e não tenta
+                # de novo nas próximas agendas do mesmo ciclo.
+                if "not found" in str(e).lower() or "unknown tool" in str(e).lower():
+                    self._detalhe_disponivel = False
+                else:
+                    print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
+                    return []
+            except Exception as e:
+                print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
+                return []
+
+        try:
+            return self._call("list_events", args).get("events", []) or []
+        except Exception as e:
+            print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
+            return []
 
     def _to_meeting(self, raw: Dict[str, Any], cal: Dict[str, Any]) -> Optional[MeetingEvent]:
         inicio = _parse_google_dt(raw.get("start"))
@@ -171,18 +189,24 @@ class ZinomCalendar:
         fim = _parse_google_dt(raw.get("end")) or (inicio + datetime.timedelta(hours=1))
 
         local = raw.get("location") or None
-        # Às vezes o link da chamada mora no campo de local.
-        conf = extract_conference_url(local or "")
+        conf = raw.get("conference_url") or extract_conference_url(local or "")
+
+        organizador = raw.get("organizer") or {}
+        if isinstance(organizador, dict):
+            organizador_email = organizador.get("email") or cal.get("email")
+        else:
+            organizador_email = cal.get("email")
 
         return MeetingEvent(
             uid=str(raw.get("id") or f"{cal.get('calendar_ref')}::{inicio.isoformat()}"),
             title=str(raw.get("summary") or "Reunião"),
             start=inicio,
             end=fim,
-            attendees=[],
-            organizer=cal.get("email"),
+            attendees=_parse_attendees(raw.get("attendees")),
+            organizer=organizador_email,
             conference_url=conf,
-            description=None,
+            conference_provider=raw.get("conference_provider"),
+            description=raw.get("description"),
             location=local,
             html_link=raw.get("htmlLink") or None,
             calendar_name=cal.get("summary") or None,
@@ -190,52 +214,17 @@ class ZinomCalendar:
             source="zinom",
         )
 
-    # ------------------------------------------------------------ enriquecimento
-    def enrich(self, event: MeetingEvent) -> MeetingEvent:
-        """Participantes e link da chamada, do acervo indexado.
 
-        Só aceita um documento que bata título E data. Trazer os participantes da
-        reunião errada é pior do que não trazer nenhum.
-        """
-        if not (self.enabled and self.enrich_next) or event is None:
-            return event
-        if event.attendees and event.conference_url:
-            return event
-
-        try:
-            payload = self._call("brain_search", {"query": event.title, "limit": 6})
-        except Exception:
-            return event
-
-        dia = event.start.date().isoformat()
-        alvo = _normalize(event.title)
-
-        for item in payload.get("results", []) or []:
-            if item.get("source_type") != "calendar":
-                continue
-            if _normalize(item.get("title")) != alvo:
-                continue
-            texto = str(item.get("text") or "")
-            if dia not in texto:
-                continue
-
-            if not event.conference_url:
-                event.conference_url = extract_conference_url(texto)
-            if not event.attendees:
-                event.attendees = _parse_attendees(texto)
-            break
-
-        return event
-
-
-def _parse_attendees(texto: str) -> List[Attendee]:
-    match = re.search(r"\*\*Participantes:\*\*\s*(.+)", texto)
-    if not match:
+def _parse_attendees(lista: Any) -> List[Attendee]:
+    if not isinstance(lista, list):
         return []
     pessoas = []
-    for pedaco in match.group(1).split(","):
-        email = pedaco.strip()
-        if not email or "@" not in email:
+    for a in lista:
+        if not isinstance(a, dict):
             continue
-        pessoas.append(Attendee(name=email.split("@")[0].replace(".", " ").title(), email=email))
+        email = str(a.get("email") or "").strip()
+        nome = str(a.get("name") or "").strip()
+        if not (email or nome):
+            continue
+        pessoas.append(Attendee(name=nome or _nome_de_email(email), email=email))
     return pessoas

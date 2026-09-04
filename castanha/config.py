@@ -24,6 +24,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "notify_minutes_before": 2,
         "auto_record": False,
         "feeds": [],  # lista de dicts: {"name": "...", "url": "..."}
+        "zinom": {
+            # As contas Google já conectadas no portal do Zinom. Sem feed iCal,
+            # sem credencial do Google guardada aqui.
+            "enabled": True,
+            "poll_interval_sec": 300,
+            "window_hours": 12,
+            # Vazio = a agenda principal de cada conta conectada.
+            "calendars": [],
+            # Feriado, aniversário e "pagar condomínio" não são reunião.
+            "skip_all_day": True,
+        },
     },
     "transcription": {
         "provider": "groq",  # "groq", "deepgram", "local_whisper", "vps_webhook", "none"
