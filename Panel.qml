@@ -16,7 +16,7 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "moniz.castanha"
+  moduleName: "io.github.brunoomoniz.castanha"
   ipcTarget: "castanha"
 
   // ----------------------------------------------------------------- tema

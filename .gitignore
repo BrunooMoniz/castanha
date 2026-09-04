@@ -8,3 +8,12 @@ build/
 dist/
 *.egg-info/
 .env
+config.json
+state.json
+budget.json
+hidden_events.json
+daemon.pid
+*.tmp
+*.qslog
+.venv/
+venv/

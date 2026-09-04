@@ -4,6 +4,10 @@ Assistente executivo e gravador inteligente de reuniões para Linux e Omarchy.
 
 Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em dois canais via PipeWire, sincroniza com o Google Calendar, notifica antes da reunião e transforma transcrições brutas em notas estruturadas (Bronze, Silver e Gold), prontas para o **Zinom** e para sua **LLM Wiki**.
 
+<p align="center">
+  <img src="preview.png" alt="Painel do Castanha no Omarchy" width="480">
+</p>
+
 ---
 
 ## 🚀 Principais Recursos
@@ -31,20 +35,43 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
 
 ## 📦 Instalação
 
-Execute o instalador:
+### Via Omarchy Plugin Marketplace (Recomendado)
+
 ```bash
-./install.sh
+omarchy plugin add https://github.com/BrunooMoniz/castanha --enable
+~/.config/omarchy/plugins/io.github.brunoomoniz.castanha/setup
 ```
 
-Para registrar o plugin na barra do Omarchy:
+### Instalação Manual
+
 ```bash
-omarchy-shell shell rescanPlugins
+git clone https://github.com/BrunooMoniz/castanha.git ~/.local/share/castanha
+cd ~/.local/share/castanha && ./install.sh
 ```
 
 Para adicionar o atalho global no Hyprland (`~/.config/hypr/hyprland.conf`):
 ```ini
 bind = $mainMod ALT, R, exec, castanha toggle
 ```
+
+---
+
+## 🗑️ Remoção
+
+Para desinstalar o plugin e o comando da máquina:
+```bash
+rm -f ~/.local/bin/castanha
+omarchy plugin remove io.github.brunoomoniz.castanha
+```
+
+---
+
+## 📋 Requisitos de Sistema
+
+- **Omarchy** com omarchy-shell / Quickshell
+- **PipeWire** com módulo pulse (`pactl`)
+- **FFmpeg** e **ffprobe**
+- **Python** 3.10 ou superior
 
 ---
 

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# omarchy plugin add only clones files, so this is the rest of the install.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bin_dir="$HOME/.local/bin"
+config_dir="$HOME/.config/castanha"
+
+echo "🌰 Configurando Castanha para Omarchy/Linux..."
+
+# Verifica dependências obrigatórias
+for dep in ffmpeg ffprobe pactl python3; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+        echo "⚠️  Aviso: dependência obrigatória '$dep' não foi encontrada no PATH."
+    fi
+done
+
+mkdir -p "$bin_dir" "$config_dir" "$HOME/Notes/Meetings/bronze" "$HOME/Notes/Meetings/silver" "$HOME/Notes/Meetings/gold"
+
+# 1. Symlink CLI
+ln -sf "$root/bin/castanha" "$bin_dir/castanha"
+chmod +x "$bin_dir/castanha"
+chmod +x "$root/bin/castanha"
+echo "  ✔ CLI instalado em $bin_dir/castanha"
+
+# 2. Configuração padrão se não existir
+if [ ! -f "$config_dir/config.json" ]; then
+    cp "$root/config.example.json" "$config_dir/config.json"
+    echo "  ✔ Arquivo de configuração criado em $config_dir/config.json"
+fi
+
+echo ""
+echo "🎉 Castanha configurado com sucesso!"
+echo "Para colocar o widget na barra:"
+echo "  omarchy bar put io.github.brunoomoniz.castanha"
+echo ""
