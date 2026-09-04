@@ -1,0 +1,45 @@
+{
+  "storage": {
+    "base_dir": "~/Notes/Meetings",
+    "bronze_dir": "~/Notes/Meetings/bronze",
+    "silver_dir": "~/Notes/Meetings/silver",
+    "gold_dir": "~/Notes/Meetings/gold"
+  },
+  "audio": {
+    "default_mode": "dual",
+    "bitrate": "64k",
+    "sample_rate": 48000,
+    "format": "ogg"
+  },
+  "calendar": {
+    "enabled": true,
+    "poll_interval_sec": 60,
+    "notify_minutes_before": 2,
+    "auto_record": false,
+    "feeds": [
+      {
+        "name": "Google Calendar Privado",
+        "url": "https://calendar.google.com/calendar/ical/SEU_EMAIL/private-CHAVE/basic.ics"
+      }
+    ]
+  },
+  "transcription": {
+    "provider": "groq",
+    "groq_api_key": "gsk_...",
+    "groq_model": "whisper-large-v3-turbo",
+    "deepgram_api_key": "",
+    "deepgram_model": "nova-2",
+    "vps_endpoint": "",
+    "vps_auth_token": ""
+  },
+  "llm": {
+    "provider": "groq",
+    "api_key": "gsk_...",
+    "model": "llama-3.3-70b-versatile"
+  },
+  "zinom": {
+    "enabled": false,
+    "endpoint": "https://zinom.ai/mcp",
+    "token": ""
+  }
+}

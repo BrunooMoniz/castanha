@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "moniz.castanha",
+  "name": "Castanha",
+  "version": "0.1.0",
+  "author": "Bruno Moniz",
+  "license": "MIT",
+  "description": "Gravador e assistente executivo de reuniões bot-free para Omarchy: PipeWire áudio duplo, Google Calendar e esteira Bronze, Silver e Gold.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Castanha Reuniões",
+    "description": "Indicador de gravação com timer ao vivo e acesso rápido à esteira de reuniões.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

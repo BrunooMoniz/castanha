@@ -1,3 +1,115 @@
 # Castanha 🌰
 
-Gravador e assistente inteligente de reuniões para Linux (Omarchy) - sem bots, com captura de áudio local PipeWire, integração com Google Calendar e esteira de notas Bronze, Silver e Gold (compatível com Zinom e LLM Wiki).
+Assistente executivo e gravador inteligente de reuniões para Linux e Omarchy.
+
+Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em dois canais via PipeWire, sincroniza com o Google Calendar, notifica antes da reunião e transforma transcrições brutas em notas estruturadas (Bronze, Silver e Gold), prontas para o **Zinom** e para sua **LLM Wiki**.
+
+---
+
+## 🚀 Principais Recursos
+
+1. **Captura Bot-Free via PipeWire**:
+   - Grava silenciosamente chamadas no Google Meet, Teams, Zoom e WhatsApp Web/Desktop.
+   - **Modo Duplo**: Canal esquerdo (microfone do usuário) e canal direito (áudio dos participantes remotos).
+   - **Modo Presencial**: Grava apenas o microfone do computador para reuniões presenciais.
+2. **Integração com Google Calendar**:
+   - Sincronização direta via feed privado iCal ou integração com o hub Zinom.
+   - Popup interativo 2 minutos antes com botão para entrar na chamada e botão para gravar.
+   - Captura automática dos participantes (nomes e e-mails), pauta e links.
+3. **Esteira Bronze -> Silver -> Gold**:
+   - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
+   - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
+   - **Gold**: Fatos atômicos estruturados prontos para ingestão no Zinom (`remember` e `brain_fact`).
+4. **Plugin Nativo do Omarchy (Quickshell)**:
+   - Widget discreto na barra com status ao vivo (`● REC 00:14:20`).
+   - Painel popout com controle de gravação, próxima reunião e acesso rápido às notas.
+   - Atalho global de teclado no Hyprland (`Super+Alt+R`).
+5. **Backend Flexível**:
+   - Roda 100% local ou envia o processamento pesado para uma VPS remota.
+
+---
+
+## 📦 Instalação
+
+Execute o instalador:
+```bash
+./install.sh
+```
+
+Para registrar o plugin na barra do Omarchy:
+```bash
+omarchy-shell shell rescanPlugins
+```
+
+Para adicionar o atalho global no Hyprland (`~/.config/hypr/hyprland.conf`):
+```ini
+bind = $mainMod ALT, R, exec, castanha toggle
+```
+
+---
+
+## 🛠️ Uso via CLI
+
+```bash
+# Iniciar gravação de reunião
+castanha start
+castanha start --mic-only          # Modo presencial (somente microfone)
+castanha start --title "Alinhamento com Time"
+
+# Alternar gravação (inicia se ocioso, finaliza se gravando)
+castanha toggle
+
+# Pausar e retomar
+castanha pause
+castanha resume
+
+# Finalizar e processar notas
+castanha stop
+
+# Consultar status
+castanha status
+castanha status --json
+
+# Iniciar o daemon de calendário e notificações
+castanha daemon --background
+
+# Listar e abrir notas
+castanha notes
+castanha notes --open
+```
+
+---
+
+## ⚙️ Configuração
+
+O arquivo de configuração vive em `~/.config/castanha/config.json`:
+
+```json
+{
+  "storage": {
+    "base_dir": "~/Notes/Meetings"
+  },
+  "calendar": {
+    "feeds": [
+      {
+        "name": "Meu Calendário",
+        "url": "https://calendar.google.com/calendar/ical/seu-email/private-xxx/basic.ics"
+      }
+    ]
+  },
+  "transcription": {
+    "provider": "groq",
+    "groq_api_key": "sua-chave-groq"
+  },
+  "llm": {
+    "provider": "groq",
+    "api_key": "sua-chave-groq",
+    "model": "llama-3.3-70b-versatile"
+  },
+  "zinom": {
+    "enabled": true,
+    "endpoint": "https://zinom.ai/mcp",
+    "token": "seu-bearer-token"
+  }
+}
+```

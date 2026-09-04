@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""CLI do Castanha: Gravador e assistente de reuniões para Omarchy/Linux."""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# Adiciona o diretório do pacote ao sys.path para execução direta
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
+from castanha.config import get_config_file, load_config, save_config
+from castanha.engine import CastanhaEngine
+from castanha.state import StateManager
+from castanha.storage import MeetingStorage
+
+def cmd_start(args):
+    engine = CastanhaEngine()
+    mode = "mic_only" if args.mic_only else (args.mode or "dual")
+    res = engine.start_recording(mode=mode, title=args.title)
+    if res.get("status") == "recording":
+        print(f"🌰 Gravação iniciada com sucesso! [PID: {res.get('pid')}]")
+        print(f"📌 Título: {res.get('title')}")
+        print(f"🎙️ Modo: {mode}")
+    else:
+        print(f"❌ Erro: {res.get('message')}")
+        sys.exit(1)
+
+def cmd_stop(args):
+    engine = CastanhaEngine()
+    print("⏳ Finalizando reunião e processando notas...")
+    res = engine.stop_recording()
+    if res.get("status") == "success":
+        result = res.get("result", {})
+        print("✅ Reunião finalizada com sucesso!")
+        print(f"📁 Bronze: {result.get('bronze_dir')}")
+        print(f"📝 Silver (Notas): {result.get('silver_file')}")
+        print(f"🧠 Gold (Fatos): {result.get('gold_file')}")
+    else:
+        print(f"❌ Erro: {res.get('message')}")
+        sys.exit(1)
+
+def cmd_pause(args):
+    engine = CastanhaEngine()
+    res = engine.pause_recording()
+    if res.get("status") == "paused":
+        print("⏸️ Gravação pausada.")
+    else:
+        print(f"❌ Erro: {res.get('message')}")
+
+def cmd_resume(args):
+    engine = CastanhaEngine()
+    res = engine.resume_recording()
+    if res.get("status") == "recording":
+        print("▶️ Gravação retomada.")
+    else:
+        print(f"❌ Erro: {res.get('message')}")
+
+def cmd_toggle(args):
+    engine = CastanhaEngine()
+    state = engine.get_status()
+    if state.get("status") in ["recording", "paused"]:
+        cmd_stop(args)
+    else:
+        cmd_start(args)
+
+def cmd_status(args):
+    state_mgr = StateManager()
+    state = state_mgr.read()
+    if args.json:
+        print(json.dumps(state, indent=2, ensure_ascii=False))
+        return
+
+    status = state.get("status", "idle")
+    icons = {"idle": "⚪ Ocioso", "recording": "🔴 Gravando", "paused": "⏸️ Pausado", "processing": "⏳ Processando"}
+    print(f"Status: {icons.get(status, status)}")
+    if status in ["recording", "paused"]:
+        elapsed = state.get("elapsed_seconds", 0)
+        mins, secs = divmod(elapsed, 60)
+        hours, mins = divmod(mins, 60)
+        timer = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
+        print(f"Tempo decorrido: {timer}")
+        print(f"Modo: {state.get('mode')}")
+        if state.get("current_meeting"):
+            print(f"Reunião: {state['current_meeting'].get('title')}")
+    
+    if state.get("next_meeting"):
+        next_m = state["next_meeting"]
+        print(f"Próxima reunião: {next_m.get('title')} ({next_m.get('start')})")
+
+def cmd_daemon(args):
+    from castanha.daemon import run_daemon
+    if args.background:
+        subprocess.Popen([sys.executable, "-m", "castanha.daemon"], cwd=str(project_root), start_new_session=True)
+        print("🌰 Daemon do Castanha iniciado em segundo plano.")
+    else:
+        print("🌰 Iniciando daemon do Castanha em primeiro plano (Ctrl+C para encerrar)...")
+        run_daemon()
+
+def cmd_config(args):
+    if args.action == "show":
+        print(json.dumps(load_config(), indent=2, ensure_ascii=False))
+    elif args.action == "path":
+        print(get_config_file())
+
+def cmd_notes(args):
+    storage = MeetingStorage()
+    notes = storage.list_recent_meetings(limit=10)
+    if not notes:
+        print("Nenhuma nota de reunião gravada ainda.")
+        return
+    print("Últimas reuniões registradas:")
+    for idx, n in enumerate(notes, 1):
+        print(f" {idx}. {n['slug']} -> {n['silver_path']}")
+    if args.open:
+        subprocess.Popen(["xdg-open", str(storage.silver_dir)])
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="castanha",
+        description="Castanha: Gravador e assistente de reuniões para Omarchy/Linux",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Comandos disponíveis")
+
+    # Start
+    p_start = subparsers.add_parser("start", help="Inicia a gravação de uma reunião")
+    p_start.add_argument("--mode", choices=["dual", "mic_only"], default=None, help="Modo de gravação")
+    p_start.add_argument("--mic-only", action="store_true", help="Atalho para modo apenas microfone (presencial)")
+    p_start.add_argument("--title", type=str, default=None, help="Título da reunião")
+    p_start.set_defaults(func=cmd_start)
+
+    # Stop
+    p_stop = subparsers.add_parser("stop", help="Finaliza a gravação e processa as notas")
+    p_stop.set_defaults(func=cmd_stop)
+
+    # Pause & Resume
+    p_pause = subparsers.add_parser("pause", help="Pausa a gravação")
+    p_pause.set_defaults(func=cmd_pause)
+    p_resume = subparsers.add_parser("resume", help="Retoma a gravação")
+    p_resume.set_defaults(func=cmd_resume)
+
+    # Toggle (para atalho de teclado global)
+    p_toggle = subparsers.add_parser("toggle", help="Inicia ou para a gravação (ideal para atalho de teclado)")
+    p_toggle.add_argument("--mode", choices=["dual", "mic_only"], default=None)
+    p_toggle.add_argument("--mic-only", action="store_true")
+    p_toggle.add_argument("--title", type=str, default=None)
+    p_toggle.set_defaults(func=cmd_toggle)
+
+    # Status
+    p_status = subparsers.add_parser("status", help="Exibe o status atual do gravador")
+    p_status.add_argument("--json", action="store_true", help="Saída em formato JSON")
+    p_status.set_defaults(func=cmd_status)
+
+    # Daemon
+    p_daemon = subparsers.add_parser("daemon", help="Gerencia o daemon em background")
+    p_daemon.add_argument("--background", "-b", action="store_true", help="Roda em segundo plano desanexado")
+    p_daemon.set_defaults(func=cmd_daemon)
+
+    # Config
+    p_config = subparsers.add_parser("config", help="Gerencia configurações")
+    p_config.add_argument("action", choices=["show", "path"], default="show", nargs="?")
+    p_config.set_defaults(func=cmd_config)
+
+    # Notes
+    p_notes = subparsers.add_parser("notes", help="Lista as últimas reuniões")
+    p_notes.add_argument("--open", action="store_true", help="Abre a pasta de notas no gerenciador de arquivos")
+    p_notes.set_defaults(func=cmd_notes)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
