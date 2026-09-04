@@ -106,26 +106,36 @@ Transcrição Bruta:
 {raw_transcript}
 """
 
-        llm_output = self._call_llm(SILVER_SYSTEM_PROMPT, prompt)
+        audio_status = metadata.get("audio_status", "ok")
+        audio_aviso = metadata.get("audio_diagnostico", "")
 
-        # Se a LLM não estiver configurada ou falhar, usa template de fallback
+        llm_output = self._call_llm(SILVER_SYSTEM_PROMPT, prompt) if raw_transcript.strip() else ""
+
+        # Sem LLM configurada não existe resumo. O template abaixo diz isso em vez
+        # de inventar "decisões tomadas" que ninguém tomou.
         if not llm_output:
+            motivo = (
+                "a gravação não tem áudio para resumir"
+                if not raw_transcript.strip()
+                else "o resumo automático não rodou (LLM não configurada ou indisponível)"
+            )
+            aviso = f"\n> ⚠️ {audio_aviso}\n" if audio_status not in ("ok", "desconhecido") else ""
             llm_output = f"""# {title}
-
+{aviso}
 ## 📌 Resumo Executivo
-Reunião gravada pelo Castanha em {date_str}. Participantes: {attendees_str}.
+Sem resumo: {motivo}. Gravada em {date_str}. Participantes: {attendees_str}.
 
 ## 💬 Principais Discussões
-Discussões gravadas via captura direta PipeWire.
+_Pendente: depende do resumo automático._
 
 ## 🎯 Decisões Tomadas
-- Gravação registrada com sucesso na esteira Bronze do Castanha.
+_Pendente: depende do resumo automático._
 
 ## ✅ Próximos Passos & Tarefas
-- [ ] Revisar transcrição bruta e aprovar fatos para o Zinom.
+- [ ] Revisar a transcrição bruta abaixo e aprovar os fatos para o Zinom.
 
 ## 📝 Transcrição Estruturada
-{raw_transcript}
+{raw_transcript or "_(nenhum áudio capturado)_"}
 """
 
         # Adiciona Frontmatter YAML padrão para Markdown / Obsidian / LLM Wiki
@@ -142,6 +152,7 @@ attendees:
             frontmatter += f'  - name: "{name}"\n    email: "{email}"\n'
         if not attendees:
             frontmatter += "  []\n"
+        frontmatter += f'audio_status: "{metadata.get("audio_status", "ok")}"\n'
         frontmatter += "tags:\n  - meeting\n  - castanha\n  - silver\n---\n\n"
 
         return frontmatter + llm_output
@@ -157,7 +168,10 @@ Transcrição:
 {raw_transcript[:4000]}
 """
 
-        llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
+        llm_output = (
+            self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
+            if raw_transcript.strip() else ""
+        )
         if llm_output:
             try:
                 return json.loads(llm_output)
