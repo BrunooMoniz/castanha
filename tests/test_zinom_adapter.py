@@ -175,3 +175,43 @@ class TestIngestMeeting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFiltroDeFatos(unittest.TestCase):
+    """O que o Gold extrai é gravado para sempre e supersede o anterior."""
+
+    def test_aceita_fato_real(self):
+        from castanha.zinom_adapter import is_fato_util
+        self.assertTrue(is_fato_util(
+            {"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"}))
+
+    def test_descarta_objeto_booleano(self):
+        from castanha.zinom_adapter import is_fato_util
+        for obj in ("sim", "true", "False", "não", "n/a"):
+            self.assertFalse(is_fato_util(
+                {"subject": "Teste de gravação", "predicate": "deu certo", "object": obj}), obj)
+
+    def test_descarta_ruido_de_instrumentacao(self):
+        from castanha.zinom_adapter import is_fato_util
+        self.assertFalse(is_fato_util(
+            {"subject": "Microfone", "predicate": "estava mutado no teclado", "object": "Dell"}))
+
+    def test_descarta_trio_incompleto(self):
+        from castanha.zinom_adapter import is_fato_util
+        self.assertFalse(is_fato_util({"subject": "Bruno", "predicate": "", "object": "x"}))
+
+    def test_fatos_descartados_nao_chegam_no_zinom(self):
+        transport = FakeTransport()
+        adapter = ZinomAdapter()
+        adapter.enabled, adapter.token, adapter.endpoint = True, "t", "https://zinom.test/mcp"
+        gold = {"facts": [
+            {"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"},
+            {"subject": "Microfone", "predicate": "estava mutado", "object": "sim"},
+        ]}
+        with patch("castanha.zinom_adapter.ZinomMcpClient", side_effect=lambda *a, **k: make_client(transport)):
+            res = adapter.ingest_meeting({"title": "R", "recorded_at": "2026-09-04"}, "# Notas", gold)
+        self.assertEqual(res["facts_ingested"], 1)
+        self.assertEqual(len(res["facts_descartados"]), 1)
+        enviados = [r["params"]["arguments"] for r in transport.requests
+                    if r.get("method") == "tools/call" and r["params"]["name"] == "brain_fact"]
+        self.assertEqual(enviados, [{"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"}])

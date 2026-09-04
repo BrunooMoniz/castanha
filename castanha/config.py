@@ -38,7 +38,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "llm": {
         "provider": "groq",  # "groq", "openai", "openrouter", "vps"
         "api_key": os.environ.get("GROQ_API_KEY", ""),
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",  # llama-3.3-70b-versatile foi descontinuado na Groq
     },
     "zinom": {
         "enabled": False,

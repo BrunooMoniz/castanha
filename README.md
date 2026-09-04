@@ -104,7 +104,7 @@ O arquivo de configuração vive em `~/.config/castanha/config.json`:
   "llm": {
     "provider": "groq",
     "api_key": "sua-chave-groq",
-    "model": "llama-3.3-70b-versatile"
+    "model": "openai/gpt-oss-120b"
   },
   "zinom": {
     "enabled": true,

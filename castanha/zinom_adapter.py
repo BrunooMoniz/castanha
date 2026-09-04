@@ -135,6 +135,28 @@ def _tool_text(result: Dict[str, Any]) -> str:
     return " ".join(p for p in parts if p)
 
 
+# Objeto booleano é sinal de trio que não é fato ("Microfone / estava mutado / sim").
+_OBJETOS_INVALIDOS = {"sim", "nao", "não", "true", "false", "n/a", "nenhum", "-"}
+# Sujeito de instrumentação: memória do Bruno não guarda o funcionamento do gravador.
+_SUJEITOS_DE_RUIDO = {
+    "microfone", "audio", "áudio", "gravacao", "gravação", "transcricao",
+    "transcrição", "teste de gravacao", "teste de gravação", "castanha", "reuniao", "reunião",
+}
+
+
+def is_fato_util(fact: Dict[str, Any]) -> bool:
+    subj = (fact.get("subject") or "").strip()
+    pred = (fact.get("predicate") or "").strip()
+    obj = (fact.get("object") or "").strip()
+    if not (subj and pred and obj):
+        return False
+    if obj.lower() in _OBJETOS_INVALIDOS:
+        return False
+    if subj.lower() in _SUJEITOS_DE_RUIDO:
+        return False
+    return True
+
+
 def _tool_json(result: Dict[str, Any]) -> Dict[str, Any]:
     """As tools do Zinom devolvem o payload como JSON dentro do texto do content."""
     try:
@@ -222,9 +244,10 @@ class ZinomAdapter:
 
         # 2. Fatos atômicos via 'brain_fact'
         for fact in gold_data.get("facts", []):
-            subj, pred, obj = fact.get("subject"), fact.get("predicate"), fact.get("object")
-            if not (subj and pred and obj):
+            if not is_fato_util(fact):
+                results.setdefault("facts_descartados", []).append(fact)
                 continue
+            subj, pred, obj = fact["subject"].strip(), fact["predicate"].strip(), fact["object"].strip()
             try:
                 client.call_tool("brain_fact", {
                     "subject": subj, "predicate": pred, "object": obj,
