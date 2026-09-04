@@ -82,8 +82,13 @@ class GroqTranscriber(BaseTranscriber):
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[Castanha] Falha na Groq ({e}). Fazendo fallback automático para o modelo pesado na VPS...")
+            vps_transcriber = VpsSshTranscriber()
+            return vps_transcriber.transcribe(audio_path, mode=mode)
 
         full_text = data.get("text", "")
         utterances: List[Utterance] = []

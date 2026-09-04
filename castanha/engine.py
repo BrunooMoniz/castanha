@@ -156,13 +156,22 @@ class CastanhaEngine:
         title = current_meeting.get("title") or "Reunião"
         mode = state.get("mode", "dual")
 
-        # 1. Transcrição (Whisper / Deepgram / VPS)
-        transcriber = get_transcriber()
+        # 1. Transcrição (Whisper na Groq / VPS)
+        transcriber = get_transcriber(estimated_duration_sec=state.get("elapsed_seconds", 60))
         try:
             trans_res = transcriber.transcribe(audio_path, mode=mode)
             raw_transcript = trans_res.text
+            provider_name = getattr(trans_res, "provider", getattr(transcriber, "__class__", {}).__name__)
         except Exception as e:
-            raw_transcript = f"[Erro na transcrição: {e}]"
+            print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...")
+            try:
+                from castanha.transcription import VpsSshTranscriber
+                trans_res = VpsSshTranscriber().transcribe(audio_path, mode=mode)
+                raw_transcript = trans_res.text
+                provider_name = trans_res.provider
+            except Exception as err2:
+                raw_transcript = f"[Erro na transcrição: {err2}]"
+                provider_name = "failed"
 
         # 2. Metadados e Bronze
         slug = self.storage.create_meeting_slug(title)
@@ -172,7 +181,7 @@ class CastanhaEngine:
             "recorded_at": state.get("started_at") or datetime.now().isoformat(),
             "duration_seconds": state.get("elapsed_seconds", 0),
             "mode": mode,
-            "transcription_provider": getattr(transcriber, "__class__", {}).__name__,
+            "transcription_provider": provider_name,
             "calendar_event": current_meeting,
         }
 
