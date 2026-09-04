@@ -11,11 +11,23 @@ Panel {
   moduleName: "moniz.castanha"
   ipcTarget: "castanha"
 
-  property var stateData: hostWidget ? hostWidget.stateData : ({})
-  readonly property string status: stateData.status || "idle"
+  property var hostWidget: null
+  property var stateData: (hostWidget && hostWidget.stateData) ? hostWidget.stateData : ({})
+
+  readonly property string status: (stateData && stateData.status) ? stateData.status : "idle"
   readonly property bool isRecording: status === "recording"
   readonly property bool isPaused: status === "paused"
   readonly property bool isProcessing: status === "processing"
+
+  readonly property var activeMeeting: {
+    if (!stateData) return null
+    return isRecording ? stateData.current_meeting : stateData.next_meeting
+  }
+
+  function alpha(c, a) {
+    if (!c) return Qt.rgba(1, 1, 1, a)
+    return Qt.rgba(c.r, c.g, c.b, a)
+  }
 
   ColumnLayout {
     anchors.fill: parent
@@ -85,8 +97,8 @@ Panel {
     Rectangle {
       Layout.fillWidth: true
       radius: Style.cornerRadius
-      color: Style.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.06)
-      implicitHeight: meetingCol.implicitHeight + Style.space(16)
+      color: root.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.08)
+      implicitHeight: meetingCol.implicitHeight + Style.space(20)
 
       ColumnLayout {
         id: meetingCol
@@ -98,14 +110,11 @@ Panel {
           text: root.isRecording ? "REUNIÃO ATUAL" : "PRÓXIMA REUNIÃO"
           font.pixelSize: Style.font.small
           font.bold: true
-          color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.4)
+          color: root.bar ? root.bar.dim : Color.dim
         }
 
         Text {
-          text: {
-            var m = root.isRecording ? root.stateData.current_meeting : root.stateData.next_meeting
-            return m && m.title ? m.title : "Nenhuma reunião agendada no momento"
-          }
+          text: (root.activeMeeting && root.activeMeeting.title) ? root.activeMeeting.title : "Nenhuma reunião agendada no momento"
           font.pixelSize: Style.font.body
           font.bold: true
           wrapMode: Text.WordWrap
@@ -115,15 +124,11 @@ Panel {
 
         Button {
           Layout.fillWidth: true
-          visible: {
-            var m = root.isRecording ? root.stateData.current_meeting : root.stateData.next_meeting
-            return !!(m && m.conference_url)
-          }
+          visible: !!(root.activeMeeting && root.activeMeeting.conference_url)
           text: "🔗 Abrir Chamada (Meet/Teams)"
           onClicked: {
-            var m = root.isRecording ? root.stateData.current_meeting : root.stateData.next_meeting
-            if (m && m.conference_url) {
-              root.bar.run("xdg-open '" + m.conference_url + "'")
+            if (root.activeMeeting && root.activeMeeting.conference_url) {
+              root.bar.run("xdg-open '" + root.activeMeeting.conference_url + "'")
             }
           }
         }
