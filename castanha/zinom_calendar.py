@@ -23,6 +23,12 @@ from castanha.zinom_adapter import ZinomError, ZinomMcpClient, tool_json
 # A lista de agendas quase não muda; os eventos mudam.
 CALENDARS_TTL_SEC = 3600
 
+# De quanto em quanto tempo tentar de novo a tool rica depois de ela ter faltado.
+# Sem isto, um daemon que subiu antes do hub ganhar a tool ficava na listagem
+# magra PARA SEMPRE, e reunião com participante aparecia sem participante até
+# alguém reiniciar o processo. Foi o que aconteceu em 04/09.
+DETALHE_RETRY_SEC = 1800
+
 
 def _parse_google_dt(node: Optional[Dict[str, Any]]) -> Optional[datetime.datetime]:
     """Aceita o par {dateTime, timeZone} e o {date} de evento de dia inteiro."""
@@ -81,6 +87,7 @@ class ZinomCalendar:
         self._calendars: List[Dict[str, Any]] = []
         self._calendars_at: float = 0.0
         self._detalhe_disponivel: Optional[bool] = None
+        self._detalhe_negado_em: float = 0.0
         self._cache: List[MeetingEvent] = []
         self._cache_at: float = 0.0
 
@@ -156,10 +163,21 @@ class ZinomCalendar:
         self._cache_at = time.time()
         return eventos
 
+    def _quer_detalhe(self) -> bool:
+        """A tool rica volta a ser tentada depois de um tempo.
+
+        O hub pode ganhar a tool a qualquer momento (um deploy), e o daemon é um
+        processo longo: desistir de vez seria congelar a agenda pobre até o
+        próximo reinício.
+        """
+        if self._detalhe_disponivel is not False:
+            return True
+        return (time.time() - self._detalhe_negado_em) > DETALHE_RETRY_SEC
+
     def _events_for(self, ref: str, t_min: str, t_max: str, cal: Dict[str, Any]) -> List[Dict[str, Any]]:
         args = {"calendar_ref": ref, "time_min": t_min, "time_max": t_max}
 
-        if self._detalhe_disponivel is not False:
+        if self._quer_detalhe():
             try:
                 payload = self._call("list_event_details", args)
                 self._detalhe_disponivel = True
@@ -169,6 +187,7 @@ class ZinomCalendar:
                 # de novo nas próximas agendas do mesmo ciclo.
                 if "not found" in str(e).lower() or "unknown tool" in str(e).lower():
                     self._detalhe_disponivel = False
+                    self._detalhe_negado_em = time.time()
                 else:
                     print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
                     return []

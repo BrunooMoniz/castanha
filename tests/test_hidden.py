@@ -100,3 +100,32 @@ class TestHidden(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFallbackDaTool(unittest.TestCase):
+    """O daemon é processo longo e o hub ganha tool por deploy.
+
+    Em 04/09/2026 o daemon subiu antes do deploy da list_event_details, caiu
+    para a list_events e ficou lá: reunião com participante apareceu sem
+    participante até o processo ser reiniciado.
+    """
+
+    def _fonte(self):
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {}}})
+        return fonte
+
+    def test_desistir_da_tool_rica_nao_e_para_sempre(self):
+        import time as _t
+        from castanha import zinom_calendar
+
+        fonte = self._fonte()
+        fonte._detalhe_disponivel = False
+        fonte._detalhe_negado_em = _t.time()
+        self.assertFalse(fonte._quer_detalhe(), "logo depois da falha, não tenta")
+
+        fonte._detalhe_negado_em = _t.time() - zinom_calendar.DETALHE_RETRY_SEC - 1
+        self.assertTrue(fonte._quer_detalhe(), "passado o intervalo, tenta de novo")
+
+    def test_por_padrao_tenta_a_tool_rica(self):
+        self.assertTrue(self._fonte()._quer_detalhe())
