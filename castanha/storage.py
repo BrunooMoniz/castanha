@@ -19,10 +19,18 @@ class MeetingStorage:
         cfg = load_config()
         storage_cfg = cfg.get("storage", {})
         
-        self.base_dir = Path(base_dir or storage_cfg.get("base_dir", "~/Notes/Meetings")).expanduser()
-        self.bronze_dir = Path(storage_cfg.get("bronze_dir", self.base_dir / "bronze")).expanduser()
-        self.silver_dir = Path(storage_cfg.get("silver_dir", self.base_dir / "silver")).expanduser()
-        self.gold_dir = Path(storage_cfg.get("gold_dir", self.base_dir / "gold")).expanduser()
+        if base_dir is not None:
+            # base_dir explícito manda em tudo. Antes a config ainda ditava os
+            # subdiretórios, e por isso a suíte de testes escrevia nas notas reais.
+            self.base_dir = Path(base_dir).expanduser()
+            self.bronze_dir = self.base_dir / "bronze"
+            self.silver_dir = self.base_dir / "silver"
+            self.gold_dir = self.base_dir / "gold"
+        else:
+            self.base_dir = Path(storage_cfg.get("base_dir", "~/Notes/Meetings")).expanduser()
+            self.bronze_dir = Path(storage_cfg.get("bronze_dir", self.base_dir / "bronze")).expanduser()
+            self.silver_dir = Path(storage_cfg.get("silver_dir", self.base_dir / "silver")).expanduser()
+            self.gold_dir = Path(storage_cfg.get("gold_dir", self.base_dir / "gold")).expanduser()
 
         for d in [self.bronze_dir, self.silver_dir, self.gold_dir]:
             d.mkdir(parents=True, exist_ok=True)

@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Dict
 from castanha.config import get_state_dir, load_config
 
-DEFAULT_BUDGET_FILE = get_state_dir() / "budget.json"
-
 class BudgetManager:
     def __init__(self):
         cfg = load_config()
@@ -15,7 +13,8 @@ class BudgetManager:
         self.max_monthly_brl = float(b_cfg.get("max_monthly_brl", 5.0))
         self.usd_brl_rate = float(b_cfg.get("usd_brl_rate", 5.75))
         self.price_per_min_usd = float(b_cfg.get("groq_price_per_min_usd", 0.0007))
-        self.file_path = DEFAULT_BUDGET_FILE
+        # Resolvido aqui, e não no import do módulo, para respeitar XDG_STATE_HOME.
+        self.file_path = get_state_dir() / "budget.json"
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _get_current_month(self) -> str:
