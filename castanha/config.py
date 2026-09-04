@@ -27,6 +27,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "transcription": {
         "provider": "groq",  # "groq", "deepgram", "local_whisper", "vps_webhook", "none"
+        "language": "auto",  # "auto" (detecta PT/EN/misto), "pt", "en", etc.
         "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
         "groq_model": "whisper-large-v3-turbo",
         "deepgram_api_key": os.environ.get("DEEPGRAM_API_KEY", ""),

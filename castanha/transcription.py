@@ -60,8 +60,12 @@ class GroqTranscriber(BaseTranscriber):
         fields = {
             "model": self.model,
             "response_format": "verbose_json",
-            "language": "pt",
         }
+        # Se um idioma específico for informado e não for 'auto', envia; caso contrário omite para detecção automática (EN/PT/misto)
+        cfg_lang = load_config().get("transcription", {}).get("language", "auto")
+        if cfg_lang and cfg_lang != "auto":
+            fields["language"] = cfg_lang
+
         files = {
             "file": (audio_path.name, audio_bytes, "audio/ogg")
         }
