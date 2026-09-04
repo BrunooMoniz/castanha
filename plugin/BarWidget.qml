@@ -36,14 +36,14 @@ BarWidget {
   }
 
   readonly property string barLabel: {
-    if (isRecording) return "● REC " + formatTime(elapsedSeconds)
+    if (isRecording) return "󰻃 REC " + formatTime(elapsedSeconds)
     if (isPaused) return "⏸ " + formatTime(elapsedSeconds)
     if (isProcessing) return "⏳ SALVANDO..."
     if (stateData.next_meeting && stateData.next_meeting.title) {
       var t = stateData.next_meeting.title
-      return "🌰 " + (t.length > 15 ? t.substring(0, 14) + "…" : t)
+      return "󰍬 " + (t.length > 15 ? t.substring(0, 14) + "…" : t)
     }
-    return "🌰"
+    return "󰍬 REC"
   }
 
   FileView {
@@ -77,7 +77,8 @@ BarWidget {
     text: root.barLabel
     horizontalMargin: 8
 
-    customTextColor: root.isRecording ? "#ff5555" : (root.isPaused ? "#ffb86c" : "")
+    active: root.isRecording || root.isPaused
+    activeColor: root.isRecording ? (root.bar ? root.bar.urgent : "#ff5555") : "#ffb86c"
 
     onPressed: function(btn) {
       if (!root.bar) return
