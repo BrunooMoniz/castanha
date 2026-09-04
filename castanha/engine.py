@@ -195,6 +195,7 @@ class CastanhaEngine:
         real_duration = probe_duration_seconds(audio_path)
 
         # 2. Transcrição (Whisper na Groq / VPS)
+        transcription_error = None
         if audio_status == "sem_audio":
             raw_transcript = ""
             provider_name = "nenhum (áudio em silêncio)"
@@ -213,7 +214,10 @@ class CastanhaEngine:
                     raw_transcript = trans_res.text
                     provider_name = trans_res.provider
                 except Exception as err2:
-                    raw_transcript = f"[Erro na transcrição: {err2}]"
+                    # Vazio, e não a mensagem de erro: string não vazia ia para a
+                    # LLM e virava um "resumo" fabricado em cima de um traceback.
+                    raw_transcript = ""
+                    transcription_error = str(err2)
                     provider_name = "failed"
 
         # 3. Metadados e Bronze
@@ -230,6 +234,7 @@ class CastanhaEngine:
             "audio_status": audio_status,
             "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
             "audio_levels": audio_levels,
+            "transcription_error": transcription_error,
             "mic_muted_at_start": state.get("mic_muted_at_start"),
             "calendar_event": current_meeting,
         }
@@ -262,6 +267,8 @@ class CastanhaEngine:
             "gold_file": str(gold_path),
             "audio_status": audio_status,
             "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+            "transcription_provider": provider_name,
+            "transcription_error": transcription_error,
             "zinom": zinom_status,
         }
 
@@ -281,10 +288,25 @@ class CastanhaEngine:
             notify("Gravação sem áudio 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['sem_audio']}", timeout=10000)
         elif audio_status == "mic_mudo":
             notify("Notas prontas, sem o seu microfone 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['mic_mudo']}", timeout=10000)
+        elif provider_name == "failed":
+            notify("Transcrição falhou ⚠️", f"{title}\nO áudio está salvo no Bronze, mas não há notas.", timeout=10000)
+        elif audio_status == "desconhecido":
+            notify("Notas prontas, áudio não medido 🌰", f"Reunião: {title}\nNão deu para medir os níveis do áudio.", timeout=8000)
         else:
             notify("Notas Prontas! 🌰", f"Reunião: {title}\nSalvo em {silver_path.name}")
 
-        return {"status": "success", "result": result_summary}
+        problemas = []
+        if provider_name == "failed":
+            problemas.append(f"a transcrição falhou ({transcription_error})")
+        if audio_status in ("sem_audio", "mic_mudo"):
+            problemas.append(AUDIO_STATUS_MESSAGES.get(audio_status, audio_status))
+        if isinstance(zinom_status, dict) and zinom_status.get("status") == "error":
+            problemas.extend(zinom_status.get("errors", []))
+        result_summary["problemas"] = problemas
+
+        # O áudio está no Bronze de qualquer jeito, mas "sucesso" com transcrição
+        # falha é o tipo de verde mentiroso que este projeto não pode ter.
+        return {"status": "partial" if problemas else "success", "result": result_summary}
 
     def toggle_recording(self) -> Dict[str, Any]:
         state = self.state_mgr.read()

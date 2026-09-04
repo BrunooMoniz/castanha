@@ -35,26 +35,27 @@ def cmd_stop(args):
     engine = CastanhaEngine()
     print("⏳ Finalizando reunião e processando notas...")
     res = engine.stop_recording()
-    if res.get("status") == "success":
-        result = res.get("result", {})
-        audio_status = result.get("audio_status", "ok")
-        if audio_status == "sem_audio":
-            print("🔇 Reunião finalizada SEM ÁUDIO.")
-        elif audio_status == "mic_mudo":
-            print("🔇 Reunião finalizada, mas o seu microfone saiu em silêncio.")
-        else:
-            print("✅ Reunião finalizada com sucesso!")
-        if result.get("audio_diagnostico") and audio_status != "ok":
-            print(f"   {result['audio_diagnostico']}")
-        zinom = result.get("zinom") or {}
-        for err in zinom.get("errors", []):
-            print(f"⚠️  Zinom: {err}")
-        print(f"📁 Bronze: {result.get('bronze_dir')}")
-        print(f"📝 Silver (Notas): {result.get('silver_file')}")
-        print(f"🧠 Gold (Fatos): {result.get('gold_file')}")
-    else:
+    if res.get("status") not in ("success", "partial"):
         print(f"❌ Erro: {res.get('message')}")
         sys.exit(1)
+
+    result = res.get("result", {})
+    problemas = result.get("problemas") or []
+
+    if not problemas:
+        print("✅ Reunião finalizada com sucesso!")
+    else:
+        print("⚠️  Reunião finalizada COM PROBLEMA:")
+        for p in problemas:
+            print(f"   · {p}")
+
+    print(f"📁 Bronze: {result.get('bronze_dir')}")
+    print(f"📝 Silver (Notas): {result.get('silver_file')}")
+    print(f"🧠 Gold (Fatos): {result.get('gold_file')}")
+
+    # Código de saída honesto: quem chamar isto de script precisa saber.
+    if problemas:
+        sys.exit(2)
 
 def cmd_pause(args):
     engine = CastanhaEngine()

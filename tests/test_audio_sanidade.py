@@ -111,6 +111,39 @@ class TestMedicaoReal(unittest.TestCase):
             self.skipTest("ffmpeg não gerou o fixture")
         self.assertAlmostEqual(probe_duration_seconds(f), 3.0, delta=0.3)
 
+    def test_mic_only_estereo_com_voz_em_um_lado_e_ok(self):
+        # Interface que entrega o mic só no canal direito não pode ser reprovada.
+        f = self.tmp / "mic_only.ogg"
+        if not _gerar_ogg(f, SILENCIO, TOM):
+            self.skipTest("ffmpeg não gerou o fixture")
+        self.assertEqual(classify_audio(measure_channel_levels(f, mode="mic_only")), "ok")
+
+    def test_medicao_pela_metade_nao_vira_classificacao(self):
+        # Se o ffmpeg falha num canal, a resposta é "não sei", não um palpite.
+        import subprocess as sp
+        from unittest.mock import patch
+        f = self.tmp / "meia.ogg"
+        if not _gerar_ogg(f, TOM, TOM):
+            self.skipTest("ffmpeg não gerou o fixture")
+        real = sp.run
+
+        def falha_no_canal_1(cmd, *a, **k):
+            if isinstance(cmd, list) and any("c0=c1" in str(x) for x in cmd):
+                return sp.CompletedProcess(cmd, 1, "", "boom")
+            return real(cmd, *a, **k)
+
+        with patch("castanha.audio.subprocess.run", side_effect=falha_no_canal_1):
+            self.assertEqual(measure_channel_levels(f, mode="dual"), [])
+        self.assertEqual(classify_audio([]), "desconhecido")
+
+    def test_contagem_de_canais_desconhecida_nao_vira_um(self):
+        from unittest.mock import patch
+        f = self.tmp / "conta.ogg"
+        if not _gerar_ogg(f, SILENCIO, TOM):
+            self.skipTest("ffmpeg não gerou o fixture")
+        with patch("castanha.audio.probe_channel_count", return_value=0):
+            self.assertEqual(measure_channel_levels(f, mode="dual"), [])
+
     def test_arquivo_invalido_nao_explode(self):
         f = self.tmp / "quebrado.ogg"
         f.write_bytes(b"isto nao e audio")

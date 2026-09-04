@@ -155,5 +155,41 @@ class TestEngine(unittest.TestCase):
             )
 
 
+    def test_transcricao_falha_nao_sai_como_sucesso(self):
+        """Bronze salvo com transcrição quebrada é 'partial', nunca 'success'."""
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+
+        with patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=42.0), \
+             patch("castanha.engine.get_transcriber") as get_t, \
+             patch("castanha.transcription.VpsSshTranscriber") as vps, \
+             patch("castanha.engine.notify"), patch("os.kill"):
+            get_t.return_value.transcribe.side_effect = RuntimeError("groq caiu")
+            vps.return_value.transcribe.side_effect = RuntimeError("vps fora do ar")
+            res = engine.stop_recording()
+
+        self.assertEqual(res["status"], "partial")
+        result = res["result"]
+        self.assertEqual(result["transcription_provider"], "failed")
+        self.assertTrue(any("transcrição falhou" in p for p in result["problemas"]))
+
+        # A mensagem de erro não pode virar o texto da reunião.
+        transcript = (Path(result["bronze_dir"]) / "transcript_raw.txt").read_text(encoding="utf-8")
+        self.assertEqual(transcript, "")
+        silver = Path(result["silver_file"]).read_text(encoding="utf-8")
+        self.assertNotIn("groq caiu", silver)
+        self.assertNotIn("vps fora do ar", silver)
+
+    def test_gravacao_boa_nao_lista_problema(self):
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+        res, _ = self._stop(engine, _levels(mic_silent=False, sys_silent=True))
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["result"]["problemas"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

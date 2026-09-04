@@ -23,7 +23,7 @@ class RecordingResult:
     format: str
 
 def check_dependencies() -> None:
-    for cmd in ["ffmpeg", "pactl"]:
+    for cmd in ["ffmpeg", "ffprobe", "pactl"]:
         res = subprocess.run(["which", cmd], capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"Dependência obrigatória não encontrada no sistema: {cmd}")
@@ -224,6 +224,12 @@ def probe_duration_seconds(audio_path: Path) -> Optional[float]:
 
 
 def probe_channel_count(audio_path: Path) -> int:
+    """Zero quer dizer "não deu para saber", e não "um canal".
+
+    Chutar 1 aqui fazia a medição de um arquivo estéreo olhar só o canal do
+    microfone: com o mic mudo, a gravação inteira era classificada como
+    silenciosa e nem ia para transcrição.
+    """
     try:
         res = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -235,7 +241,7 @@ def probe_channel_count(audio_path: Path) -> int:
             return int(res.stdout.strip())
     except Exception:
         pass
-    return 1
+    return 0
 
 
 def _channel_label(index: int, mode: str, total: int) -> str:
@@ -245,8 +251,17 @@ def _channel_label(index: int, mode: str, total: int) -> str:
 
 
 def measure_channel_levels(audio_path: Path, mode: str = "dual") -> List[ChannelLevels]:
-    """Nível de cada canal via ffmpeg volumedetect. Lista vazia se não der para medir."""
+    """Nível de cada canal via ffmpeg volumedetect.
+
+    Ou mede TODOS os canais, ou devolve lista vazia. Medição pela metade é pior
+    do que medição nenhuma: se o canal do microfone é o que falhou, o que sobra
+    parece uma gravação sadia; se foi o do sistema, a gravação parece muda e o
+    Castanha pula a transcrição de uma reunião que tinha áudio.
+    """
     total = probe_channel_count(audio_path)
+    if total <= 0:
+        return []
+
     levels: List[ChannelLevels] = []
     for idx in range(total):
         try:
@@ -256,7 +271,9 @@ def measure_channel_levels(audio_path: Path, mode: str = "dual") -> List[Channel
                 capture_output=True, text=True, timeout=120,
             )
         except Exception:
-            continue
+            return []
+        if res.returncode != 0:
+            return []
 
         mean_db, max_db = None, None
         for line in res.stderr.splitlines():
@@ -265,7 +282,7 @@ def measure_channel_levels(audio_path: Path, mode: str = "dual") -> List[Channel
             elif "max_volume:" in line:
                 max_db = _parse_db(line)
         if max_db is None:
-            continue
+            return []
 
         mean_value = mean_db if mean_db is not None else max_db
         levels.append(ChannelLevels(
@@ -291,8 +308,11 @@ def classify_audio(levels: List[ChannelLevels]) -> str:
         return "desconhecido"
     if all(ch.silent for ch in levels):
         return "sem_audio"
-    mic = next((ch for ch in levels if ch.label == "microfone"), None)
-    if mic is not None and mic.silent:
+    # TODOS os canais de microfone, não o primeiro: no modo mic_only uma
+    # interface estéreo entrega a voz só num dos lados, e olhar o canal 0
+    # sozinho reprovaria uma gravação boa.
+    mics = [ch for ch in levels if ch.label == "microfone"]
+    if mics and all(ch.silent for ch in mics):
         return "mic_mudo"
     return "ok"
 
