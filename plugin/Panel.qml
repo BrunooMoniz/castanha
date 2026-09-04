@@ -619,28 +619,41 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           elide: Text.ElideRight
-          width: parent.width - Style.space(46) - (chamadaGlyph.visible ? Style.space(18) : 0)
+          width: Math.max(0, parent.width - Style.space(46) - Style.space(20))
         }
 
-        Text {
-          id: chamadaGlyph
-          textFormat: Text.PlainText
-          visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url) && !rowHover.containsMouse
-          text: "󰏌"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-        }
+        // Slot de largura fixa: o ícone de chamada e o botão de esconder se
+        // revezam DENTRO dele, então entrar com o mouse não reflui a linha.
+        Item {
+          width: Style.space(20)
+          height: acaoEsconder.height
+          anchors.verticalCenter: parent.verticalCenter
 
-        // Só aparece com o mouse em cima: agenda cheia de botão vira ruído.
-        PanelActionButton {
-          visible: rowHover.containsMouse
-          iconText: "󰈉"
-          tooltipText: "Não mostrar mais este evento (a série inteira)"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          onClicked: root.hideMeeting(meetingRow.meeting)
+          Text {
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            opacity: !!(meetingRow.meeting && meetingRow.meeting.conference_url) && !rowHover.containsMouse ? 1 : 0
+            text: "󰏌"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+          }
+
+          // Agenda cheia de botão vira ruído: só acende com o mouse em cima.
+          PanelActionButton {
+            id: acaoEsconder
+            anchors.centerIn: parent
+            opacity: rowHover.containsMouse ? 1 : 0
+            enabled: rowHover.containsMouse
+            iconText: "󰈉"
+            tooltipText: "Não mostrar mais este evento (a série inteira)"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.hideMeeting(meetingRow.meeting)
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+          }
         }
       }
 
@@ -730,30 +743,41 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           elide: Text.ElideRight
-          width: Math.max(0, parent.width - Style.space(24) - quando.implicitWidth - Style.space(8))
+          width: Math.max(0, parent.width - Style.space(24) - Style.space(8)
+                          - Math.max(quando.implicitWidth, Style.space(20)))
         }
 
-        Text {
-          id: quando
-          textFormat: Text.PlainText
-          visible: !sincronizar.visible
-          text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-        }
+        Item {
+          width: Math.max(quando.implicitWidth, Style.space(20))
+          height: Math.max(quando.implicitHeight, sincronizar.height)
+          anchors.verticalCenter: parent.verticalCenter
 
-        // Segunda chance para a reunião que não entrou no Zinom.
-        PanelActionButton {
-          id: sincronizar
-          visible: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando)
-          enabled: !noteRow.sincronizando
-          iconText: "󰑐"
-          tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
+          Text {
+            id: quando
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            opacity: sincronizar.opacity > 0 ? 0 : 1
+            text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+          }
+
+          // Segunda chance para a reunião que não entrou no Zinom.
+          PanelActionButton {
+            id: sincronizar
+            anchors.centerIn: parent
+            opacity: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando) ? 1 : 0
+            enabled: opacity > 0 && !noteRow.sincronizando
+            iconText: "󰑐"
+            tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+          }
         }
       }
 
