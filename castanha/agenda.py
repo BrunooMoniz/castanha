@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from castanha.calendar import MeetingEvent, get_upcoming_meetings
 from castanha.config import load_config
+from castanha.hidden import is_hidden, load_hidden
 from castanha.zinom_calendar import ZinomCalendar
 
 _zinom: Optional[ZinomCalendar] = None
@@ -47,8 +48,11 @@ def collect_upcoming(
     limite = agora + datetime.timedelta(minutes=window_minutes)
 
     # Mesma reunião vinda do iCal e do Zinom: fica a que tem link de chamada.
+    escondidos = load_hidden()
     por_chave: Dict[str, MeetingEvent] = {}
     for e in eventos:
+        if is_hidden(e.uid, escondidos):
+            continue
         inicio = e.start if e.start.tzinfo else e.start.replace(tzinfo=datetime.timezone.utc)
         if not (corte <= inicio <= limite):
             continue

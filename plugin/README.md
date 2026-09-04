@@ -56,3 +56,20 @@ omarchy restart shell
 
 `rescanPlugins` recarrega o arquivo mas mantém o componente QML em cache;
 para mudança de verdade, reinicie o shell.
+
+## Controles no painel
+
+**Não mostrar um evento.** Passar o mouse numa reunião mostra o botão 󰈉. Ele
+esconde a **série inteira**, não a ocorrência de hoje: lembrete semanal se
+esconde uma vez. Volta com `castanha agenda unhide <chave>`, e
+`castanha agenda hidden` lista o que está escondido. A marca fica em
+`~/.local/state/castanha/hidden_events.json`, não na config, porque quem
+escreve ali é o clique.
+
+**Sincronizar de novo com o Zinom.** A ingestão roda uma vez, no fim da
+gravação. Se o hub estava fora do ar, a reunião ficava só em disco. Agora a
+linha da nota mostra o botão 󰑐 quando o envio falhou, e
+`castanha sync [slug]` (ou `--all`) faz o mesmo pela CLI. Reenviar é seguro:
+a nota é EDITADA pelo id gravado no metadata do Bronze, e `brain_fact`
+supersede o fato do mesmo par sujeito-predicado. Rodar duas vezes não cria
+duas notas.

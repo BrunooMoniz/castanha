@@ -32,9 +32,14 @@ class MeetingEvent:
     source: str = "ics"
 
     def to_dict(self) -> Dict[str, Any]:
+        from castanha.hidden import series_key
+
         data = asdict(self)
         data["start"] = self.start.isoformat()
         data["end"] = self.end.isoformat()
+        # A chave da SÉRIE: é por ela que o painel manda esconder o evento, para
+        # que esconder um lembrete semanal esconda todas as ocorrências.
+        data["series_key"] = series_key(self.uid)
         return data
 
 CONFERENCE_PATTERNS = [

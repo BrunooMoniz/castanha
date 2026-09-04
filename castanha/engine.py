@@ -251,6 +251,9 @@ class CastanhaEngine:
 
         # 6. Ingestão Zinom (se habilitado)
         zinom_status = self.zinom.ingest_meeting(metadata, silver_content, gold_data)
+        # O resultado fica NO METADATA, e não só no estado da sessão: é por ele
+        # que o `castanha sync` sabe o que ficou para trás e qual nota editar.
+        self.storage.record_zinom_result(slug, zinom_status)
 
         # Limpa arquivo temporário
         try:

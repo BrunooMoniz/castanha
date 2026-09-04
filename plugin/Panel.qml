@@ -196,7 +196,8 @@ Panel {
     }
     var fatos = z.facts_ingested || 0
     if (fatos > 0) return "Salvo no Zinom, com " + fatos + (fatos === 1 ? " fato" : " fatos")
-    if (z.remember) return "Salvo no Zinom"
+    // O bloco do metadata traz remember_id; o do estado da sessão traz remember.
+    if (z.status === "ok" || z.remember || z.remember_id) return "Salvo no Zinom"
     return ""
   }
 
@@ -244,6 +245,38 @@ Panel {
   }
 
   function refreshNotes() { if (!notesProcess.running) notesProcess.running = true }
+
+  property string syncingSlug: ""
+
+  Process {
+    id: syncProcess
+    running: false
+    onExited: {
+      root.syncingSlug = ""
+      root.refreshNotes()
+    }
+  }
+
+  function syncMeeting(slug) {
+    if (!slug || syncProcess.running) return
+    root.syncingSlug = slug
+    syncProcess.command = ["castanha", "sync", slug]
+    syncProcess.running = true
+  }
+
+  Process {
+    id: hideProcess
+    running: false
+  }
+
+  function hideMeeting(meeting) {
+    if (!meeting || hideProcess.running) return
+    var chave = meeting.series_key || meeting.uid
+    if (!chave) return
+    // O estado é reescrito pela própria CLI, e o FileView vê na hora.
+    hideProcess.command = ["castanha", "agenda", "hide", String(chave), "--title", String(meeting.title || "")]
+    hideProcess.running = true
+  }
 
   onOpenedChanged: if (opened) refreshNotes()
 
@@ -524,13 +557,10 @@ Panel {
             model: root.recentNotes
             NoteRow {
               required property var modelData
-              required property int index
               width: parent.width
               note: modelData
               // O destino do Zinom só vale para a reunião mais recente: é a
               // única que o estado ainda descreve.
-              zinomText: index === 0 ? root.zinomLine(root.lastResult) : ""
-              zinomFailed: index === 0 && root.zinomFalhou(root.lastResult)
             }
           }
         }
@@ -595,11 +625,22 @@ Panel {
         Text {
           id: chamadaGlyph
           textFormat: Text.PlainText
-          visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url)
+          visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url) && !rowHover.containsMouse
           text: "󰏌"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+        }
+
+        // Só aparece com o mouse em cima: agenda cheia de botão vira ruído.
+        PanelActionButton {
+          visible: rowHover.containsMouse
+          iconText: "󰈉"
+          tooltipText: "Não mostrar mais este evento (a série inteira)"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.hideMeeting(meetingRow.meeting)
         }
       }
 
@@ -643,11 +684,15 @@ Panel {
   component NoteRow: Item {
     id: noteRow
     property var note: null
-    property string zinomText: ""
-    property bool zinomFailed: false
 
     readonly property bool comProblema: !!(note && note.audio_status && note.audio_status !== "ok"
                                            && note.audio_status !== "desconhecido")
+
+    // O destino do Zinom vem do metadata da própria reunião, e não do estado
+    // da sessão: assim toda linha sabe o seu, não só a mais recente.
+    readonly property var zinomInfo: note && note.zinom ? note.zinom : null
+    readonly property bool precisaSync: !!zinomInfo && zinomInfo.status !== "ok" && zinomInfo.status !== "skipped"
+    readonly property bool sincronizando: !!note && root.syncingSlug === note.slug
 
     implicitHeight: noteCol.implicitHeight + Style.space(8)
 
@@ -691,10 +736,24 @@ Panel {
         Text {
           id: quando
           textFormat: Text.PlainText
+          visible: !sincronizar.visible
           text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+        }
+
+        // Segunda chance para a reunião que não entrou no Zinom.
+        PanelActionButton {
+          id: sincronizar
+          visible: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando)
+          enabled: !noteRow.sincronizando
+          iconText: "󰑐"
+          tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
         }
       }
 
@@ -712,9 +771,14 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        visible: noteRow.zinomText !== ""
-        text: (noteRow.zinomFailed ? "󰀦  " : "󰧘  ") + noteRow.zinomText
-        color: noteRow.zinomFailed ? root.urgent : root.dim
+        visible: text !== ""
+        text: {
+          if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
+          var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
+          if (linha === "") return ""
+          return (noteRow.precisaSync ? "󰀦  " : "󰧘  ") + linha
+        }
+        color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap

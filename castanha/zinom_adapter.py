@@ -283,6 +283,7 @@ class ZinomAdapter:
         metadata: Dict[str, Any],
         silver_markdown: str,
         gold_data: Dict[str, Any],
+        previous_remember_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Envia fatos e notas da reunião para a memória durável do Zinom."""
         if not self.enabled or not self.token:
@@ -323,22 +324,42 @@ class ZinomAdapter:
             results["errors"].append(f"Falha ao conectar no Zinom: {e}")
             return results
 
-        # 1. Nota da reunião via 'remember'
+        # 1. Nota da reunião. Reenvio EDITA a nota que já existe: rodar o
+        # sync duas vezes não pode encher o cérebro de cópias da mesma reunião.
+        nota = {
+            "text": note_content[:4000],
+            "title": f"Reunião: {title} ({date_str[:10]})",
+            "tags": ["castanha", "reuniao"],
+        }
         try:
-            res = client.call_tool("remember", {
-                "text": note_content[:4000],
-                "title": f"Reunião: {title} ({date_str[:10]})",
-                "tags": ["castanha", "reuniao"],
-            })
+            if previous_remember_id:
+                res = client.call_tool("brain_update", dict(nota, id=previous_remember_id))
+            else:
+                res = client.call_tool("remember", nota)
             payload = tool_json(res)
             # O hub devolve as duas chaves; `source_id` é a documentada.
             results["remember"] = {
                 "ok": True,
-                "id": payload.get("source_id") or payload.get("id"),
+                "id": payload.get("source_id") or payload.get("id") or previous_remember_id,
+                "updated": bool(previous_remember_id),
             }
         except ZinomError as e:
-            results["status"] = "error"
-            results["errors"].append(f"Erro no remember: {e}")
+            # Nota apagada no portal: o id velho não vale mais, grava de novo.
+            if previous_remember_id and "not found" in str(e).lower():
+                try:
+                    res = client.call_tool("remember", nota)
+                    payload = tool_json(res)
+                    results["remember"] = {
+                        "ok": True,
+                        "id": payload.get("source_id") or payload.get("id"),
+                        "updated": False,
+                    }
+                except ZinomError as e2:
+                    results["status"] = "error"
+                    results["errors"].append(f"Erro no remember: {e2}")
+            else:
+                results["status"] = "error"
+                results["errors"].append(f"Erro no remember: {e}")
 
         # 2. Fatos atômicos via 'brain_fact'
         for fact in gold_data.get("facts", []):

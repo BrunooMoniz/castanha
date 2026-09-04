@@ -117,11 +117,32 @@ class MeetingStorage:
                 "duration_seconds": meta.get("duration_seconds") or 0,
                 "audio_status": meta.get("audio_status") or "ok",
                 "audio_diagnostico": meta.get("audio_diagnostico") or "",
+                "zinom": meta.get("zinom") or {},
                 "silver_path": str(f),
                 "bronze_dir": str(self.bronze_dir / slug),
                 "modified": f.stat().st_mtime,
             })
         return results
+
+    def record_zinom_result(self, slug: str, resultado: Dict[str, Any]) -> None:
+        """Anota no Bronze o que o Zinom fez com esta reunião."""
+        arquivo = self.bronze_dir / slug / "metadata.json"
+        if not arquivo.exists():
+            return
+        metadata = self._read_bronze_metadata(slug)
+        remember = (resultado or {}).get("remember") or {}
+        metadata["zinom"] = {
+            "status": (resultado or {}).get("status", "error"),
+            "remember_id": remember.get("id"),
+            "facts_ingested": (resultado or {}).get("facts_ingested", 0),
+            "errors": (resultado or {}).get("errors", []),
+            "reason": (resultado or {}).get("reason"),
+            "synced_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            arquivo.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[Castanha] Não deu para anotar o resultado do Zinom em {slug}: {e}")
 
     def _read_bronze_metadata(self, slug: str) -> Dict[str, Any]:
         arquivo = self.bronze_dir / slug / "metadata.json"

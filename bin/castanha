@@ -140,6 +140,43 @@ def cmd_notes(args):
         subprocess.Popen(["xdg-open", str(storage.silver_dir)])
 
 
+def cmd_sync(args):
+    from castanha.sync import sync_meeting, sync_pending
+
+    if args.all:
+        resultados = sync_pending(limit=args.limit)
+        if not resultados:
+            print("Nada pendente: todas as reuniões recentes já estão no Zinom.")
+            return
+    elif args.slug:
+        resultados = [sync_meeting(args.slug)]
+    else:
+        recentes = MeetingStorage().list_recent_meetings(limit=1)
+        if not recentes:
+            print("Nenhuma reunião gravada ainda.")
+            return
+        resultados = [sync_meeting(recentes[0]["slug"])]
+
+    if args.json:
+        print(json.dumps({"results": resultados}, ensure_ascii=False))
+        return
+
+    falhou = False
+    for r in resultados:
+        if r.get("status") == "ok":
+            fatos = r.get("facts_ingested", 0)
+            print(f"✅ {r['slug']}: salvo no Zinom" + (f", com {fatos} fato(s)" if fatos else ""))
+        elif r.get("status") == "skipped":
+            print(f"⏭️  {r['slug']}: não enviado ({r.get('reason')})")
+        else:
+            falhou = True
+            print(f"❌ {r['slug']}: não salvou")
+            for e in r.get("errors", []):
+                print(f"     {e}")
+    if falhou:
+        sys.exit(2)
+
+
 def cmd_agenda(args):
     from castanha.agenda import collect_upcoming
     proximas = collect_upcoming(window_minutes=args.horas * 60)
@@ -158,6 +195,66 @@ def cmd_agenda(args):
         pessoas = f" · {len(m.attendees)} participantes" if m.attendees else ""
         chamada = f"\n      {m.conference_url}" if m.conference_url else ""
         print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
+
+def _refresh_agenda_state():
+    """Refiltra a agenda que já está no estado, sem ir à rede.
+
+    É o que dá resposta instantânea ao clique de "não mostrar" no painel: o
+    daemon só refaz a busca a cada cinco minutos.
+    """
+    from castanha.hidden import is_hidden, load_hidden
+    from castanha.state import StateManager
+
+    mgr = StateManager()
+    estado = mgr.read()
+    escondidos = load_hidden()
+    restantes = [m for m in (estado.get("upcoming_meetings") or [])
+                 if not is_hidden(m.get("series_key") or m.get("uid"), escondidos)]
+    mgr.write({
+        "upcoming_meetings": restantes,
+        "next_meeting": restantes[0] if restantes else None,
+    })
+
+
+def cmd_agenda_hide(args):
+    from castanha.hidden import hide
+
+    chave = hide(args.uid, args.title)
+    if not chave:
+        print("❌ Precisa de um uid ou series_key.")
+        sys.exit(1)
+    _refresh_agenda_state()
+    print(f"🙈 Escondido: {args.title or chave}")
+    print("   Vale para a série inteira. Para voltar: castanha agenda unhide " + chave)
+
+
+def cmd_agenda_unhide(args):
+    from castanha.hidden import unhide, unhide_all
+
+    if args.all:
+        print(f"👁️  {unhide_all()} evento(s) voltaram a aparecer.")
+    elif args.uid:
+        print("👁️  De volta à agenda." if unhide(args.uid) else "Esse evento não estava escondido.")
+    else:
+        print("❌ Informe a chave ou use --all.")
+        sys.exit(1)
+    _refresh_agenda_state()
+
+
+def cmd_agenda_hidden(args):
+    from castanha.hidden import listar
+
+    escondidos = listar()
+    if args.json:
+        print(json.dumps({"hidden": escondidos}, ensure_ascii=False))
+        return
+    if not escondidos:
+        print("Nada escondido.")
+        return
+    print("Eventos que você mandou não mostrar:")
+    for e in escondidos:
+        print(f"  {e['title'] or '(sem título)'}\n     chave: {e['key']}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -212,11 +309,35 @@ def main():
     p_notes.add_argument("--limit", type=int, default=10, help="Quantas reuniões listar")
     p_notes.set_defaults(func=cmd_notes)
 
+    # Sync
+    p_sync = subparsers.add_parser("sync", help="Reenvia uma reunião ao Zinom (a última, por padrão)")
+    p_sync.add_argument("slug", nargs="?", default=None, help="Slug da reunião; vazio = a última")
+    p_sync.add_argument("--all", action="store_true", help="Reenvia tudo que ficou pendente")
+    p_sync.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
+    p_sync.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_sync.set_defaults(func=cmd_sync)
+
     # Agenda
     p_agenda = subparsers.add_parser("agenda", help="Próximas reuniões das contas Google conectadas no Zinom")
     p_agenda.add_argument("--json", action="store_true", help="Saída em JSON")
     p_agenda.add_argument("--horas", type=int, default=12, help="Janela em horas")
     p_agenda.set_defaults(func=cmd_agenda)
+
+    ag_sub = p_agenda.add_subparsers(dest="agenda_cmd")
+
+    p_hide = ag_sub.add_parser("hide", help="Para de mostrar um evento (a série inteira)")
+    p_hide.add_argument("uid", help="uid ou series_key do evento (o painel manda o series_key)")
+    p_hide.add_argument("--title", default="", help="Título, só para você reconhecer na lista")
+    p_hide.set_defaults(func=cmd_agenda_hide)
+
+    p_unhide = ag_sub.add_parser("unhide", help="Volta a mostrar um evento escondido")
+    p_unhide.add_argument("uid", nargs="?", default=None, help="Chave a reexibir; vazio com --all limpa tudo")
+    p_unhide.add_argument("--all", action="store_true", help="Volta a mostrar todos")
+    p_unhide.set_defaults(func=cmd_agenda_unhide)
+
+    p_hidden = ag_sub.add_parser("hidden", help="Lista o que você mandou não mostrar")
+    p_hidden.add_argument("--json", action="store_true")
+    p_hidden.set_defaults(func=cmd_agenda_hidden)
 
     args = parser.parse_args()
     if not args.command:
