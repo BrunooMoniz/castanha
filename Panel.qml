@@ -333,6 +333,28 @@ Panel {
     hideProcess.running = true
   }
 
+  Process {
+    id: refreshAgendaProcess
+    running: false
+    command: ["castanha", "agenda", "refresh", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        stateFile.reload()
+      }
+    }
+    onExited: {
+      stateFile.reload()
+    }
+  }
+
+  readonly property bool refreshingAgenda: refreshAgendaProcess.running
+
+  function refreshAgenda() {
+    if (refreshAgendaProcess.running) return
+    refreshAgendaProcess.running = true
+  }
+
   onOpenedChanged: if (opened) {
     stateFile.reload()
     refreshNotes()
@@ -574,11 +596,40 @@ Panel {
           width: parent.width
           spacing: Style.space(4)
 
-          PanelSectionHeader {
+          Row {
             width: parent.width
-            text: "PRÓXIMAS REUNIÕES"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            spacing: Style.space(8)
+
+            PanelSectionHeader {
+              text: "PRÓXIMAS REUNIÕES"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              anchors.verticalCenter: parent.verticalCenter
+              width: Math.max(0, parent.width - btnRefreshAgenda.width - Style.space(8))
+              elide: Text.ElideRight
+            }
+
+            PanelActionButton {
+              id: btnRefreshAgenda
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰑐"
+              tooltipText: root.refreshingAgenda ? "Atualizando agendas…" : "Atualizar agendas agora"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              enabled: !root.refreshingAgenda
+              opacity: root.refreshingAgenda ? 0.6 : 1.0
+              onClicked: root.refreshAgenda()
+
+              RotationAnimation on rotation {
+                running: root.refreshingAgenda
+                loops: Animation.Infinite
+                from: 0
+                to: 360
+                duration: 900
+                onRunningChanged: if (!running) btnRefreshAgenda.rotation = 0
+              }
+            }
           }
 
           Text {
@@ -586,8 +637,19 @@ Panel {
             width: parent.width
             visible: root.upcoming.length === 0
             text: root.agendaError !== "" ? "Agenda indisponível: " + root.agendaError
-                                          : "Nada nas próximas horas"
+                                          : (root.refreshingAgenda ? "Atualizando agendas…" : "Nada nas próximas horas")
             color: root.agendaError !== "" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            visible: root.upcoming.length > 0 && root.agendaError !== ""
+            text: "󰀦  " + root.agendaError
+            color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap

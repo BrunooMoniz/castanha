@@ -27,6 +27,7 @@ def collect_upcoming(
     config: Optional[Dict[str, Any]] = None,
     window_minutes: int = 720,
     limit: int = 8,
+    force: bool = False,
 ) -> List[MeetingEvent]:
     """As próximas reuniões, das duas fontes, ordenadas e sem repetição."""
     cfg = config or load_config()
@@ -39,7 +40,7 @@ def collect_upcoming(
         eventos.extend(get_upcoming_meetings(feeds, window_minutes=window_minutes))
 
     try:
-        eventos.extend(_zinom_source(cfg).upcoming(window_hours=max(1, window_minutes // 60)))
+        eventos.extend(_zinom_source(cfg).upcoming(window_hours=max(1, window_minutes // 60), force=force))
     except Exception as e:
         print(f"[Castanha] Agenda do Zinom indisponível: {e}")
 

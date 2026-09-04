@@ -120,5 +120,17 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(details2["has_audio"])
         self.assertEqual(details2["audio_status"], "audio_apagado")
 
+    def test_agenda_refresh_cli(self):
+        res = self._run_cli("agenda", "refresh", "--json")
+        self.assertEqual(res.returncode, 0)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("meetings", data)
+
+        res_alias = self._run_cli("refresh-agenda", "--json")
+        self.assertEqual(res_alias.returncode, 0)
+        data_alias = json.loads(res_alias.stdout)
+        self.assertEqual(data_alias["status"], "ok")
+
 if __name__ == "__main__":
     unittest.main()

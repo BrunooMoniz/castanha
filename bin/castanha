@@ -298,6 +298,51 @@ def cmd_agenda(args):
         chamada = f"\n      {m.conference_url}" if m.conference_url else ""
         print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
 
+
+def cmd_agenda_refresh(args):
+    """Bate manualmente nas agendas (feeds iCal + contas Zinom) e atualiza o estado imediatamente."""
+    from castanha.agenda import collect_upcoming
+    from castanha.config import load_config
+    from castanha.state import StateManager
+
+    cfg = load_config()
+    horas = getattr(args, "horas", 12) or 12
+    window_minutes = horas * 60
+
+    mgr = StateManager()
+    try:
+        proximas = collect_upcoming(cfg, window_minutes=window_minutes, force=True)
+        proximas_dicts = [m.to_dict() for m in proximas]
+        mgr.write({
+            "next_meeting": proximas_dicts[0] if proximas_dicts else None,
+            "upcoming_meetings": proximas_dicts,
+            "agenda_error": None,
+        })
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "status": "ok",
+                "count": len(proximas),
+                "meetings": proximas_dicts,
+            }, ensure_ascii=False))
+        else:
+            n = len(proximas)
+            print(f"Agenda atualizada: {n} reunião(ões) encontrada(s) nas próximas {horas}h.")
+            for m in proximas:
+                hora = m.start.astimezone().strftime("%d/%m %H:%M")
+                conta = f" · {m.account}" if m.account else ""
+                pessoas = f" · {len(m.attendees)} participantes" if m.attendees else ""
+                chamada = f"\n      {m.conference_url}" if m.conference_url else ""
+                print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
+    except Exception as e:
+        mgr.write({"agenda_error": str(e)})
+        if getattr(args, "json", False):
+            print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
+            sys.exit(1)
+        else:
+            print(f"Erro ao atualizar agenda: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
 def _refresh_agenda_state():
     """Refiltra a agenda que já está no estado, sem ir à rede.
 
@@ -452,6 +497,11 @@ def main():
 
     ag_sub = p_agenda.add_subparsers(dest="agenda_cmd")
 
+    p_refresh = ag_sub.add_parser("refresh", aliases=["sync", "update"], help="Bate nas agendas agora e atualiza o estado")
+    p_refresh.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_refresh.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_refresh.set_defaults(func=cmd_agenda_refresh)
+
     p_hide = ag_sub.add_parser("hide", help="Para de mostrar um evento (a série inteira)")
     p_hide.add_argument("uid", help="uid ou series_key do evento (o painel manda o series_key)")
     p_hide.add_argument("--title", default="", help="Título, só para você reconhecer na lista")
@@ -465,6 +515,12 @@ def main():
     p_hidden = ag_sub.add_parser("hidden", help="Lista o que você mandou não mostrar")
     p_hidden.add_argument("--json", action="store_true")
     p_hidden.set_defaults(func=cmd_agenda_hidden)
+
+    # Atalho de nível superior para atualizar agenda imediatamente
+    p_top_refresh = subparsers.add_parser("refresh-agenda", help="Atualiza a agenda imediatamente nas contas e feeds")
+    p_top_refresh.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_top_refresh.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_top_refresh.set_defaults(func=cmd_agenda_refresh)
 
     args = parser.parse_args()
     if not args.command:

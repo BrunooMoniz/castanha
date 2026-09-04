@@ -119,8 +119,8 @@ class ZinomCalendar:
         self._calendars_at = time.time()
         return self._calendars
 
-    def selected_calendars(self) -> List[Dict[str, Any]]:
-        todas = self.calendars()
+    def selected_calendars(self, force: bool = False) -> List[Dict[str, Any]]:
+        todas = self.calendars(force=force)
         if not self.wanted:
             return [c for c in todas if c.get("primary")]
 
@@ -145,7 +145,7 @@ class ZinomCalendar:
 
         eventos: List[MeetingEvent] = []
         vistos = set()
-        for cal in self.selected_calendars():
+        for cal in self.selected_calendars(force=force):
             ref = cal.get("calendar_ref")
             if not ref:
                 continue
