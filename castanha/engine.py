@@ -36,10 +36,14 @@ def notify(title: str, message: str, actions: Optional[list] = None, timeout: in
         try:
             res = subprocess.run(cmd, capture_output=True, text=True)
             return res.stdout.strip()
-        except Exception:
+        except OSError as exc:
+            print(f"[Castanha] Notificação indisponível ({type(exc).__name__}); processamento continua", file=sys.stderr)
             return None
     else:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            print(f"[Castanha] Notificação indisponível ({type(exc).__name__}); processamento continua", file=sys.stderr)
         return None
 
 class CastanhaEngine:
