@@ -11,6 +11,7 @@ from castanha.config import get_state_dir
 DEFAULT_STATE: Dict[str, Any] = {
     "status": "idle",  # idle, recording, paused, processing
     "pid": None,
+    "processing_pid": None,
     "audio_path": None,
     "mode": "dual",
     "started_at": None,

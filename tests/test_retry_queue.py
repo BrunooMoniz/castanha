@@ -130,6 +130,20 @@ class TestRetryQueue(unittest.TestCase):
             RetryScheduler(enabled=False).tick(now=100)
             launch.assert_not_called()
 
+    def test_dead_finalizer_does_not_block_automatic_recovery(self):
+        from castanha.retry import RetryScheduler
+        with patch("castanha.retry.subprocess.Popen") as launch, \
+             patch("castanha.retry.os.kill", side_effect=ProcessLookupError):
+            RetryScheduler().tick(now=100, capture_status="processing", processing_pid=99999)
+            launch.assert_called_once()
+
+    def test_live_or_unknown_finalizer_is_not_interrupted(self):
+        from castanha.retry import RetryScheduler
+        with patch("castanha.retry.subprocess.Popen") as launch, patch("castanha.retry.os.kill"):
+            RetryScheduler().tick(now=100, capture_status="processing", processing_pid=99999)
+            RetryScheduler().tick(now=100, capture_status="processing")
+            launch.assert_not_called()
+
     def test_manual_sync_never_publishes_invalid_metadata(self):
         from castanha.sync import sync_meeting
         directory = self.meeting("a")

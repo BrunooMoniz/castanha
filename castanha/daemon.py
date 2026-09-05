@@ -99,7 +99,8 @@ class CastanhaDaemon:
         while self.running:
             now = time.time()
             state = self.state_mgr.read()
-            self.retry_scheduler.tick(capture_status=state.get("status", "idle"))
+            self.retry_scheduler.tick(capture_status=state.get("status", "idle"),
+                                      processing_pid=state.get("processing_pid"))
 
             # 1. Atualizador de cronômetro durante gravação
             if state.get("status") == "recording":

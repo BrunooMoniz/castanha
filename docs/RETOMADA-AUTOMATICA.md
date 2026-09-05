@@ -57,3 +57,7 @@ O botão de retry das reuniões novas retoma `.jobs`, sem passar pelo append leg
 estado de finalização interrompida. Os campos por gravação alimentam o indicador de retry do painel.
 O caminho legado mantém lock por reunião, escrita atômica e persistência imediata do recibo.
 Suíte integrada: 187 testes verdes no XPS, sem instalar nem publicar.
+
+Complemento: o finalizador registra `processing_pid`. A retomada automática pode recuperar o
+estado `processing` se esse processo comprovadamente não existir mais; não interfere em processo
+vivo ou em estado legado sem identidade suficiente. Mais dois testes, total 189 verdes.

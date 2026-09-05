@@ -210,7 +210,7 @@ class CastanhaEngine:
         if state.get("status") not in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Nenhuma gravação em andamento para finalizar."}
 
-        self.state_mgr.write({"status": "processing"})
+        self.state_mgr.write({"status": "processing", "processing_pid": os.getpid()})
         notify("Finalizando Reunião ⏳", "Processando transcrição e gerando notas...")
 
         pid = state.get("pid")
@@ -283,7 +283,7 @@ class CastanhaEngine:
                 write_json(bronze / "metadata.json", metadata)
 
         result = self.process_pending(slug)
-        self.state_mgr.write({"status": "idle", "pid": None, "audio_path": None,
+        self.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
                               "current_meeting": None, "capture_slug": None, "capture_job_id": None,
                               "elapsed_seconds": 0, "last_result": result["result"]})
         if result["status"] == "partial":
@@ -453,7 +453,7 @@ class CastanhaEngine:
             result = self.process_pending(slug)
             state = self.state_mgr.read()
             if state.get("status") == "processing" and state.get("capture_slug") == slug:
-                self.state_mgr.write({"status": "idle", "pid": None, "audio_path": None,
+                self.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
                                       "capture_slug": None, "capture_job_id": None,
                                       "current_meeting": None, "last_result": result["result"]})
             return result

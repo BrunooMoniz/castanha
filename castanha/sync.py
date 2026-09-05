@@ -53,7 +53,7 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
         result = engine.process_pending(slug)["result"]
         state = engine.state_mgr.read()
         if state.get("status") == "processing" and state.get("capture_slug") == slug:
-            engine.state_mgr.write({"status": "idle", "pid": None, "audio_path": None,
+            engine.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
                                     "capture_slug": None, "capture_job_id": None,
                                     "current_meeting": None, "last_result": result})
         return {"slug": slug, **result["zinom"]}

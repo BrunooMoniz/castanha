@@ -1,6 +1,7 @@
 """Fila automática com checkpoint em disco; calendário não espera a transcrição."""
 import fcntl
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -79,7 +80,7 @@ class RetryScheduler:
         self.child = None
         self.next_check = 0
 
-    def tick(self, now=None, capture_status="idle"):
+    def tick(self, now=None, capture_status="idle", processing_pid=None):
         now = time.monotonic() if now is None else now
         if not self.enabled:
             return
@@ -90,8 +91,20 @@ class RetryScheduler:
             if code:
                 print(f"[Castanha] Rodada automática retornou {code}; pendências preservadas")
             self.child = None
-        if now < self.next_check or capture_status in ("recording", "paused", "processing"):
+        if now < self.next_check or capture_status in ("recording", "paused"):
             return
+        if capture_status == "processing":
+            # Só recuperar automaticamente um finalizador comprovadamente morto.
+            # Estado legado sem PID não distingue processo vivo de interrompido.
+            if not isinstance(processing_pid, int) or processing_pid <= 0:
+                return
+            try:
+                os.kill(processing_pid, 0)
+                return
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return
         self.next_check = now + 30
         try:
             self.child = subprocess.Popen(
