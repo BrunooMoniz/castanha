@@ -48,6 +48,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "deepgram_model": "nova-2",
         "vps_endpoint": "",
         "vps_auth_token": "",
+        # Transcrição por canal (microfone e sistema separados). DESLIGADA: ligar
+        # dobra os minutos cobrados e depende do contrato F4 e da QA no XPS.
+        "por_canal": False,
     },
     "llm": {
         "provider": "groq",  # "groq", "openai", "openrouter", "vps"

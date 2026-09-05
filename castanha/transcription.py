@@ -26,6 +26,19 @@ class TranscriptionResult:
     provider: str
     raw_response: Dict[str, Any]
 
+# O tipo declarado tem que casar com o arquivo. O canal separado vai em FLAC, e
+# anunciar tudo como audio/ogg entregaria FLAC rotulado de Ogg para a Groq.
+AUDIO_MIME = {
+    ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".webm": "audio/webm",
+}
+
+
+def audio_mime(path: Path) -> str:
+    """Desconhecido continua como audio/ogg: é o que a captura sempre gerou."""
+    return AUDIO_MIME.get(path.suffix.lower(), "audio/ogg")
+
+
 def build_multipart_form(fields: Dict[str, str], files: Dict[str, tuple]) -> tuple[bytes, str]:
     boundary = f"----CastanhaBoundary{uuid.uuid4().hex}"
     body = bytearray()
@@ -159,7 +172,7 @@ class GroqTranscriber(BaseTranscriber):
             fields["language"] = cfg_lang
 
         files = {
-            "file": (file_path.name, audio_bytes, "audio/ogg")
+            "file": (file_path.name, audio_bytes, audio_mime(file_path))
         }
 
         body, content_type = build_multipart_form(fields, files)

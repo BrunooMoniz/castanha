@@ -21,6 +21,7 @@ from castanha.audio import (
     probe_duration_seconds,
 )
 from castanha.calendar import MeetingEvent
+from castanha.channel_transcription import transcribe_dual
 from castanha.config import load_config
 from castanha.durability import atomic_write, write_json, meeting_lock, sync_directory, file_sha256
 from castanha.state import StateManager
@@ -297,6 +298,38 @@ class CastanhaEngine:
             notify("Notas Prontas! 🌰", title)
         return result
 
+    def _por_canal(self) -> bool:
+        """Flag DESLIGADA por padrão: ligar exige contrato F4, QA no XPS e rollback."""
+        return self.config.get("transcription", {}).get("por_canal") is True
+
+    def _transcrever_por_canal(self, source: Path, bronze: Path):
+        """Um envio por canal, cada um com orçamento, teto e checkpoint próprios.
+
+        O canal já transcrito fica no checkpoint dentro do Bronze: falhar no
+        segundo não recobra o primeiro. Gravação mono cai para uma origem
+        genérica em vez de alegar microfone e sistema onde só existe um canal.
+        """
+        from castanha.budget import BudgetManager
+        from castanha.transcription import TranscriptionPending, VpsSshTranscriber
+
+        cfg = self.config.get("transcription", {})
+        pipeline = f"canal-v1:{cfg.get('groq_model', 'whisper-large-v3-turbo')}"
+
+        def transcrever(path: Path, duration_seconds: float):
+            # A duração é a DO CANAL: o orçamento é consultado por envio, e o
+            # segundo canal já enxerga o que o primeiro consumiu.
+            transcriber = get_transcriber(estimated_duration_sec=duration_seconds)
+            # O job remoto guarda o áudio como .ogg e retoma por esse nome. Mandar
+            # FLAC por ali quebraria a retomada de jobs já aceitos, então até a
+            # ponte F4 cobrir a VPS o canal fica pendente em vez de subir errado.
+            if isinstance(transcriber, VpsSshTranscriber):
+                raise TranscriptionPending(
+                    "Transcrição por canal ainda não cobre a VPS; áudio preservado")
+            return transcriber.transcribe(path, mode="mic_only")
+
+        return transcribe_dual(source, bronze / ".channels", transcrever,
+                               pipeline_id=pipeline, budget=BudgetManager())
+
     def process_pending(self, slug: str) -> Dict[str, Any]:
         """Retoma checkpoints do Bronze sem recapturar nem duplicar transcrições."""
         bronze = self.storage.bronze_dir / slug
@@ -331,6 +364,14 @@ class CastanhaEngine:
             try:
                 if audio_status == "sem_audio":
                     job.update(transcript="", provider="nenhum (áudio em silêncio)")
+                elif self._por_canal():
+                    transcription = self._transcrever_por_canal(source, bronze)
+                    if not transcription.text.strip():
+                        raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
+                    job.update(transcript=transcription.text, provider=transcription.provider,
+                               utterances=[asdict(segment) for segment in transcription.utterances],
+                               channel_provenance=True,
+                               channels=transcription.raw_response.get("channels") or [])
                 else:
                     transcriber = get_transcriber(estimated_duration_sec=duration or state.get("elapsed_seconds") or 60)
                     try:
@@ -547,7 +588,17 @@ class CastanhaEngine:
                 provider_final = provider_final or "nenhum (áudio em silêncio)"
                 continue
 
-            texto, provider, erro = self._transcribe_with_fallback(audio_path, mode, dur or 60.0)
+            if self._por_canal():
+                # O "tentar de novo" não pode virar a exceção que manda o estéreo
+                # inteiro para um Whisper só. Aqui o texto já vem com a origem em
+                # cada linha; os segmentos ficam no checkpoint por canal.
+                try:
+                    resultado = self._transcrever_por_canal(audio_path, self.storage.bronze_dir / slug)
+                    texto, provider, erro = resultado.text, resultado.provider, None
+                except Exception as exc:
+                    texto, provider, erro = "", "failed", str(exc)
+            else:
+                texto, provider, erro = self._transcribe_with_fallback(audio_path, mode, dur or 60.0)
             if texto.strip():
                 self.storage.append_transcript(slug, rec["filename"], texto)
                 self.storage.update_recording(slug, rec["filename"], transcribed=True,

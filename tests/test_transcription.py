@@ -381,3 +381,43 @@ class TestVpsTimeout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMimeDoArquivo(unittest.TestCase):
+    """O tipo declarado tem que casar com o arquivo: canal separado vai em FLAC."""
+
+    def test_mime_segue_a_extensao_e_mantem_ogg_como_padrao(self):
+        from castanha.transcription import audio_mime
+        self.assertEqual(audio_mime(Path("channel-0.flac")), "audio/flac")
+        self.assertEqual(audio_mime(Path("capture.ogg")), "audio/ogg")
+        self.assertEqual(audio_mime(Path("captura.desconhecido")), "audio/ogg")
+
+    def test_canal_flac_nao_sobe_anunciado_como_ogg(self):
+        temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, temp, True)
+        caminho = temp / "channel-0.flac"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=1000:duration=1", "-c:a", "flac", str(caminho)],
+                       check=True, capture_output=True)
+        capturado = {}
+
+        class Resposta:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"text": "ok", "segments": [], "duration": 1}).encode("utf-8")
+
+        def falso_urlopen(req, timeout=None):
+            capturado["body"] = req.data
+            return Resposta()
+
+        with patch.dict("os.environ", {"XDG_STATE_HOME": str(temp / "state"),
+                                       "XDG_CONFIG_HOME": str(temp / "config")}), \
+             patch("castanha.transcription.urllib.request.urlopen", falso_urlopen):
+            GroqTranscriber("chave-de-teste").transcribe(caminho)
+        self.assertIn(b"Content-Type: audio/flac", capturado["body"])
+        self.assertNotIn(b"Content-Type: audio/ogg", capturado["body"])

@@ -140,6 +140,101 @@ class TestDurableJobs(unittest.TestCase):
         self.assertEqual({u['speaker'] for u in gravacao['utterances']},
                          {'Microfone local', 'Áudio do sistema'})
 
+    def gravacao_estereo(self):
+        """Estéreo real: o módulo por canal roda FFmpeg de verdade sobre ele."""
+        caminho = self.root / 'estereo.wav'
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                        'aevalsrc=0.2*sin(2*PI*440*t)|0.3*sin(2*PI*880*t):d=1:s=16000',
+                        str(caminho)], check=True, capture_output=True)
+        return caminho
+
+    def engine_por_canal(self):
+        """Liga a flag no arquivo de config: é assim que o daemon a enxerga."""
+        arquivo = self.root / 'config/castanha/config.json'
+        config = json.loads(arquivo.read_text())
+        config['transcription']['por_canal'] = True
+        arquivo.write_text(json.dumps(config))
+        engine = CastanhaEngine()
+        self.assertTrue(engine._por_canal())
+        engine.state_mgr.write({'status': 'recording', 'pid': None,
+                                'audio_path': str(self.gravacao_estereo()),
+                                'current_meeting': {'title': 'Fixture'}, 'mode': 'dual'})
+        return engine
+
+    def test_channel_flag_is_off_by_default_and_sends_the_whole_recording(self):
+        recebidos = []
+        with patch('castanha.engine.get_transcriber') as provider:
+            provider.return_value.transcribe.side_effect = (
+                lambda path, mode='dual': recebidos.append(Path(path))
+                or self.transcription())
+            self.engine.stop_recording()
+        self.assertFalse(self.engine._por_canal())
+        self.assertEqual([p.suffix for p in recebidos], ['.ogg'])
+        self.assertFalse(any(p.name.startswith('channel-') for p in recebidos))
+
+    def test_channel_flag_sends_each_origin_apart_and_resumes_only_the_pending_one(self):
+        from castanha.transcription import Utterance
+        engine = self.engine_por_canal()
+        chamadas, duracoes, falhar = [], [], {1}
+
+        class Provedor:
+            def transcribe(_self, path, mode='dual'):
+                canal = int(Path(path).stem[-1])
+                chamadas.append((canal, Path(path).suffix))
+                if canal in falhar:
+                    raise RuntimeError('provedor caiu no canal remoto')
+                texto = f'fala do canal {canal}'
+                return TranscriptionResult(
+                    texto, [Utterance('Falante', texto, 0.1 * canal, 1.0)], 'fixture', {})
+
+        def escolher(estimated_duration_sec=60):
+            duracoes.append(estimated_duration_sec)
+            return Provedor()
+
+        with patch('castanha.engine.get_transcriber', side_effect=escolher):
+            resultado = engine.stop_recording()
+        # O canal 1 caiu: a reunião fica pendente, com o canal 0 já pago no checkpoint.
+        self.assertEqual(resultado['status'], 'partial')
+        self.assertEqual(chamadas, [(0, '.flac'), (1, '.flac')])
+        slug = resultado['result']['slug']
+        bronze = engine.storage.bronze_dir / slug
+        checkpoints = sorted(p.name for p in (bronze / '.channels').rglob('*.json'))
+        self.assertEqual(checkpoints, ['channel-0.json'])
+
+        falhar.clear()
+        with patch('castanha.engine.get_transcriber', side_effect=escolher):
+            sync_meeting(slug, engine.storage)
+        # Só o canal que faltava é enviado de novo; o canal 0 não é recobrado.
+        self.assertEqual(chamadas, [(0, '.flac'), (1, '.flac'), (1, '.flac')])
+        # Orçamento por canal: a duração consultada é a do canal, não da reunião.
+        for medida in duracoes:
+            self.assertAlmostEqual(medida, 1.0, delta=0.2)
+        gravacao = json.loads(
+            (bronze / 'transcript_segments.json').read_text())['recordings'][0]
+        self.assertTrue(gravacao['channel_provenance'])
+        self.assertEqual([u['origin'] for u in gravacao['utterances']],
+                         ['microfone_local', 'audio_sistema'])
+        self.assertEqual([u['speaker'] for u in gravacao['utterances']],
+                         ['Microfone local', 'Áudio do sistema'])
+        self.assertEqual(gravacao['utterance_count'], 2)
+        self.assertEqual([c['origin'] for c in gravacao['channels']],
+                         ['microfone_local', 'audio_sistema'])
+        texto = (bronze / 'transcript_raw.txt').read_text()
+        self.assertIn('Microfone local: fala do canal 0', texto)
+        self.assertIn('Áudio do sistema: fala do canal 1', texto)
+
+    def test_channel_path_keeps_the_audio_pending_when_only_the_vps_answers(self):
+        engine = self.engine_por_canal()
+        with patch('castanha.engine.get_transcriber',
+                   side_effect=lambda estimated_duration_sec=60: VpsSshTranscriber('host-de-teste')):
+            resultado = engine.stop_recording()
+        self.assertEqual(resultado['status'], 'partial')
+        slug = resultado['result']['slug']
+        bronze = engine.storage.bronze_dir / slug
+        # Nada de mandar FLAC com nome de .ogg para o job remoto: fica pendente.
+        self.assertFalse(list((bronze / '.channels').rglob('*.json')))
+        self.assertIn('VPS', resultado['result']['transcription_error'] or '')
+
     def test_all_summary_stages_receive_channel_identity_guardrail(self):
         from castanha import summarizer
         for name in ('PARTIAL', 'COMBINE', 'SILVER', 'GOLD'):
