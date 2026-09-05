@@ -74,3 +74,9 @@ São seis casos de produto, mais inicialização/finalização do Qt (8 passes, 
 Esse teste é adicional aos 189 testes Python; não exige Node ou serviço externo. Não substitui
 o smoke do painel instalado. O qmllint amplo tem avisos de tipos dinâmicos também no baseline
 do Omarchy; não foi declarado verde nem teve avisos desabilitados para simular sucesso.
+
+Recibos `zinom` com tipo inválido também ficam isolados: antes, uma string ou lista no campo
+derrubava o inventário inteiro, antes do tratamento por item. Dois testes reproduziram a falha
+e agora exigem continuidade das demais reuniões, erro explícito e preservação byte a byte
+do metadado corrompido. Total: 191 testes Python verdes. Risco AMARELO, sujeito à revisão
+cruzada do candidato antes da instalação; nenhum dado real foi alterado pelo ensaio.

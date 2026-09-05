@@ -130,6 +130,28 @@ class TestRetryQueue(unittest.TestCase):
             RetryScheduler(enabled=False).tick(now=100)
             launch.assert_not_called()
 
+    def test_invalid_delivery_receipt_does_not_block_other_meetings(self):
+        from castanha.retry import drain_queue
+        directory = self.meeting("a", zinom="corrupt")
+        original = (directory / "metadata.json").read_bytes()
+        self.meeting("b")
+        with patch("castanha.retry.sync_meeting", return_value={"status": "ok"}) as sync:
+            result = drain_queue(self.storage, now=100)
+        self.assertEqual([c.args[0] for c in sync.call_args_list], ["b"])
+        self.assertEqual(result[0]["status"], "error")
+        self.assertEqual((directory / "metadata.json").read_bytes(), original)
+
+    def test_manual_queue_preserves_invalid_delivery_receipt(self):
+        directory = self.meeting("a", zinom=["corrupt"])
+        original = (directory / "metadata.json").read_bytes()
+        self.meeting("b", title="Fixture", audio_status="ok")
+        with patch("castanha.sync.ZinomAdapter") as adapter:
+            adapter.return_value.ingest_meeting.return_value = {"status": "ok"}
+            result = sync_pending(storage=self.storage)
+        self.assertEqual([r["status"] for r in result], ["error", "ok"])
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual((directory / "metadata.json").read_bytes(), original)
+
     def test_dead_finalizer_does_not_block_automatic_recovery(self):
         from castanha.retry import RetryScheduler
         with patch("castanha.retry.subprocess.Popen") as launch, \

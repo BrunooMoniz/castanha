@@ -42,7 +42,10 @@ def drain_queue(storage=None, now=None, limit=5):
             try:
                 metadata_path = bronze / "metadata.json"
                 metadata = _object(metadata_path) if metadata_path.exists() else {}
-                delivery = metadata.get("zinom") or {}
+                delivery = metadata.get("zinom")
+                if delivery is not None and not isinstance(delivery, dict):
+                    raise ValueError("Recibo Zinom inválido")
+                delivery = delivery or {}
                 if delivery.get("status") == "tombstoned":
                     continue
                 if (delivery.get("facts_status") == "pending_lineage" and delivery.get("remember_id")

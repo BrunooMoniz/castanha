@@ -29,13 +29,15 @@ def _read_json(path: Path) -> Dict[str, Any]:
 def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
     """Precisa de sync quando nunca foi, ou quando a última tentativa falhou."""
     z = metadata.get("zinom") or {}
+    if not isinstance(z, dict):
+        return True
     if z.get("status") == "tombstoned":
         return False
     if metadata.get("processing_status") == "pending":
         return True
     if z.get("status") == "skipped":
         # Legado: skipped sem motivo representava descarte deliberado.
-        reason = (z.get("reason") or "").lower()
+        reason = str(z.get("reason") or "").lower()
         return "token" in reason or "credencia" in reason or "desligada" in reason
     return z.get("status") != "ok"
 
@@ -45,6 +47,9 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
+    metadata = _read_json(bronze / "metadata.json")
+    if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
+        return {"slug": slug, "status": "error", "errors": ["Recibo Zinom inválido; arquivos preservados"]}
     jobs = [_read_json(p) for p in (bronze / ".jobs").glob("*.json")]
     if any(job.get("stage") != "done" for job in jobs):
         from castanha.engine import CastanhaEngine
@@ -72,6 +77,8 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
     metadata = _read_json(metadata_file)
     if not metadata:
         return {"slug": slug, "status": "error", "errors": ["Metadados inválidos; arquivos preservados"]}
+    if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
+        return {"slug": slug, "status": "error", "errors": ["Recibo Zinom inválido; arquivos preservados"]}
     silver_file = storage.silver_dir / f"{slug}.md"
     gold_file = storage.gold_dir / f"{slug}.json"
 
@@ -117,11 +124,18 @@ def pending_candidates(storage: MeetingStorage):
         if not path.exists() and not any((bronze / ".jobs").glob("*.json")):
             continue
         metadata = _read_json(path)
-        if (metadata.get("zinom") or {}).get("status") == "tombstoned":
+        delivery = metadata.get("zinom")
+        if delivery is not None and not isinstance(delivery, dict):
+            # O executor reportará o recibo inválido sem sobrescrevê-lo.
+            candidates.append(("", bronze.name))
+            continue
+        delivery = delivery or {}
+        if delivery.get("status") == "tombstoned":
             continue
         unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
         if meeting_needs_sync(metadata) or unfinished:
-            candidates.append(((metadata.get("zinom") or {}).get("synced_at") or "", path.parent.name))
+            synced_at = delivery.get("synced_at")
+            candidates.append((synced_at if isinstance(synced_at, str) else "", path.parent.name))
     candidates.sort()
     return candidates
 
