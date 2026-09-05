@@ -100,6 +100,46 @@ class TestDurableJobs(unittest.TestCase):
         self.assertEqual(recording['utterances'][0]['start'], 0.2)
         self.assertTrue(recording['source_sha256'])
 
+    def test_channel_origin_and_hashes_reach_the_bronze_envelope(self):
+        from castanha.channel_transcription import ChannelUtterance
+        falas = [ChannelUtterance('Microfone local', 'decisão local', 0.2, 1.3,
+                                  0, 'microfone_local', 'sha-origem', 'sha-canal-0'),
+                 ChannelUtterance('Áudio do sistema', 'resposta remota', 0.4, 1.9,
+                                  1, 'audio_sistema', 'sha-origem', 'sha-canal-1')]
+        canais = [{'channel': 0, 'origin': 'microfone_local', 'label': 'Microfone local',
+                   'provider': 'fixture', 'silent': False, 'channel_sha256': 'sha-canal-0',
+                   'utterance_count': 1},
+                  {'channel': 1, 'origin': 'audio_sistema', 'label': 'Áudio do sistema',
+                   'provider': 'fixture', 'silent': False, 'channel_sha256': 'sha-canal-1',
+                   'utterance_count': 1}]
+        result = TranscriptionResult(
+            '[0.20s] Microfone local: decisão local\n[0.40s] Áudio do sistema: resposta remota',
+            falas, 'fixture', {'channel_provenance': True, 'identity_inferred': False,
+                               'channels': canais, 'utterance_count': 2})
+        with patch('castanha.engine.get_transcriber') as provider:
+            provider.return_value.transcribe.return_value = result
+            slug = self.engine.stop_recording()['result']['slug']
+        bronze = self.engine.storage.bronze_dir / slug
+        gravacao = json.loads((bronze / 'transcript_segments.json').read_text())['recordings'][0]
+        metadata = self.engine.storage._read_bronze_metadata(slug)
+        self.assertTrue(gravacao['channel_provenance'])
+        self.assertEqual(gravacao['utterance_count'], len(gravacao['utterances']))
+        self.assertEqual([u['origin'] for u in gravacao['utterances']],
+                         ['microfone_local', 'audio_sistema'])
+        self.assertEqual([u['channel'] for u in gravacao['utterances']], [0, 1])
+        self.assertEqual([u['start'] for u in gravacao['utterances']], [0.2, 0.4])
+        self.assertEqual({u['channel_sha256'] for u in gravacao['utterances']},
+                         {'sha-canal-0', 'sha-canal-1'})
+        self.assertEqual([c['origin'] for c in gravacao['channels']],
+                         ['microfone_local', 'audio_sistema'])
+        # O hash da gravação vem do job em disco, não do que o provedor afirmou.
+        self.assertEqual(gravacao['source_sha256'], metadata['recordings'][0]['sha256'])
+        self.assertEqual([o['origin'] for o in metadata['recordings'][0]['origins']],
+                         ['microfone_local', 'audio_sistema'])
+        # Nenhuma fala recebe nome: só as duas origens técnicas aparecem.
+        self.assertEqual({u['speaker'] for u in gravacao['utterances']},
+                         {'Microfone local', 'Áudio do sistema'})
+
     def test_all_summary_stages_receive_channel_identity_guardrail(self):
         from castanha import summarizer
         for name in ('PARTIAL', 'COMBINE', 'SILVER', 'GOLD'):

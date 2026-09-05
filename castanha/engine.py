@@ -346,7 +346,8 @@ class CastanhaEngine:
                         raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
                     job.update(transcript=transcription.text, provider=transcription.provider,
                                utterances=[asdict(segment) for segment in transcription.utterances],
-                               channel_provenance=transcription.raw_response.get("channel_provenance") is True)
+                               channel_provenance=transcription.raw_response.get("channel_provenance") is True,
+                               channels=transcription.raw_response.get("channels") or [])
                 job.update(stage="transcribed", error=None)
             except Exception as exc:
                 job.update(error=str(exc), provider="failed")
@@ -366,14 +367,22 @@ class CastanhaEngine:
             if job.get("transcript") and job.get("provider") != "mock":
                 parts.append(job["transcript"])
             source = Path(job["audio_path"])
-            records.append({"id": source.name, "filename": source.name, "path": str(source),
-                            "job_id": job["id"], "sha256": job.get("sha256"), "recorded_at": job["recorded_at"],
-                            "size_bytes": source.stat().st_size if source.exists() else 0,
-                            "duration_seconds": job.get("duration_seconds", 0),
-                            "audio_status": job.get("audio_status", "desconhecido"),
-                            "transcribed": job.get("stage") in ("transcribed", "done"),
-                            "transcription_error": job.get("error"),
-                            "transcription_provider": job.get("provider")})
+            record = {"id": source.name, "filename": source.name, "path": str(source),
+                      "job_id": job["id"], "sha256": job.get("sha256"), "recorded_at": job["recorded_at"],
+                      "size_bytes": source.stat().st_size if source.exists() else 0,
+                      "duration_seconds": job.get("duration_seconds", 0),
+                      "audio_status": job.get("audio_status", "desconhecido"),
+                      "transcribed": job.get("stage") in ("transcribed", "done"),
+                      "transcription_error": job.get("error"),
+                      "transcription_provider": job.get("provider")}
+            if job.get("channel_provenance"):
+                # A origem fica junto da gravação no Bronze, para a ponte F4 ler
+                # o canal em vez de um nome de convidado que ninguém provou ter falado.
+                record["channel_provenance"] = True
+                record["origins"] = [{"origin": c.get("origin"), "silent": c.get("silent") is True,
+                                      "utterance_count": c.get("utterance_count", 0)}
+                                     for c in job.get("channels", [])]
+            records.append(record)
         transcript = "\n\n".join(p for p in parts if p)
         atomic_write(bronze / "transcript_raw.txt", transcript)
         # Tempos são relativos à gravação, nunca somados como se pausas não existissem.
@@ -385,6 +394,8 @@ class CastanhaEngine:
                  "source_sha256": job.get("sha256"), "provider": job.get("provider"),
                  "time_reference": "recording_start",
                  "channel_provenance": job.get("channel_provenance") is True,
+                 "channels": job.get("channels", []),
+                 "utterance_count": len(job.get("utterances", [])),
                  "utterances": job.get("utterances", [])}
                 for _, job in jobs if job.get("provider") not in ("mock", "failed")
                 and job.get("stage") in ("transcribed", "done")
