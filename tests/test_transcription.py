@@ -61,7 +61,7 @@ class TestTranscription(unittest.TestCase):
     @patch.object(GroqTranscriber, "_request_groq")
     def test_groq_transcriber_aggregates_chunks_with_offsets(self, mock_request):
         audio_file = self._create_sine_audio("split_test.ogg", duration_sec=4)
-        
+
         # Simula resposta para cada chunk de 2s
         def fake_groq(file_path):
             name = file_path.name

@@ -312,7 +312,8 @@ class TestMemoryCheckpoints(unittest.TestCase):
         adapter = ZinomAdapter()
         adapter.enabled, adapter.token = True, 'fixture'
         with patch('castanha.zinom_adapter.ZinomMcpClient') as client:
-            client.return_value.call_tool.side_effect = ZinomError('Memory not found')
+            client.return_value.call_tool.side_effect = ZinomError(
+                'Source explicitly deleted', code='source_tombstoned', tool='brain_update')
             result = adapter.ingest_meeting({}, 'nota', {'facts': [
                 {'subject': 'Projeto', 'predicate': 'usa', 'object': 'Python'},
             ]}, previous_remember_id='conversation:deleted')

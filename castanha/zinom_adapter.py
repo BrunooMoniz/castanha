@@ -32,7 +32,10 @@ CLIENT_INFO = {"name": "castanha", "version": "0.1.0"}
 
 
 class ZinomError(RuntimeError):
-    pass
+    def __init__(self, message, *, code=None, tool=None):
+        super().__init__(message)
+        self.code = code
+        self.tool = tool
 
 
 class ZinomSessionError(ZinomError):
@@ -182,14 +185,15 @@ class ZinomMcpClient:
             self.connect()
             return self.call_tool(name, arguments, _retry=False)
 
+        payload = tool_json(result)
         if result.get("isError"):
-            raise ZinomError(f"{name} devolveu erro: {tool_text(result)[:300]}")
+            raise ZinomError(f"{name} devolveu erro: {tool_text(result)[:300]}",
+                             code=payload.get("error"), tool=name)
 
         # O hub reporta falha de negócio dentro do content, sem isError.
-        payload = tool_json(result)
         if payload.get("ok") is False:
             motivo = payload.get("message") or payload.get("error") or "falhou sem dizer por quê"
-            raise ZinomError(f"{name}: {motivo}")
+            raise ZinomError(f"{name}: {motivo}", code=payload.get("error"), tool=name)
 
         return result
 
@@ -377,7 +381,8 @@ class ZinomAdapter:
             if on_remember:
                 on_remember({**results, "status": "pending", "note_status": "ok"})
         except ZinomError as e:
-            if previous_remember_id and "not found" in str(e).lower():
+            if (previous_remember_id and e.tool == "brain_update" and
+                    e.code in ("source_tombstoned", "memory_deleted")):
                 results["status"] = "tombstoned"
                 results["reason"] = "Nota removida no Zinom; exclusão preservada"
             else:
