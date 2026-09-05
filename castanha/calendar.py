@@ -33,6 +33,7 @@ class MeetingEvent:
     calendar_name: Optional[str] = None
     account: Optional[str] = None
     conference_provider: Optional[str] = None
+    all_day: bool = False
     source: str = "ics"
 
     def to_dict(self) -> Dict[str, Any]:

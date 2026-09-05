@@ -32,8 +32,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "window_hours": 12,
             # Vazio = a agenda principal de cada conta conectada.
             "calendars": [],
-            # Feriado, aniversário e "pagar condomínio" não são reunião.
-            "skip_all_day": True,
+            # Dia inteiro entra: lembrete também é agenda. O que não for
+            # reunião, ele esconde no painel (série inteira).
+            "skip_all_day": False,
         },
     },
     "transcription": {
