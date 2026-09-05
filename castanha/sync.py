@@ -20,7 +20,8 @@ from castanha.zinom_adapter import ZinomAdapter
 
 def _read_json(path: Path) -> Dict[str, Any]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
@@ -69,6 +70,8 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
 
     metadata = _read_json(metadata_file)
+    if not metadata:
+        return {"slug": slug, "status": "error", "errors": ["Metadados inválidos; arquivos preservados"]}
     silver_file = storage.silver_dir / f"{slug}.md"
     gold_file = storage.gold_dir / f"{slug}.json"
 
@@ -104,9 +107,8 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
     return {"slug": slug, **storage._read_bronze_metadata(slug)["zinom"]}
 
 
-def sync_pending(limit: Optional[int] = None, storage: Optional[MeetingStorage] = None) -> List[Dict[str, Any]]:
-    """Varre o Bronze inteiro, incluindo jobs sem Silver. Limite conta pendências."""
-    storage = storage or MeetingStorage()
+def pending_candidates(storage: MeetingStorage):
+    """Inventário comum ao comando manual e à retomada automática."""
     candidates = []
     for bronze in storage.bronze_dir.iterdir():
         if not bronze.is_dir():
@@ -115,10 +117,27 @@ def sync_pending(limit: Optional[int] = None, storage: Optional[MeetingStorage] 
         if not path.exists() and not any((bronze / ".jobs").glob("*.json")):
             continue
         metadata = _read_json(path)
+        if (metadata.get("zinom") or {}).get("status") == "tombstoned":
+            continue
         unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
         if meeting_needs_sync(metadata) or unfinished:
             candidates.append(((metadata.get("zinom") or {}).get("synced_at") or "", path.parent.name))
     candidates.sort()
+    return candidates
+
+
+def sync_pending(limit: Optional[int] = None, storage: Optional[MeetingStorage] = None) -> List[Dict[str, Any]]:
+    """Varre o Bronze inteiro; uma falha não descarta o restante da fila."""
+    storage = storage or MeetingStorage()
+    candidates = pending_candidates(storage)
     if limit is not None:
         candidates = candidates[:max(0, limit)]
-    return [sync_meeting(slug, storage) for _, slug in candidates]
+    results = []
+    for _, slug in candidates:
+        try:
+            results.append(sync_meeting(slug, storage))
+        except Exception as exc:
+            # Não publicar traceback com paths, transcrição ou credenciais.
+            results.append({"slug": slug, "status": "error",
+                            "errors": [f"Falha ao retomar reunião ({type(exc).__name__}); original preservado"]})
+    return results

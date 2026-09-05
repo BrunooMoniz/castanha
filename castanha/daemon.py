@@ -16,6 +16,7 @@ from castanha.agenda import collect_upcoming
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.state import StateManager
+from castanha.retry import RetryScheduler
 
 def pid_file():
     return get_state_dir() / "daemon.pid"
@@ -75,6 +76,8 @@ class CastanhaDaemon:
         self.engine = CastanhaEngine()
         self.running = True
         self.notified_meeting_uids: Set[str] = set()
+        self.retry_scheduler = RetryScheduler(
+            enabled=self.config.get("sync", {}).get("auto_retry_enabled", False))
 
     def stop(self, *args):
         self.running = False
@@ -96,6 +99,7 @@ class CastanhaDaemon:
         while self.running:
             now = time.time()
             state = self.state_mgr.read()
+            self.retry_scheduler.tick(capture_status=state.get("status", "idle"))
 
             # 1. Atualizador de cronômetro durante gravação
             if state.get("status") == "recording":
