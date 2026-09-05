@@ -187,6 +187,23 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
 }
 """
 
+CHANNEL_GROUNDING = """
+ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
+- 'Microfone local' e 'Áudio do sistema' identificam canais, não pessoas.
+- Não atribua automaticamente o microfone ao Bruno nem o sistema a um único
+  participante. Pode haver outras pessoas na sala, eco e sons de outros aplicativos.
+- Convite do calendário não prova presença nem identifica a voz. Nome citado
+  na fala também não prova que essa pessoa foi quem falou.
+- Preserve a origem e os tempos quando disponíveis. Sem evidência explícita
+  de quem falou, mantenha autoria desconhecida e responsável null.
+"""
+
+PARTIAL_SYSTEM_PROMPT += CHANNEL_GROUNDING
+COMBINE_SYSTEM_PROMPT += CHANNEL_GROUNDING
+SILVER_SYSTEM_PROMPT += CHANNEL_GROUNDING
+GOLD_SYSTEM_PROMPT += CHANNEL_GROUNDING
+
+
 class MeetingSummarizer:
     def __init__(self):
         cfg = load_config()

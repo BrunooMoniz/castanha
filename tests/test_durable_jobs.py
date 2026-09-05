@@ -75,6 +75,37 @@ class TestDurableJobs(unittest.TestCase):
         self.assertEqual(len(self.engine.storage._read_bronze_metadata(slug)['recordings']), 1)
         self.assertEqual(len(list(bronze.glob('*.ogg'))), 1)
 
+    def test_segment_provenance_survives_checkpoint_and_summary_retry(self):
+        from castanha.transcription import Utterance
+        result = TranscriptionResult(
+            '[0.20s] Microfone local: decisão',
+            [Utterance('Microfone local', 'decisão', 0.2, 1.3)],
+            'fixture', {'channel_provenance': True})
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.summarizer, 'generate_silver', side_effect=ProcessDeath):
+            provider.return_value.transcribe.return_value = result
+            with self.assertRaises(ProcessDeath):
+                self.engine.stop_recording()
+        slug = self.engine.state_mgr.read()['capture_slug']
+        bronze = self.engine.storage.bronze_dir / slug
+        before = (bronze / 'transcript_segments.json').read_bytes()
+        with patch('castanha.engine.get_transcriber') as provider:
+            sync_meeting(slug, self.engine.storage)
+            provider.assert_not_called()
+        self.assertEqual(before, (bronze / 'transcript_segments.json').read_bytes())
+        recording = json.loads(before)['recordings'][0]
+        self.assertTrue(recording['channel_provenance'])
+        self.assertEqual(recording['time_reference'], 'recording_start')
+        self.assertEqual(recording['utterances'][0]['speaker'], 'Microfone local')
+        self.assertEqual(recording['utterances'][0]['start'], 0.2)
+        self.assertTrue(recording['source_sha256'])
+
+    def test_all_summary_stages_receive_channel_identity_guardrail(self):
+        from castanha import summarizer
+        for name in ('PARTIAL', 'COMBINE', 'SILVER', 'GOLD'):
+            prompt = getattr(summarizer, name + '_SYSTEM_PROMPT')
+            self.assertIn(summarizer.CHANNEL_GROUNDING, prompt)
+
     def test_stop_resume_uses_bronze_if_temporary_audio_disappears(self):
         slug = self.crash()
         self.source.unlink()

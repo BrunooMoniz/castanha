@@ -25,8 +25,11 @@ Antes de ativar, ainda é obrigatório:
   canais podem representar até o dobro dos minutos faturados. Não ignorar teto.
 - Tratar canal efetivamente silencioso sem gerar fala inventada. O módulo atual
   recusa resposta vazia, portanto ainda não cobre gravação com microfone mudo.
-- Persistir segmentos com origem e ID da gravação no engine, além do texto,
-  e fazer Silver/Gold respeitarem as limitações de identidade.
+- Verificar ponta a ponta os segmentos com origem e ID da gravação no engine.
+  A persistência já foi implementada em transcript_segments.json e no checkpoint,
+  com prova de retomada após falha do resumo sem nova transcrição. Os quatro
+  prompts de enriquecimento já recebem a regra de canal versus identidade;
+  isso não é prova comportamental de que um modelo real sempre a respeitará.
 - Exercitar retomada remota, mistura de canais concluídos e pendentes, e ponte
   integral F4. O chamador deve manter meeting_lock durante a operação.
 - Rever checkpoints incompatíveis ao trocar modelo/versão, sem apagar histórico.

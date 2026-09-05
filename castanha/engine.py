@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -343,7 +344,9 @@ class CastanhaEngine:
                         transcription = VpsSshTranscriber(host).transcribe(source, mode=mode)
                     if not transcription.text.strip():
                         raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
-                    job.update(transcript=transcription.text, provider=transcription.provider)
+                    job.update(transcript=transcription.text, provider=transcription.provider,
+                               utterances=[asdict(segment) for segment in transcription.utterances],
+                               channel_provenance=transcription.raw_response.get("channel_provenance") is True)
                 job.update(stage="transcribed", error=None)
             except Exception as exc:
                 job.update(error=str(exc), provider="failed")
@@ -373,6 +376,20 @@ class CastanhaEngine:
                             "transcription_provider": job.get("provider")})
         transcript = "\n\n".join(p for p in parts if p)
         atomic_write(bronze / "transcript_raw.txt", transcript)
+        # Tempos são relativos à gravação, nunca somados como se pausas não existissem.
+        # Histórico sem segmentos continua explicitamente sem atribuição de origem.
+        write_json(bronze / "transcript_segments.json", {
+            "version": 1,
+            "recordings": [
+                {"job_id": job["id"], "recorded_at": job["recorded_at"],
+                 "source_sha256": job.get("sha256"), "provider": job.get("provider"),
+                 "time_reference": "recording_start",
+                 "channel_provenance": job.get("channel_provenance") is True,
+                 "utterances": job.get("utterances", [])}
+                for _, job in jobs if job.get("provider") not in ("mock", "failed")
+                and job.get("stage") in ("transcribed", "done")
+            ],
+        })
         last_job = jobs[-1][1]
         memory_records = [r for r in records if r.get("transcription_provider") not in ("mock", "failed")
                           and r.get("audio_status") != "sem_audio"]
