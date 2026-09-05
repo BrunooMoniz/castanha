@@ -18,12 +18,20 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
    - **Modo Presencial**: Grava apenas o microfone do computador para reuniões presenciais.
 2. **Integração com Google Calendar**:
    - Sincronização direta via feed privado iCal ou integração com o hub Zinom.
+   - Todos os eventos da agenda principal, inclusive os de dia inteiro e os sem link de chamada;
+     o que não for reunião você esconde no painel (a série inteira, de uma vez).
    - Popup interativo 2 minutos antes com botão para entrar na chamada e botão para gravar.
    - Captura automática dos participantes (nomes e e-mails), pauta e links.
 3. **Esteira Bronze -> Silver -> Gold**:
    - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
    - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
    - **Gold**: Fatos atômicos preservados no Bronze/Gold, pendentes de suporte a origem no servidor. A entrega atual publica somente a nota narrativa via `remember`.
+   - O áudio entra no Bronze antes de qualquer transcrição. Se ela falhar (sem internet, Groq fora
+     do ar), o painel mostra "tentar de novo" e `castanha retry` reprocessa só o que faltou, sem
+     apagar nada. Reunião longa vai em fatias para a Groq e as notas saem em partes (uma por
+     minuto, no plano gratuito), então uma reunião de 2 h leva alguns minutos.
+   - Sem chave da Groq e sem VPS, a transcrição falha declarada. O transcritor simulado só entra
+     com `"provider": "mock"` na config (ou `CASTANHA_MOCK_TRANSCRIBER=1`), para teste.
 4. **Plugin Nativo do Omarchy (Quickshell)**:
    - Widget discreto na barra com status ao vivo (`● REC 00:14:20`).
    - Painel popout com controle de gravação, próxima reunião e acesso rápido às notas.
@@ -107,6 +115,18 @@ castanha daemon --background
 # Listar e abrir notas
 castanha notes
 castanha notes --open
+
+# Segunda chance: transcrever de novo uma gravação que ficou sem notas
+# (sem internet na hora do stop, Groq fora do ar, VPS lenta)
+castanha retry                     # a última pendente (nada pendente = não faz nada)
+castanha retry <slug>              # uma reunião específica; já transcrita, só refaz as notas
+castanha retry --all               # todas as pendentes
+
+# Gravar um evento da agenda com título, participantes e link dele
+castanha start --event <uid>
+
+# Reenviar ao Zinom uma reunião já transcrita
+castanha sync [slug]
 ```
 
 ---

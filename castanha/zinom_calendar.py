@@ -44,7 +44,9 @@ def _parse_google_dt(node: Optional[Dict[str, Any]]) -> Optional[datetime.dateti
     if raw:
         try:
             d = datetime.date.fromisoformat(raw)
-            return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc)
+            # Evento de dia inteiro: usa o fuso local para a data não voltar 1 dia
+            local_tz = datetime.datetime.now().astimezone().tzinfo
+            return datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=local_tz)
         except ValueError:
             return None
     return None
@@ -74,9 +76,11 @@ class ZinomCalendar:
         self.token = z_cfg.get("token", "")
         self.enabled = bool(c_cfg.get("enabled", True)) and bool(self.token)
         self.window_hours = int(c_cfg.get("window_hours", 12))
-        self.skip_all_day = bool(c_cfg.get("skip_all_day", True))
-        # Vazio quer dizer "a agenda principal de cada conta conectada": é o que
-        # sobra de reunião de verdade depois de tirar feriado e aniversário.
+        # Dia inteiro entra por padrão desde 05/09/2026: lembrete e evento sem
+        # link também são agenda, e o que não for reunião ele esconde no painel.
+        self.skip_all_day = bool(c_cfg.get("skip_all_day", False))
+        # Vazio quer dizer "a agenda principal de cada conta conectada". Para
+        # somar agendas secundárias, o nome ou e-mail delas vai em `calendars`.
         self.wanted = [str(x) for x in (c_cfg.get("calendars") or [])]
 
         # A agenda não muda de minuto em minuto, e o endpoint tem rate limit
@@ -205,7 +209,8 @@ class ZinomCalendar:
         inicio = _parse_google_dt(raw.get("start"))
         if inicio is None:
             return None
-        fim = _parse_google_dt(raw.get("end")) or (inicio + datetime.timedelta(hours=1))
+        is_all_day = _is_all_day(raw)
+        fim = _parse_google_dt(raw.get("end")) or (inicio + (datetime.timedelta(days=1) if is_all_day else datetime.timedelta(hours=1)))
 
         local = raw.get("location") or None
         conf = raw.get("conference_url") or extract_conference_url(local or "")
@@ -230,6 +235,7 @@ class ZinomCalendar:
             html_link=raw.get("htmlLink") or None,
             calendar_name=cal.get("summary") or None,
             account=cal.get("email") or None,
+            all_day=is_all_day,
             source="zinom",
         )
 

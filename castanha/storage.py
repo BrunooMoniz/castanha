@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -54,6 +55,21 @@ def slugify(text: str) -> str:
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"[\s_-]+", "-", text)
     return text[:50] or "reuniao"
+
+def _pode_reprocessar(recordings: List[Dict[str, Any]], has_transcript: bool, meta: Dict[str, Any]) -> bool:
+    """Há áudio no Bronze que ainda não virou texto: dá para tentar de novo.
+
+    Gravação muda também fica sem transcrição, mas repetir não inventa fala:
+    ela não ganha o botão. Com mais de uma gravação, basta uma ter falhado.
+    """
+    if not recordings:
+        return False
+    if (meta.get("audio_status") or "") == "sem_audio" and not has_transcript:
+        return False
+    if any(r.get("transcribed") is False for r in recordings):
+        return True
+    return not has_transcript
+
 
 class MeetingStorage:
     def __init__(self, base_dir: Optional[Path] = None):
@@ -169,6 +185,12 @@ class MeetingStorage:
             "duration_seconds": dur,
             "audio_status": (metadata_update or {}).get("audio_status", "ok"),
         }
+        # Por gravação, para o "tentar de novo" saber qual arquivo ficou sem texto.
+        for chave in ("transcribed", "transcription_error"):
+            if chave in (metadata_update or {}):
+                rec_entry[chave] = metadata_update[chave]
+        if raw_transcript and raw_transcript.strip():
+            rec_entry["transcribed"] = True
         existing_recordings.append(rec_entry)
         meta["recordings"] = existing_recordings
         meta["duration_seconds"] = (meta.get("duration_seconds") or 0) + dur
@@ -214,9 +236,52 @@ class MeetingStorage:
                 "duration_seconds": meta_item.get("duration_seconds") or 0,
                 "recorded_at": meta_item.get("recorded_at") or "",
                 "audio_status": meta_item.get("audio_status") or "ok",
+                "transcribed": meta_item.get("transcribed"),
+                "transcription_error": meta_item.get("transcription_error"),
                 "exists": True,
             })
         return recordings
+
+    def read_transcript(self, slug: str) -> str:
+        arquivo = self.bronze_dir / slug / "transcript_raw.txt"
+        try:
+            return arquivo.read_text(encoding="utf-8") if arquivo.exists() else ""
+        except Exception:
+            return ""
+
+    def append_transcript(self, slug: str, filename: str, texto: str) -> None:
+        """Anexa a transcrição de uma gravação; a primeira entra sem cabeçalho.
+
+        Nunca trunca: o texto que já estava lá é a única cópia.
+        """
+        if not texto or not texto.strip():
+            return
+        arquivo = self.bronze_dir / slug / "transcript_raw.txt"
+        existente = self.read_transcript(slug)
+        if existente.strip():
+            now_str = datetime.now().strftime("%H:%M")
+            atomic_write(arquivo, existente + f"\n\n--- Gravação {filename} ({now_str}) ---\n{texto}\n")
+        else:
+            atomic_write(arquivo, texto)
+
+    def update_recording(self, slug: str, filename: str, **campos: Any) -> None:
+        """Atualiza os campos de uma gravação no metadata (transcribed, erro, duração)."""
+        meta = self._read_bronze_metadata(slug)
+        recs = [r for r in (meta.get("recordings") or []) if isinstance(r, dict)]
+        for r in recs:
+            if r.get("filename") == filename:
+                r.update(campos)
+                break
+        else:
+            recs.append({"id": filename, "filename": filename, **campos})
+        meta["recordings"] = recs
+        meta["recordings_count"] = len(recs)
+        self.write_bronze_metadata(slug, meta)
+
+    def write_bronze_metadata(self, slug: str, meta: Dict[str, Any]) -> None:
+        arquivo = self.bronze_dir / slug / "metadata.json"
+        arquivo.parent.mkdir(parents=True, exist_ok=True)
+        write_json(arquivo, meta)
 
     def delete_recording(self, slug: str, recording_name: Optional[str] = None) -> Dict[str, Any]:
         """Apaga um arquivo de áudio específico sem apagar a reunião, suas notas ou transcrição."""
@@ -298,29 +363,50 @@ class MeetingStorage:
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
         """As últimas reuniões, com metadados detalhados, participantes, transcrição e gravações."""
         results = []
-        if not self.silver_dir.exists():
+        slugs = set()
+        if self.silver_dir.exists():
+            for f in self.silver_dir.glob("*.md"):
+                slugs.add(f.stem)
+        if self.bronze_dir.exists():
+            for d in self.bronze_dir.iterdir():
+                if d.is_dir():
+                    slugs.add(d.name)
+
+        if not slugs:
             return results
 
-        files = sorted(self.silver_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in files[:limit]:
-            slug = f.stem
-            meta = self._read_bronze_metadata(slug)
+        def _get_mtime(s: str) -> float:
+            sf = self.silver_dir / f"{s}.md"
+            if sf.exists():
+                return sf.stat().st_mtime
+            bd = self.bronze_dir / s
+            if bd.exists():
+                return bd.stat().st_mtime
+            return 0.0
 
+        sorted_slugs = sorted(slugs, key=_get_mtime, reverse=True)
+
+        for slug in sorted_slugs[:limit]:
+            meta = self._read_bronze_metadata(slug)
+            silver_file = self.silver_dir / f"{slug}.md"
             transcript_file = self.bronze_dir / slug / "transcript_raw.txt"
             has_transcript = transcript_file.exists() and transcript_file.stat().st_size > 0
-
             gold_file = self.gold_dir / f"{slug}.json"
 
             cal_evt = meta.get("calendar_event") or {}
             attendees = cal_evt.get("attendees") or meta.get("attendees") or []
-
             recordings = self.list_meeting_recordings(slug)
 
             summary_preview = ""
-            try:
-                summary_preview = _extract_summary_preview(f.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            if silver_file.exists():
+                try:
+                    summary_preview = _extract_summary_preview(silver_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            provider = meta.get("transcription_provider") or ""
+            error = meta.get("transcription_error") or ""
+            can_retry = _pode_reprocessar(recordings, has_transcript, meta)
 
             results.append({
                 "slug": slug,
@@ -331,37 +417,48 @@ class MeetingStorage:
                 "audio_status": meta.get("audio_status") or ("ok" if recordings else "audio_apagado"),
                 "audio_diagnostico": meta.get("audio_diagnostico") or "",
                 "zinom": meta.get("zinom") or {},
-                "silver_path": str(f),
+                "silver_path": str(silver_file) if silver_file.exists() else "",
                 "bronze_dir": str(self.bronze_dir / slug),
                 "gold_path": str(gold_file) if gold_file.exists() else "",
                 "transcript_path": str(transcript_file) if has_transcript else "",
                 "has_transcript": has_transcript,
+                "transcription_provider": provider,
+                "transcription_error": error,
+                "can_retry": can_retry,
                 "attendees": attendees,
                 "recordings": recordings,
                 "recordings_count": len(recordings),
                 "has_audio": len(recordings) > 0,
                 "summary_preview": summary_preview,
-                "modified": f.stat().st_mtime,
+                "modified": _get_mtime(slug),
             })
         return results
 
     def get_meeting(self, slug: str) -> Optional[Dict[str, Any]]:
         """Busca os detalhes completos de uma reunião pelo seu slug."""
         silver_file = self.silver_dir / f"{slug}.md"
-        if not silver_file.exists():
+        bronze_dir = self.bronze_dir / slug
+        if not silver_file.exists() and not bronze_dir.exists():
             return None
         meta = self._read_bronze_metadata(slug)
-        transcript_file = self.bronze_dir / slug / "transcript_raw.txt"
+        transcript_file = bronze_dir / "transcript_raw.txt"
         has_transcript = transcript_file.exists() and transcript_file.stat().st_size > 0
         gold_file = self.gold_dir / f"{slug}.json"
+
         cal_evt = meta.get("calendar_event") or {}
         attendees = cal_evt.get("attendees") or meta.get("attendees") or []
         recordings = self.list_meeting_recordings(slug)
+
         summary_preview = ""
-        try:
-            summary_preview = _extract_summary_preview(silver_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        if silver_file.exists():
+            try:
+                summary_preview = _extract_summary_preview(silver_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        provider = meta.get("transcription_provider") or ""
+        error = meta.get("transcription_error") or ""
+        can_retry = _pode_reprocessar(recordings, has_transcript, meta)
 
         return {
             "slug": slug,
@@ -372,17 +469,20 @@ class MeetingStorage:
             "audio_status": meta.get("audio_status") or ("ok" if recordings else "audio_apagado"),
             "audio_diagnostico": meta.get("audio_diagnostico") or "",
             "zinom": meta.get("zinom") or {},
-            "silver_path": str(silver_file),
-            "bronze_dir": str(self.bronze_dir / slug),
+            "silver_path": str(silver_file) if silver_file.exists() else "",
+            "bronze_dir": str(bronze_dir),
             "gold_path": str(gold_file) if gold_file.exists() else "",
             "transcript_path": str(transcript_file) if has_transcript else "",
             "has_transcript": has_transcript,
+            "transcription_provider": provider,
+            "transcription_error": error,
+            "can_retry": can_retry,
             "attendees": attendees,
             "recordings": recordings,
             "recordings_count": len(recordings),
             "has_audio": len(recordings) > 0,
             "summary_preview": summary_preview,
-            "modified": silver_file.stat().st_mtime,
+            "modified": silver_file.stat().st_mtime if silver_file.exists() else (bronze_dir.stat().st_mtime if bronze_dir.exists() else 0.0),
         }
 
     def record_zinom_result(self, slug: str, resultado: Dict[str, Any]) -> None:

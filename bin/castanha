@@ -17,11 +17,28 @@ from castanha.engine import CastanhaEngine
 from castanha.state import StateManager
 from castanha.storage import MeetingStorage
 
+def _evento_da_agenda(uid):
+    """O evento pelo uid, na agenda que o daemon já deixou no estado."""
+    if not uid:
+        return None
+    estado = StateManager().read()
+    candidatos = list(estado.get("upcoming_meetings") or [])
+    if estado.get("next_meeting"):
+        candidatos.append(estado["next_meeting"])
+    for m in candidatos:
+        if isinstance(m, dict) and str(m.get("uid") or "") == str(uid):
+            return m
+    return None
+
+
 def cmd_start(args):
     engine = CastanhaEngine()
     mode = "mic_only" if args.mic_only else (args.mode or "dual")
     meeting_slug = getattr(args, "meeting", None)
-    res = engine.start_recording(mode=mode, title=args.title, meeting_slug=meeting_slug)
+    evento = _evento_da_agenda(getattr(args, "event", None))
+    if getattr(args, "event", None) and evento is None:
+        print(f"[Castanha] Evento {args.event} não está na agenda carregada; gravando pelo título.", file=sys.stderr)
+    res = engine.start_recording(mode=mode, title=args.title, meeting_event=evento, meeting_slug=meeting_slug)
     if res.get("status") == "recording":
         print(f"🌰 Gravação iniciada com sucesso! [PID: {res.get('pid')}]")
         print(f"📌 Título: {res.get('title')}")
@@ -284,6 +301,78 @@ def cmd_sync(args):
         sys.exit(2)
 
 
+def cmd_retry(args):
+    """Tenta reenviar áudio para transcrição e rodar toda a esteira (Silver, Gold, Zinom)."""
+    engine = CastanhaEngine()
+    storage = engine.storage
+    em_json = getattr(args, "json", False)
+
+    def sair(mensagem, codigo, resultados=None):
+        if em_json:
+            print(json.dumps({"results": resultados or [], "message": mensagem}, ensure_ascii=False))
+        elif codigo == 0:
+            print(mensagem)
+        else:
+            print(mensagem, file=sys.stderr)
+        sys.exit(codigo)
+
+    recentes = storage.list_recent_meetings(limit=args.limit)
+    pendentes = [m["slug"] for m in recentes if m.get("can_retry")]
+
+    if args.all:
+        slugs = pendentes
+    elif args.slug in ("last", "latest"):
+        if not recentes:
+            sair("Nenhuma reunião encontrada.", 1)
+        slugs = [recentes[0]["slug"]]
+    elif args.slug:
+        slugs = [args.slug]
+    else:
+        # Sem argumento é "a última pendente". Nunca a última reunião boa: isso
+        # gastava orçamento e reescrevia notas que já estavam certas.
+        slugs = pendentes[:1]
+
+    if not slugs:
+        sair("Nada pendente: nenhuma reunião com áudio aguardando transcrição.", 0)
+
+    resultados = []
+    falhou = False
+    for s in slugs:
+        if not em_json:
+            print(f"⏳ Reprocessando reunião '{s}'...")
+        res = engine.reprocess_meeting(s)
+        resultados.append({"slug": s, **res})
+        if res.get("status") not in ("success", "partial"):
+            falhou = True
+        elif (res.get("result") or {}).get("transcription_provider") == "failed":
+            falhou = True
+
+    if em_json:
+        print(json.dumps({"results": resultados}, ensure_ascii=False))
+        sys.exit(2 if falhou else 0)
+
+    for r in resultados:
+        if r.get("status") in ("success", "partial"):
+            res_data = r.get("result", {})
+            problemas = res_data.get("problemas") or []
+            if not problemas:
+                print(f"✅ {r['slug']}: áudio transcrito e notas geradas com sucesso!")
+            else:
+                print(f"⚠️  {r['slug']}: reprocessado com observações:")
+                for p in problemas:
+                    print(f"     · {p}")
+            print(f"   📁 Bronze: {res_data.get('bronze_dir')}")
+            print(f"   📝 Silver: {res_data.get('silver_file')}")
+            print(f"   🧠 Gold:   {res_data.get('gold_file')}")
+        else:
+            print(f"❌ {r['slug']}: erro ao reprocessar ({r.get('message')})")
+
+    # Código de saída honesto, como o `stop`: transcrição que falhou de novo
+    # não é sucesso.
+    if falhou:
+        sys.exit(2)
+
+
 def cmd_agenda(args):
     from castanha.agenda import collect_upcoming
     proximas = collect_upcoming(window_minutes=args.horas * 60)
@@ -319,7 +408,7 @@ def cmd_agenda_refresh(args):
         proximas = collect_upcoming(cfg, window_minutes=window_minutes, force=True)
         proximas_dicts = [m.to_dict() for m in proximas]
         mgr.write({
-            "next_meeting": proximas_dicts[0] if proximas_dicts else None,
+            "next_meeting": _proxima_com_hora(proximas_dicts),
             "upcoming_meetings": proximas_dicts,
             "agenda_error": None,
         })
@@ -348,6 +437,11 @@ def cmd_agenda_refresh(args):
             sys.exit(1)
 
 
+def _proxima_com_hora(eventos):
+    """Evento de dia inteiro não vira 'a próxima reunião' (barra e aviso)."""
+    return next((m for m in eventos if not m.get("all_day")), None)
+
+
 def _refresh_agenda_state():
     """Refiltra a agenda que já está no estado, sem ir à rede.
 
@@ -364,7 +458,7 @@ def _refresh_agenda_state():
                  if not is_hidden(m.get("series_key") or m.get("uid"), escondidos)]
     mgr.write({
         "upcoming_meetings": restantes,
-        "next_meeting": restantes[0] if restantes else None,
+        "next_meeting": _proxima_com_hora(restantes),
     })
 
 
@@ -421,6 +515,7 @@ def main():
     p_start.add_argument("--mic-only", action="store_true", help="Atalho para modo apenas microfone (presencial)")
     p_start.add_argument("--title", type=str, default=None, help="Título da reunião")
     p_start.add_argument("--meeting", "--append", type=str, default=None, help="Slug de reunião existente para adicionar a gravação")
+    p_start.add_argument("--event", type=str, default=None, help="uid de um evento da agenda: a gravação leva título, participantes e link dele")
     p_start.set_defaults(func=cmd_start)
 
     # Stop
@@ -493,6 +588,18 @@ def main():
     p_sync.add_argument("--limit", type=int, default=None, help="Máximo de pendências por execução; padrão: todas")
     p_sync.add_argument("--json", action="store_true", help="Saída em JSON")
     p_sync.set_defaults(func=cmd_sync)
+
+    # Retry / Reprocess
+    p_retry = subparsers.add_parser(
+        "retry",
+        aliases=["reprocess", "retry-upload", "retry-transcription"],
+        help="Tenta reenviar áudio para transcrição e processar notas/fatos/Zinom",
+    )
+    p_retry.add_argument("slug", nargs="?", default=None, help="Slug da reunião (ou 'last' para a última reunião); sem slug, a última pendente")
+    p_retry.add_argument("--all", action="store_true", help="Reprocessa todas as reuniões pendentes de transcrição")
+    p_retry.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
+    p_retry.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_retry.set_defaults(func=cmd_retry)
 
     # Agenda
     p_agenda = subparsers.add_parser("agenda", help="Próximas reuniões das contas Google conectadas no Zinom")

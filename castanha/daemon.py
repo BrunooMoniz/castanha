@@ -12,7 +12,7 @@ from typing import Set
 
 from castanha.config import get_state_dir
 
-from castanha.agenda import collect_upcoming
+from castanha.agenda import collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.state import StateManager
@@ -119,14 +119,15 @@ class CastanhaDaemon:
                 last_calendar_check = now
                 try:
                     proximas = collect_upcoming(self.config)
+                    proxima = next_timed(proximas)
                     self.state_mgr.write({
-                        "next_meeting": proximas[0].to_dict() if proximas else None,
+                        "next_meeting": proxima.to_dict() if proxima else None,
                         "upcoming_meetings": [m.to_dict() for m in proximas],
                         "agenda_error": None,
                     })
 
-                    if proximas:
-                        next_m = proximas[0]
+                    if proxima:
+                        next_m = proxima
                         now_utc = datetime.datetime.now(datetime.timezone.utc)
                         inicio = next_m.start if next_m.start.tzinfo else next_m.start.replace(
                             tzinfo=datetime.timezone.utc)

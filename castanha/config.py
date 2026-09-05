@@ -1,7 +1,9 @@
 """Gerenciamento de configuração do Castanha."""
 
+import copy
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -32,8 +34,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "window_hours": 12,
             # Vazio = a agenda principal de cada conta conectada.
             "calendars": [],
-            # Feriado, aniversário e "pagar condomínio" não são reunião.
-            "skip_all_day": True,
+            # Dia inteiro entra: lembrete também é agenda. O que não for
+            # reunião, ele esconde no painel (série inteira).
+            "skip_all_day": False,
         },
     },
     "transcription": {
@@ -75,7 +78,11 @@ def get_state_dir() -> Path:
 
 def load_config() -> Dict[str, Any]:
     cfg_file = get_config_file()
-    config = dict(DEFAULT_CONFIG)
+    # Cópia profunda: a rasa deixava o `update` de cada seção escrever DENTRO
+    # do DEFAULT_CONFIG, e uma config lida antes contaminava a seguinte no
+    # mesmo processo (na suíte, o `provider: mock` de um teste vazava para o
+    # outro).
+    config = copy.deepcopy(DEFAULT_CONFIG)
     if cfg_file.exists():
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -87,7 +94,7 @@ def load_config() -> Dict[str, Any]:
                     else:
                         config[section] = vals
         except Exception as e:
-            print(f"[Castanha] Erro ao ler config: {e}. Usando padrões.")
+            print(f"[Castanha] Erro ao ler config: {e}. Usando padrões.", file=sys.stderr)
     return config
 
 def save_config(config_data: Dict[str, Any]) -> None:

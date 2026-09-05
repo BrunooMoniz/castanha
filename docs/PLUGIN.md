@@ -73,3 +73,17 @@ linha da nota mostra o botão 󰑐 quando o envio falhou, e
 Quando há recibo, a nota é editada pelo id gravado no metadata. Fatos atômicos
 continuam pendentes até o servidor suportar origem recuperável; a versão F5
 não envia `brain_fact`. Não há limpeza automática de histórico.
+
+**Tentar upload e transcrição de novo.** Se a gravação terminou sem internet,
+com a Groq fora do ar ou com a VPS lenta demais, o áudio fica no Bronze e a
+nota aparece com o aviso "Upload/Transcrição pendente". O botão 󰑐 na linha (e
+"Tentar upload/transcrição de novo" no detalhe) roda `castanha retry <slug>`:
+transcreve o que faltou, anexa ao texto que já existe, gera Silver e Gold e
+EDITA a nota do Zinom pelo id guardado (não duplica). Falhar de novo não
+apaga nada. Gravação muda não ganha o botão: repetir não inventa fala.
+
+**Evento de dia inteiro.** Entra na lista com "Dia" no lugar da hora, depois
+das reuniões com horário. Nunca vira "a próxima reunião" da barra nem dispara
+o aviso de dois minutos antes. "Gravar reunião" aparece em todo evento, com ou
+sem link de chamada, e leva o evento inteiro (título, participantes, link) pelo
+`castanha start --event <uid>`.

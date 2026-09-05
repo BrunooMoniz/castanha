@@ -85,6 +85,18 @@ class TestDurableJobs(unittest.TestCase):
         self.assertEqual(len(self.engine.storage.list_meeting_recordings(slug)), 1)
         self.assertEqual(self.engine.state_mgr.read()['status'], 'idle')
 
+    def test_retry_button_resumes_new_jobs_and_unblocks_recording(self):
+        slug = self.crash()
+        self.source.unlink()
+        with patch('castanha.engine.get_transcriber') as provider:
+            provider.return_value.transcribe.return_value = self.transcription()
+            self.engine.reprocess_meeting(slug)
+            self.engine.reprocess_meeting(slug)
+            self.assertEqual(provider.return_value.transcribe.call_count, 1)
+        self.assertEqual(self.engine.state_mgr.read()['status'], 'idle')
+        self.assertEqual((self.engine.storage.bronze_dir / slug / 'transcript_raw.txt').read_text(),
+                         'Decisão preservada')
+
     def test_resume_after_transcription_checkpoint_does_not_transcribe_twice(self):
         with patch('castanha.engine.get_transcriber') as provider, \
              patch.object(self.engine.summarizer, 'generate_silver', side_effect=ProcessDeath):

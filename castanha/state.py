@@ -1,6 +1,7 @@
 """Gerenciador de estado para comunicação com a UI do Omarchy."""
 
 import json
+import sys
 import os
 import time
 from pathlib import Path
@@ -55,7 +56,7 @@ class StateManager:
                 json.dump(current, f, indent=2, ensure_ascii=False)
             tmp_file.replace(self.state_file)
         except Exception as e:
-            print(f"[Castanha] Erro ao salvar estado: {e}")
+            print(f"[Castanha] Erro ao salvar estado: {e}", file=sys.stderr)
         return current
 
     def reset(self) -> Dict[str, Any]:

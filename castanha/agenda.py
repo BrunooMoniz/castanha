@@ -42,7 +42,8 @@ def collect_upcoming(
     try:
         eventos.extend(_zinom_source(cfg).upcoming(window_hours=max(1, window_minutes // 60), force=force))
     except Exception as e:
-        print(f"[Castanha] Agenda do Zinom indisponível: {e}")
+        import sys as _sys
+        print(f"[Castanha] Agenda do Zinom indisponível: {e}", file=_sys.stderr)
 
     agora = datetime.datetime.now(datetime.timezone.utc)
     corte = agora - datetime.timedelta(minutes=15)
@@ -55,17 +56,32 @@ def collect_upcoming(
         if is_hidden(e.uid, escondidos):
             continue
         inicio = e.start if e.start.tzinfo else e.start.replace(tzinfo=datetime.timezone.utc)
-        if not (corte <= inicio <= limite):
+        fim = e.end if e.end.tzinfo else e.end.replace(tzinfo=datetime.timezone.utc)
+        if e.all_day:
+            # Dia inteiro começa à meia-noite, sempre antes do corte: vale
+            # enquanto o dia não acabou, e entra na janela pelo começo.
+            if fim <= agora or inicio > limite:
+                continue
+        elif not (corte <= inicio <= limite):
             continue
         chave = f"{e.title.strip().lower()}|{inicio.isoformat()}"
         atual = por_chave.get(chave)
         if atual is None or (not atual.conference_url and e.conference_url):
             por_chave[chave] = e
 
-    saida = sorted(por_chave.values(), key=lambda e: e.start)
+    # Reunião com hora primeiro; o que é do dia inteiro vai para o fim.
+    saida = sorted(por_chave.values(), key=lambda e: (e.all_day, e.start))
     return saida[:limit]
 
 
+def next_timed(eventos: List[MeetingEvent]) -> Optional[MeetingEvent]:
+    """A próxima reunião de verdade: evento de dia inteiro não conta.
+
+    Ele iria para a barra o dia todo e dispararia o aviso de "reunião em
+    instantes" às 23h58 da véspera.
+    """
+    return next((m for m in eventos if not m.all_day), None)
+
+
 def next_meeting(config: Optional[Dict[str, Any]] = None) -> Optional[MeetingEvent]:
-    proximas = collect_upcoming(config, window_minutes=720, limit=1)
-    return proximas[0] if proximas else None
+    return next_timed(collect_upcoming(config, window_minutes=720))

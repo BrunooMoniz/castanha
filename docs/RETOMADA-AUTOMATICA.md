@@ -38,3 +38,22 @@ Não apagar originais, `.jobs`, `.sync-retry.json` ou recibos de entrega.
 - Ensaio opt-in `PYTHONPATH=. python3 -B tests/qa_pipewire_capture.py` usa PipeWire e FFmpeg reais
   com dois sinks sintéticos, sem acessar microfone físico nem mudar defaults.
 - Nenhuma configuração instalada, gravação pessoal ou memória remota alterada por esta entrega.
+
+## Integração com a tarefa de agenda e reuniões longas
+
+A worktree de origem terminou limpa em `9ca9c6a`. Esse commit foi integrado sem editar a worktree
+do usuário. Permanecem os eventos de dia inteiro, ações do painel, chunking da Groq, notas em partes,
+as correções da revisão anterior e todos os casos de teste das duas linhas.
+
+O transporte SSH usa o contrato novo de job persistente: conexão limitada a 15 s, upload a 30 s,
+worker desacoplado e limitado remotamente entre 30 minutos e 3 horas conforme a duração do áudio.
+Não se mata nem apaga o job por uma perda de conexão. Os quatro testes antigos de transporte foram
+adaptados a esse contrato: continuam verificando limites, falhas e recuperação; agora também exigem
+preservação do original, ausência de limpeza destrutiva e reutilização do resultado remoto.
+O teste de Bronze anterior à transcrição passa a identificar o arquivo pelo job em vez de exigir
+o nome legado `audio.ogg`. Os seis contratos independentes permanecem byte a byte intactos.
+
+O botão de retry das reuniões novas retoma `.jobs`, sem passar pelo append legado, e libera o
+estado de finalização interrompida. Os campos por gravação alimentam o indicador de retry do painel.
+O caminho legado mantém lock por reunião, escrita atômica e persistência imediata do recibo.
+Suíte integrada: 187 testes verdes no XPS, sem instalar nem publicar.
