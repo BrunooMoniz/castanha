@@ -39,3 +39,21 @@ class TestCalendar(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIcalDiaInteiro(unittest.TestCase):
+    def test_value_date_vira_dia_inteiro_local(self):
+        import datetime
+        from castanha.calendar import parse_ics_content
+        ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:x1\nSUMMARY:Aniversário\nDTSTART;VALUE=DATE:20260905\nDTEND;VALUE=DATE:20260906\nEND:VEVENT\nEND:VCALENDAR\n"
+        (ev,) = parse_ics_content(ics)
+        self.assertTrue(ev.all_day)
+        self.assertEqual((ev.start.day, ev.start.hour), (5, 0))
+        self.assertEqual(ev.start.tzinfo, datetime.datetime.now().astimezone().tzinfo)
+        self.assertEqual(ev.end - ev.start, datetime.timedelta(days=1))
+
+    def test_com_hora_continua_com_hora(self):
+        from castanha.calendar import parse_ics_content
+        ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:x2\nSUMMARY:Reunião\nDTSTART:20260905T130000Z\nDTEND:20260905T140000Z\nEND:VEVENT\nEND:VCALENDAR\n"
+        (ev,) = parse_ics_content(ics)
+        self.assertFalse(ev.all_day)

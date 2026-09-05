@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from castanha.audio import (
     AUDIO_STATUS_MESSAGES,
@@ -63,7 +63,11 @@ class CastanhaEngine:
         # Import local: o teste troca esta classe por mock em tempo de chamada.
         from castanha.transcription import VpsSshTranscriber
 
-        transcriber = get_transcriber(estimated_duration_sec=estimated_sec)
+        try:
+            transcriber = get_transcriber(estimated_duration_sec=estimated_sec)
+        except Exception as e:
+            # Sem Groq e sem VPS: falha declarada, e o áudio espera no Bronze.
+            return "", "failed", str(e)
         try:
             trans_res = transcriber.transcribe(audio_path, mode=mode)
             return trans_res.text, getattr(trans_res, "provider", transcriber.__class__.__name__), None
@@ -124,7 +128,9 @@ class CastanhaEngine:
                 }
         if not current_meeting_info:
             if meeting_event:
-                current_meeting_info = meeting_event.to_dict()
+                current_meeting_info = (
+                    meeting_event.to_dict() if hasattr(meeting_event, "to_dict") else dict(meeting_event)
+                )
             elif title:
                 current_meeting_info = {
                     "title": title,
@@ -247,7 +253,41 @@ class CastanhaEngine:
         ]
         real_duration = probe_duration_seconds(audio_path)
 
-        # 2. Transcrição (Whisper na Groq / VPS)
+        # 2. Bronze ANTES da transcrição. A transcrição pode levar horas (VPS)
+        # e o áudio estava em /tmp: `stop` morrendo no meio (reload do shell,
+        # logout, reboot) perdia a reunião sem deixar nada para o "tentar de
+        # novo". Agora o áudio já está guardado quando a espera começa.
+        duracao = real_duration if real_duration is not None else state.get("elapsed_seconds", 0)
+        target_slug = state.get("target_meeting_slug")
+        if target_slug and (self.storage.bronze_dir / target_slug).exists():
+            slug = target_slug
+            rec_entry = self.storage.add_recording(
+                slug,
+                audio_path,
+                metadata_update={"duration_seconds": duracao, "audio_status": audio_status, "transcribed": None},
+            )
+            filename = rec_entry["filename"]
+            bronze_dir = self.storage.bronze_dir / slug
+        else:
+            slug = self.storage.create_meeting_slug(title)
+            metadata = {
+                "slug": slug,
+                "title": title,
+                "recorded_at": state.get("started_at") or datetime.now().isoformat(),
+                "duration_seconds": duracao,
+                "mode": mode,
+                "transcription_provider": "pending",
+                "audio_status": audio_status,
+                "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+                "audio_levels": audio_levels,
+                "transcription_error": None,
+                "mic_muted_at_start": state.get("mic_muted_at_start"),
+                "calendar_event": current_meeting,
+            }
+            bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, "")
+            filename = Path(metadata["bronze_audio_file"]).name
+
+        # 3. Transcrição (Whisper na Groq / VPS)
         transcription_error = None
         if audio_status == "sem_audio":
             raw_transcript = ""
@@ -258,42 +298,19 @@ class CastanhaEngine:
                 audio_path, mode, estimated
             )
 
-        # 3. Metadados e Bronze
-        target_slug = state.get("target_meeting_slug")
-        if target_slug and (self.storage.bronze_dir / target_slug).exists():
-            slug = target_slug
-            self.storage.add_recording(
-                slug,
-                audio_path,
-                metadata_update={
-                    "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
-                    "audio_status": audio_status,
-                },
-                raw_transcript=raw_transcript,
-            )
-            bronze_dir = self.storage.bronze_dir / slug
-            meta = self.storage._read_bronze_metadata(slug)
-            full_transcript_file = bronze_dir / "transcript_raw.txt"
-            full_transcript = full_transcript_file.read_text(encoding="utf-8") if full_transcript_file.exists() else raw_transcript
-            metadata = meta
-        else:
-            slug = self.storage.create_meeting_slug(title)
-            metadata = {
-                "slug": slug,
-                "title": title,
-                "recorded_at": state.get("started_at") or datetime.now().isoformat(),
-                "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
-                "mode": mode,
-                "transcription_provider": provider_name,
-                "audio_status": audio_status,
-                "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
-                "audio_levels": audio_levels,
-                "transcription_error": transcription_error,
-                "mic_muted_at_start": state.get("mic_muted_at_start"),
-                "calendar_event": current_meeting,
-            }
-            bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, raw_transcript)
-            full_transcript = raw_transcript
+        # O texto entra por anexo (nunca trunca o que já havia) e a gravação
+        # fica marcada: é por essa marca que o painel oferece "tentar de novo".
+        self.storage.append_transcript(slug, filename, raw_transcript)
+        self.storage.update_recording(
+            slug, filename,
+            transcribed=bool(raw_transcript.strip()) or audio_status == "sem_audio",
+            transcription_error=transcription_error,
+        )
+        metadata = self.storage._read_bronze_metadata(slug)
+        metadata["transcription_provider"] = provider_name
+        metadata["transcription_error"] = transcription_error
+        self.storage.write_bronze_metadata(slug, metadata)
+        full_transcript = self.storage.read_transcript(slug)
 
         # 4. Processamento Silver (Markdown)
         silver_content = self.summarizer.generate_silver(metadata, full_transcript)
@@ -303,8 +320,10 @@ class CastanhaEngine:
         gold_data = self.summarizer.generate_gold(metadata, silver_content, full_transcript)
         gold_path = self.storage.save_gold(slug, gold_data)
 
-        # 6. Ingestão Zinom (se habilitado)
-        zinom_status = self.zinom.ingest_meeting(metadata, silver_content, gold_data)
+        # 6. Ingestão Zinom (se habilitado). Gravação anexada a uma reunião já
+        # enviada EDITA a nota que existe, pelo id guardado no metadata.
+        anterior = (metadata.get("zinom") or {}).get("remember_id")
+        zinom_status = self.zinom.ingest_meeting(metadata, silver_content, gold_data, previous_remember_id=anterior)
         # O resultado fica NO METADATA, e não só no estado da sessão: é por ele
         # que o `castanha sync` sabe o que ficou para trás e qual nota editar.
         self.storage.record_zinom_result(slug, zinom_status)
@@ -389,8 +408,10 @@ class CastanhaEngine:
         """Roda de novo a esteira (transcrição, Silver, Gold, Zinom) de uma reunião do Bronze.
 
         É a segunda chance da gravação que ficou sem transcrição: sem internet
-        na hora do `stop`, Groq fora do ar, VPS lenta. O áudio nunca sai do
-        Bronze, então repetir é seguro e idempotente.
+        na hora do `stop`, Groq fora do ar, VPS lenta. Só transcreve as
+        gravações que ainda não têm texto, anexa o que conseguir e nunca apaga
+        o que já estava lá: se falhar de novo, o Bronze fica como estava. A
+        nota do Zinom é editada pelo id, não duplicada.
         """
         bronze_dir = self.storage.bronze_dir / slug
         if not bronze_dir.exists():
@@ -404,70 +425,106 @@ class CastanhaEngine:
         if not recordings:
             return {"status": "error", "message": f"Nenhum arquivo de áudio encontrado para a reunião '{slug}'."}
 
-        audio_path = Path(recordings[0]["path"])
-        if not audio_path.exists() or audio_path.stat().st_size == 0:
-            return {"status": "error", "message": f"Arquivo de áudio '{audio_path.name}' não existe ou está vazio."}
+        texto_antes = self.storage.read_transcript(slug)
+        # Sem marca (reunião antiga): se já há texto, ela já foi transcrita.
+        pendentes = [
+            r for r in recordings
+            if r.get("transcribed") is False or (r.get("transcribed") is None and not texto_antes.strip())
+        ]
 
         notify("Reprocessando Reunião ⏳", f"{title}\nEnviando para transcrição e gerando notas...")
 
-        # 1. Sanidade do áudio
-        levels = measure_channel_levels(audio_path, mode=mode)
-        audio_status = classify_audio(levels)
-        audio_levels = [
-            {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
-             "max_db": ch.max_db, "silencio": ch.silent}
-            for ch in levels
-        ]
-        real_duration = probe_duration_seconds(audio_path) or meta.get("duration_seconds", 0)
+        erros: List[str] = []
+        provider_final = None
+        novo_texto = False
+        for indice, rec in enumerate(recordings):
+            if rec not in pendentes:
+                continue
+            audio_path = Path(rec["path"])
+            if not audio_path.exists() or audio_path.stat().st_size == 0:
+                erros.append(f"{rec['filename']}: arquivo não existe ou está vazio")
+                self.storage.update_recording(slug, rec["filename"], transcribed=False,
+                                              transcription_error="arquivo não existe ou está vazio")
+                continue
 
-        # 2. Transcrição
-        transcription_error = None
-        if audio_status == "sem_audio":
-            raw_transcript = ""
-            provider_name = "nenhum (áudio em silêncio)"
-        else:
-            estimated = real_duration or 60.0
-            raw_transcript, provider_name, transcription_error = self._transcribe_with_fallback(
-                audio_path, mode, estimated
-            )
+            levels = measure_channel_levels(audio_path, mode=mode)
+            audio_status = classify_audio(levels)
+            dur = probe_duration_seconds(audio_path) or rec.get("duration_seconds") or 0
+            if indice == 0:
+                meta = self.storage._read_bronze_metadata(slug)
+                meta["audio_status"] = audio_status
+                meta["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(audio_status, "")
+                meta["audio_levels"] = [
+                    {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
+                     "max_db": ch.max_db, "silencio": ch.silent}
+                    for ch in levels
+                ]
+                self.storage.write_bronze_metadata(slug, meta)
 
-        # 3. Salva transcript_raw.txt e atualiza metadata.json
-        transcript_file = bronze_dir / "transcript_raw.txt"
-        with open(transcript_file, "w", encoding="utf-8") as f:
-            f.write(raw_transcript)
+            if audio_status == "sem_audio":
+                # Repetir não inventa fala: marca como resolvida.
+                self.storage.update_recording(slug, rec["filename"], transcribed=True,
+                                              transcription_error=None, audio_status=audio_status,
+                                              duration_seconds=dur)
+                provider_final = provider_final or "nenhum (áudio em silêncio)"
+                continue
 
-        meta["transcription_provider"] = provider_name
-        meta["transcription_error"] = transcription_error
-        meta["audio_status"] = audio_status
-        meta["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(audio_status, "")
-        meta["audio_levels"] = audio_levels
-        meta["duration_seconds"] = real_duration
-        meta_file = bronze_dir / "metadata.json"
-        with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+            texto, provider, erro = self._transcribe_with_fallback(audio_path, mode, dur or 60.0)
+            if texto.strip():
+                self.storage.append_transcript(slug, rec["filename"], texto)
+                self.storage.update_recording(slug, rec["filename"], transcribed=True,
+                                              transcription_error=None, audio_status=audio_status,
+                                              duration_seconds=dur)
+                provider_final = provider
+                novo_texto = True
+            else:
+                motivo = erro or "transcrição vazia"
+                self.storage.update_recording(slug, rec["filename"], transcribed=False,
+                                              transcription_error=motivo, audio_status=audio_status,
+                                              duration_seconds=dur)
+                erros.append(f"{rec['filename']}: {motivo}")
 
-        # 4. Processamento Silver (Markdown)
-        silver_content = self.summarizer.generate_silver(meta, raw_transcript)
-        silver_path = self.storage.save_silver(slug, silver_content)
+        meta = self.storage._read_bronze_metadata(slug)
+        transcript = self.storage.read_transcript(slug)
+        recordings = self.storage.list_meeting_recordings(slug)
+        soma = sum(float(r.get("duration_seconds") or 0) for r in recordings)
+        if soma > 0:
+            meta["duration_seconds"] = soma
+        if erros and not transcript.strip():
+            meta["transcription_provider"] = "failed"
+        elif provider_final:
+            meta["transcription_provider"] = provider_final
+        meta["transcription_error"] = "; ".join(erros) if erros else None
+        self.storage.write_bronze_metadata(slug, meta)
 
-        # 5. Processamento Gold (Fatos para Zinom / LLM Wiki)
-        gold_data = self.summarizer.generate_gold(meta, silver_content, raw_transcript)
-        gold_path = self.storage.save_gold(slug, gold_data)
+        silver_path = self.storage.silver_dir / f"{slug}.md"
+        gold_path = self.storage.gold_dir / f"{slug}.json"
+        zinom_status: Dict[str, Any] = meta.get("zinom") or {}
+        # Nota nova só com texto novo, ou quando nada estava pendente (aí o
+        # pedido é refazer as notas). Falhar de novo não mexe na nota que existe.
+        refazer_notas = transcript.strip() and (novo_texto or not pendentes)
+        if refazer_notas:
+            # 4. Silver, 5. Gold, 6. Zinom (editando a nota anterior, se houver)
+            silver_content = self.summarizer.generate_silver(meta, transcript)
+            silver_path = self.storage.save_silver(slug, silver_content)
+            gold_data = self.summarizer.generate_gold(meta, silver_content, transcript)
+            gold_path = self.storage.save_gold(slug, gold_data)
+            anterior = (meta.get("zinom") or {}).get("remember_id")
+            zinom_status = self.zinom.ingest_meeting(meta, silver_content, gold_data, previous_remember_id=anterior)
+            self.storage.record_zinom_result(slug, zinom_status)
+            meta = self.storage._read_bronze_metadata(slug)
 
-        # 6. Ingestão Zinom
-        zinom_status = self.zinom.ingest_meeting(meta, silver_content, gold_data)
-        self.storage.record_zinom_result(slug, zinom_status)
-
+        provider_name = meta.get("transcription_provider") or "failed"
         result_summary = {
             "slug": slug,
             "title": title,
             "bronze_dir": str(bronze_dir),
             "silver_file": str(silver_path),
             "gold_file": str(gold_path),
-            "audio_status": audio_status,
-            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+            "audio_status": meta.get("audio_status", "ok"),
+            "audio_diagnostico": meta.get("audio_diagnostico", ""),
             "transcription_provider": provider_name,
-            "transcription_error": transcription_error,
+            "transcription_error": meta.get("transcription_error"),
             "zinom": zinom_status,
         }
 
@@ -478,14 +535,14 @@ class CastanhaEngine:
             self.state_mgr.write({"last_result": result_summary})
 
         problemas = []
-        if provider_name == "failed":
-            problemas.append(f"a transcrição falhou ({transcription_error})")
+        if erros:
+            problemas.append(f"a transcrição falhou ({'; '.join(erros)})")
             notify("Falha ao reprocessar ⚠️", f"{title}\nNão foi possível transcrever o áudio.", timeout=10000)
         else:
             notify("Reunião Reprocessada! 🌰", f"{title}\nNotas e fatos atualizados.")
 
-        if audio_status in ("sem_audio", "mic_mudo"):
-            problemas.append(AUDIO_STATUS_MESSAGES.get(audio_status, audio_status))
+        if meta.get("audio_status") in ("sem_audio", "mic_mudo"):
+            problemas.append(AUDIO_STATUS_MESSAGES.get(meta["audio_status"], meta["audio_status"]))
         if isinstance(zinom_status, dict) and zinom_status.get("status") == "error":
             problemas.extend(zinom_status.get("errors", []))
         result_summary["problemas"] = problemas

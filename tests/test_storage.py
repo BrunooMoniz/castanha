@@ -205,3 +205,19 @@ class TestPodeReprocessar(unittest.TestCase):
         slug = self._bronze("e", transcription_provider="failed", audio_status="ok")
         slugs = [m["slug"] for m in self.storage.list_recent_meetings()]
         self.assertIn(slug, slugs)
+
+    def test_envio_pulado_nao_perde_o_id_da_nota(self):
+        slug = self._bronze("z", transcript="x", transcription_provider="groq", audio_status="ok",
+                            zinom={"status": "ok", "remember_id": "nota-77"})
+        self.storage.record_zinom_result(slug, {"status": "skipped", "reason": "hub fora"})
+        self.assertEqual(self.storage._read_bronze_metadata(slug)["zinom"]["remember_id"], "nota-77")
+        self.storage.record_zinom_result(slug, {"status": "ok", "remember": {"id": "nota-78"}})
+        self.assertEqual(self.storage._read_bronze_metadata(slug)["zinom"]["remember_id"], "nota-78")
+
+    def test_uma_gravacao_sem_texto_entre_duas_pede_retry(self):
+        slug = self._bronze("m", transcript="primeira", transcription_provider="groq", audio_status="ok")
+        d = self.storage.bronze_dir / slug
+        (d / "audio_2.ogg").write_bytes(b"x" * 1024)
+        self.storage.update_recording(slug, "audio.ogg", transcribed=True)
+        self.storage.update_recording(slug, "audio_2.ogg", transcribed=False, transcription_error="offline")
+        self.assertTrue(self._flag(slug))

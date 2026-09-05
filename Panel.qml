@@ -200,6 +200,7 @@ Panel {
 
   function intervalo(m) {
     if (!m) return ""
+    if (m.all_day) return "Dia inteiro"
     var ini = formatClock(m.start)
     var fim = formatClock(m.end)
     return fim && fim !== ini ? ini + " às " + fim : ini
@@ -989,15 +990,22 @@ Panel {
         }
 
         Button {
+          // Grava este evento, com ou sem link: o uid leva título, participantes
+          // e link para a nota; o título vai junto para o caso de a agenda ter
+          // mudado desde que o painel abriu.
           text: "Gravar reunião"
           iconText: "󰻂"
           foreground: root.foreground
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           bordered: !(meetingRow.meeting && meetingRow.meeting.conference_url)
+          enabled: !root.isBusy
           onClicked: {
-            var tit = (meetingRow.meeting && meetingRow.meeting.title) ? meetingRow.meeting.title : "Reunião"
-            root.run("castanha start --title '" + tit.replace(/'/g, "'\\''") + "'")
+            var tit = (meetingRow.meeting && meetingRow.meeting.title) ? String(meetingRow.meeting.title) : "Reunião"
+            var uid = (meetingRow.meeting && meetingRow.meeting.uid) ? String(meetingRow.meeting.uid) : ""
+            var cmd = "castanha start --title='" + tit.replace(/'/g, "'\\''") + "'"
+            if (uid) cmd += " --event='" + uid.replace(/'/g, "'\\''") + "'"
+            root.run(cmd)
             root.close()
           }
         }
@@ -1171,7 +1179,7 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           visible: noteRow.precisaRetry && !noteRow.aberta
-          text: noteRow.reprocessando ? "󰑐  Reprocessando upload e transcrição…" : "󰀦  Upload/Transcrição pendente (clique para tentar novamente)"
+          text: noteRow.reprocessando ? "󰑐  Reprocessando upload e transcrição…" : "󰀦  Upload/Transcrição pendente: 󰑐 tenta de novo"
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

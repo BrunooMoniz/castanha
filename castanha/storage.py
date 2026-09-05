@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,14 +56,18 @@ def slugify(text: str) -> str:
     return text[:50] or "reuniao"
 
 def _pode_reprocessar(recordings: List[Dict[str, Any]], has_transcript: bool, meta: Dict[str, Any]) -> bool:
-    """Há áudio no Bronze e nenhuma transcrição: dá para tentar de novo.
+    """Há áudio no Bronze que ainda não virou texto: dá para tentar de novo.
 
     Gravação muda também fica sem transcrição, mas repetir não inventa fala:
-    ela não ganha o botão.
+    ela não ganha o botão. Com mais de uma gravação, basta uma ter falhado.
     """
-    if not recordings or has_transcript:
+    if not recordings:
         return False
-    return (meta.get("audio_status") or "") != "sem_audio"
+    if (meta.get("audio_status") or "") == "sem_audio" and not has_transcript:
+        return False
+    if any(r.get("transcribed") is False for r in recordings):
+        return True
+    return not has_transcript
 
 
 class MeetingStorage:
@@ -181,6 +186,12 @@ class MeetingStorage:
             "duration_seconds": dur,
             "audio_status": (metadata_update or {}).get("audio_status", "ok"),
         }
+        # Por gravação, para o "tentar de novo" saber qual arquivo ficou sem texto.
+        for chave in ("transcribed", "transcription_error"):
+            if chave in (metadata_update or {}):
+                rec_entry[chave] = metadata_update[chave]
+        if raw_transcript and raw_transcript.strip():
+            rec_entry["transcribed"] = True
         existing_recordings.append(rec_entry)
         meta["recordings"] = existing_recordings
         meta["duration_seconds"] = (meta.get("duration_seconds") or 0) + dur
@@ -227,9 +238,53 @@ class MeetingStorage:
                 "duration_seconds": meta_item.get("duration_seconds") or 0,
                 "recorded_at": meta_item.get("recorded_at") or "",
                 "audio_status": meta_item.get("audio_status") or "ok",
+                "transcribed": meta_item.get("transcribed"),
+                "transcription_error": meta_item.get("transcription_error"),
                 "exists": True,
             })
         return recordings
+
+    def read_transcript(self, slug: str) -> str:
+        arquivo = self.bronze_dir / slug / "transcript_raw.txt"
+        try:
+            return arquivo.read_text(encoding="utf-8") if arquivo.exists() else ""
+        except Exception:
+            return ""
+
+    def append_transcript(self, slug: str, filename: str, texto: str) -> None:
+        """Anexa a transcrição de uma gravação; a primeira entra sem cabeçalho.
+
+        Nunca trunca: o texto que já estava lá é a única cópia.
+        """
+        if not texto or not texto.strip():
+            return
+        arquivo = self.bronze_dir / slug / "transcript_raw.txt"
+        existente = self.read_transcript(slug)
+        if existente.strip():
+            now_str = datetime.now().strftime("%H:%M")
+            with open(arquivo, "a", encoding="utf-8") as f:
+                f.write(f"\n\n--- Gravação {filename} ({now_str}) ---\n{texto}\n")
+        else:
+            arquivo.write_text(texto, encoding="utf-8")
+
+    def update_recording(self, slug: str, filename: str, **campos: Any) -> None:
+        """Atualiza os campos de uma gravação no metadata (transcribed, erro, duração)."""
+        meta = self._read_bronze_metadata(slug)
+        recs = [r for r in (meta.get("recordings") or []) if isinstance(r, dict)]
+        for r in recs:
+            if r.get("filename") == filename:
+                r.update(campos)
+                break
+        else:
+            recs.append({"id": filename, "filename": filename, **campos})
+        meta["recordings"] = recs
+        meta["recordings_count"] = len(recs)
+        self.write_bronze_metadata(slug, meta)
+
+    def write_bronze_metadata(self, slug: str, meta: Dict[str, Any]) -> None:
+        arquivo = self.bronze_dir / slug / "metadata.json"
+        arquivo.parent.mkdir(parents=True, exist_ok=True)
+        arquivo.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def delete_recording(self, slug: str, recording_name: Optional[str] = None) -> Dict[str, Any]:
         """Apaga um arquivo de áudio específico sem apagar a reunião, suas notas ou transcrição."""
@@ -442,9 +497,12 @@ class MeetingStorage:
             return
         metadata = self._read_bronze_metadata(slug)
         remember = (resultado or {}).get("remember") or {}
+        # A nota que já existe no Zinom é editada pelo id; perder o id aqui
+        # (envio pulado ou falho) faria o próximo envio criar uma segunda nota.
+        anterior = (metadata.get("zinom") or {}).get("remember_id")
         metadata["zinom"] = {
             "status": (resultado or {}).get("status", "error"),
-            "remember_id": remember.get("id"),
+            "remember_id": remember.get("id") or anterior,
             "facts_ingested": (resultado or {}).get("facts_ingested", 0),
             "errors": (resultado or {}).get("errors", []),
             "reason": (resultado or {}).get("reason"),
@@ -453,7 +511,7 @@ class MeetingStorage:
         try:
             arquivo.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
-            print(f"[Castanha] Não deu para anotar o resultado do Zinom em {slug}: {e}")
+            print(f"[Castanha] Não deu para anotar o resultado do Zinom em {slug}: {e}", file=sys.stderr)
 
     def _read_bronze_metadata(self, slug: str) -> Dict[str, Any]:
         arquivo = self.bronze_dir / slug / "metadata.json"

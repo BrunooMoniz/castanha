@@ -191,6 +191,20 @@ class TestReuniaoLonga(unittest.TestCase):
         self.assertNotIn("Frase 2399 dita", prompt)
         self.assertEqual(gold["decisions"], ["d"])
 
+    def test_gold_tenta_sem_modo_json_e_extrai_o_objeto(self):
+        chamadas = []
+
+        def groq(system_prompt, user_prompt, json_mode=False):
+            chamadas.append(json_mode)
+            if json_mode:
+                return ""  # json_validate_failed
+            return 'Aqui vai:\n```json\n{"facts": [], "decisions": ["d2"], "action_items": [], "people_notes": []}\n```'
+
+        with patch.object(MeetingSummarizer, "_call_llm", side_effect=groq):
+            gold = self.s.generate_gold(self._meta(), "# n", "Fala.")
+        self.assertEqual(chamadas, [True, False])
+        self.assertEqual(gold["decisions"], ["d2"])
+
     def test_erro_de_llm_nao_vira_resumo_inventado(self):
         with patch.object(MeetingSummarizer, "_call_llm", return_value=""):
             silver = self.s.generate_silver(self._meta(), "Fala. Fala.")

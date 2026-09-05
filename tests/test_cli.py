@@ -26,7 +26,8 @@ class TestCLI(unittest.TestCase):
                 "gold_dir": str(self.gold),
             },
             "llm": {"api_key": ""},
-            "transcription": {"groq_api_key": "", "vps_ssh_host": "nonexistent"},
+            # Mock só por escolha explícita: sem ele, "sem transcritor" é falha declarada.
+            "transcription": {"provider": "mock", "groq_api_key": "", "vps_ssh_host": "nonexistent"},
             "zinom": {"enabled": False},
         }), encoding="utf-8")
 
@@ -184,6 +185,83 @@ class TestCLI(unittest.TestCase):
         notes_data2 = json.loads(res_notes2.stdout)
         matching2 = [n for n in notes_data2["notes"] if n["slug"] == slug]
         self.assertFalse(matching2[0]["can_retry"])
+
+    def _bronze_falho(self, slug, transcript=""):
+        m_bronze = self.bronze / slug
+        m_bronze.mkdir(parents=True, exist_ok=True)
+        audio_file = m_bronze / "audio.ogg"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1", "-c:a", "libopus", "-b:a", "64k", str(audio_file)],
+            capture_output=True, check=True
+        )
+        (m_bronze / "transcript_raw.txt").write_text(transcript, encoding="utf-8")
+        (m_bronze / "metadata.json").write_text(json.dumps({
+            "title": "Reunião", "slug": slug, "recorded_at": "2026-09-05T13:00:00", "duration_seconds": 1.0,
+            "transcription_provider": "failed", "transcription_error": "timeout",
+            "recordings": [{"id": "audio.ogg", "filename": "audio.ogg", "path": str(audio_file),
+                            "size_bytes": audio_file.stat().st_size, "size_human": "10 KB", "duration_seconds": 1.0}],
+        }), encoding="utf-8")
+        return m_bronze
+
+    def _sem_transcritor(self):
+        cfg = json.loads((self.cfg_dir / "config.json").read_text())
+        cfg["transcription"] = {"groq_api_key": "", "vps_ssh_host": "nonexistent"}
+        (self.cfg_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    def test_retry_sem_transcritor_falha_honesto_e_mantem_a_segunda_chance(self):
+        slug = "2026-09-05_1300_offline"
+        m_bronze = self._bronze_falho(slug)
+        self._sem_transcritor()
+        res = self._run_cli("retry", slug, "--json")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["results"][0]["result"]["transcription_provider"], "failed")
+        self.assertNotIn("Simulada", (m_bronze / "transcript_raw.txt").read_text(encoding="utf-8"))
+        notes = json.loads(self._run_cli("notes", "--json").stdout)["notes"]
+        self.assertTrue([n for n in notes if n["slug"] == slug][0]["can_retry"])
+        self.assertFalse((self.silver / f"{slug}.md").exists(), "sem texto não se gera nota")
+
+    def test_retry_sem_argumento_nao_toca_na_reuniao_boa(self):
+        slug = "2026-09-05_1200_boa"
+        m_bronze = self._bronze_falho(slug, transcript="Texto certo.")
+        meta = json.loads((m_bronze / "metadata.json").read_text())
+        meta["transcription_provider"] = "groq"
+        meta["transcription_error"] = None
+        meta["recordings"][0]["transcribed"] = True
+        (m_bronze / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+        (self.silver / f"{slug}.md").write_text("# nota boa", encoding="utf-8")
+
+        res = self._run_cli("retry", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout)["results"], [])
+        self.assertEqual((m_bronze / "transcript_raw.txt").read_text(encoding="utf-8"), "Texto certo.")
+        self.assertEqual((self.silver / f"{slug}.md").read_text(encoding="utf-8"), "# nota boa")
+
+    def test_esconder_a_ultima_com_hora_nao_promove_dia_inteiro(self):
+        from castanha.state import StateManager
+        import os
+        env_backup = dict(os.environ)
+        os.environ.update({"XDG_STATE_HOME": self.env["XDG_STATE_HOME"], "XDG_CONFIG_HOME": self.env["XDG_CONFIG_HOME"]})
+        try:
+            StateManager().write({
+                "upcoming_meetings": [
+                    {"uid": "reuniao_20260905T130000Z", "series_key": "reuniao", "title": "Nora", "start": "2026-09-05T13:00:00-03:00", "end": "2026-09-05T14:00:00-03:00"},
+                    {"uid": "lembrete_20260905", "series_key": "lembrete", "title": "Pagar", "start": "2026-09-05T00:00:00-03:00", "end": "2026-09-06T00:00:00-03:00", "all_day": True},
+                ],
+                "next_meeting": {"uid": "reuniao_20260905T130000Z", "title": "Nora"},
+            })
+        finally:
+            os.environ.clear(); os.environ.update(env_backup)
+        res = self._run_cli("agenda", "hide", "reuniao", "--title", "Nora")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        os.environ.update({"XDG_STATE_HOME": self.env["XDG_STATE_HOME"], "XDG_CONFIG_HOME": self.env["XDG_CONFIG_HOME"]})
+        try:
+            estado = StateManager().read()
+        finally:
+            os.environ.clear(); os.environ.update(env_backup)
+        self.assertEqual([m["uid"] for m in estado["upcoming_meetings"]], ["lembrete_20260905"])
+        self.assertIsNone(estado["next_meeting"])
+
 
 if __name__ == "__main__":
     unittest.main()

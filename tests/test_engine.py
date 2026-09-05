@@ -217,6 +217,121 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(res["result"]["transcription_provider"], "failed")
         self.assertEqual(t.call_count, 1)
 
+    def test_bronze_e_salvo_antes_da_transcricao(self):
+        """`stop` morrendo no meio da transcrição não pode perder o áudio do /tmp."""
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+
+        with patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=42.0), \
+             patch("castanha.engine.get_transcriber") as get_t, \
+             patch("castanha.engine.notify"), patch("os.kill"):
+            get_t.return_value.transcribe.side_effect = KeyboardInterrupt()
+            with self.assertRaises(KeyboardInterrupt):
+                engine.stop_recording()
+
+        pastas = list((self.meetings / "bronze").iterdir())
+        self.assertEqual(len(pastas), 1)
+        self.assertTrue((pastas[0] / "audio.ogg").exists())
+        meta = json.loads((pastas[0] / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["transcription_provider"], "pending")
+        nota = engine.storage.get_meeting(pastas[0].name)
+        self.assertTrue(nota["can_retry"])
+
+    def _reuniao_no_bronze(self, engine, slug, transcript="", transcribed=None, zinom_id=None, audios=("audio.ogg",)):
+        pasta = engine.storage.bronze_dir / slug
+        pasta.mkdir(parents=True, exist_ok=True)
+        recs = []
+        for nome in audios:
+            (pasta / nome).write_bytes(b"ogg-de-mentira")
+            recs.append({"id": nome, "filename": nome, "path": str(pasta / nome), "size_bytes": 14,
+                         "size_human": "14 B", "duration_seconds": 10.0, "transcribed": transcribed})
+        (pasta / "transcript_raw.txt").write_text(transcript, encoding="utf-8")
+        meta = {"slug": slug, "title": "Reunião", "recorded_at": "2026-09-05T10:00:00", "mode": "dual",
+                "duration_seconds": 10.0 * len(audios), "transcription_provider": "failed" if not transcript else "groq",
+                "recordings": recs, "calendar_event": {"attendees": []}}
+        if zinom_id:
+            meta["zinom"] = {"status": "ok", "remember_id": zinom_id}
+        (pasta / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+        return pasta
+
+    def _reprocess(self, engine, slug, transcricao):
+        """transcricao: texto, ou exceção para falhar."""
+        with patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=10.0), \
+             patch("castanha.engine.get_transcriber") as get_t, \
+             patch("castanha.transcription.VpsSshTranscriber") as vps, \
+             patch("castanha.engine.notify"):
+            if isinstance(transcricao, Exception):
+                get_t.return_value.transcribe.side_effect = transcricao
+                vps.return_value.transcribe.side_effect = RuntimeError("vps fora")
+            else:
+                get_t.return_value.transcribe.return_value = TranscriptionResult(
+                    text=transcricao, utterances=[], provider="groq", raw_response={})
+            return engine.reprocess_meeting(slug)
+
+    def test_retry_que_falha_de_novo_nao_apaga_nada(self):
+        engine = self._engine()
+        pasta = self._reuniao_no_bronze(engine, "r1", transcript="Texto que já existia.", transcribed=False)
+        (engine.storage.silver_dir).mkdir(parents=True, exist_ok=True)
+        (engine.storage.silver_dir / "r1.md").write_text("# nota antiga", encoding="utf-8")
+
+        res = self._reprocess(engine, "r1", RuntimeError("groq caiu"))
+
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual((pasta / "transcript_raw.txt").read_text(encoding="utf-8"), "Texto que já existia.")
+        self.assertEqual((engine.storage.silver_dir / "r1.md").read_text(encoding="utf-8"), "# nota antiga")
+        self.assertTrue(engine.storage.get_meeting("r1")["can_retry"])
+
+    def test_retry_bem_sucedido_edita_a_nota_do_zinom_em_vez_de_duplicar(self):
+        engine = self._engine()
+        self._reuniao_no_bronze(engine, "r2", transcript="", transcribed=False, zinom_id="nota-123")
+        with patch.object(engine.zinom, "ingest_meeting", return_value={"status": "skipped", "reason": "desligado"}) as ing:
+            res = self._reprocess(engine, "r2", "Agora transcreveu.")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(ing.call_args.kwargs.get("previous_remember_id"), "nota-123")
+        meta = engine.storage._read_bronze_metadata("r2")
+        self.assertEqual(meta["zinom"]["remember_id"], "nota-123", "envio pulado não pode perder o id")
+        self.assertEqual(engine.storage.read_transcript("r2"), "Agora transcreveu.")
+        self.assertFalse(engine.storage.get_meeting("r2")["can_retry"])
+
+    def test_retry_transcreve_so_a_gravacao_que_faltou_e_anexa(self):
+        engine = self._engine()
+        pasta = self._reuniao_no_bronze(engine, "r3", transcript="Primeira gravação.", transcribed=True,
+                                        audios=("audio.ogg", "audio_2.ogg"))
+        meta = json.loads((pasta / "metadata.json").read_text())
+        meta["recordings"][1]["transcribed"] = False
+        (pasta / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+        self.assertTrue(engine.storage.get_meeting("r3")["can_retry"])
+
+        with patch("castanha.engine.get_transcriber") as get_t, \
+             patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=10.0), \
+             patch("castanha.engine.notify"):
+            get_t.return_value.transcribe.return_value = TranscriptionResult(
+                text="Segunda gravação.", utterances=[], provider="groq", raw_response={})
+            engine.reprocess_meeting("r3")
+            self.assertEqual(get_t.return_value.transcribe.call_count, 1)
+            self.assertTrue(str(get_t.return_value.transcribe.call_args.args[0]).endswith("audio_2.ogg"))
+
+        texto = engine.storage.read_transcript("r3")
+        self.assertIn("Primeira gravação.", texto)
+        self.assertIn("Segunda gravação.", texto)
+        self.assertIn("--- Gravação audio_2.ogg", texto)
+        meta = engine.storage._read_bronze_metadata("r3")
+        self.assertEqual(meta["duration_seconds"], 20.0)
+        self.assertFalse(engine.storage.get_meeting("r3")["can_retry"])
+
+    def test_retry_de_reuniao_ja_transcrita_so_refaz_as_notas(self):
+        engine = self._engine()
+        self._reuniao_no_bronze(engine, "r4", transcript="Texto bom.", transcribed=True)
+        with patch("castanha.engine.get_transcriber") as get_t, patch("castanha.engine.notify"):
+            res = engine.reprocess_meeting("r4")
+        get_t.assert_not_called()
+        self.assertEqual(res["status"], "success")
+        self.assertTrue((engine.storage.silver_dir / "r4.md").exists())
+
     def test_gravacao_boa_nao_lista_problema(self):
         engine = self._engine()
         with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):

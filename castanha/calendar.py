@@ -81,12 +81,19 @@ def parse_ical_datetime(dt_str: str) -> datetime.datetime:
         dt_str = dt_str[:-1]
         tz = datetime.timezone.utc
 
-    if len(dt_str) == 8:  # YYYYMMDD
+    if len(dt_str) == 8:  # YYYYMMDD: dia inteiro, meia-noite LOCAL
+        # Em UTC virava 21h da véspera no Brasil, com hora, e disparava o aviso.
         dt = datetime.datetime.strptime(dt_str, "%Y%m%d")
-        return dt.replace(tzinfo=tz)
+        return dt.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
 
     dt = datetime.datetime.strptime(dt_str, "%Y%m%dT%H%M%S")
     return dt.replace(tzinfo=tz)
+
+def is_ical_all_day(dt_line: str) -> bool:
+    """DTSTART;VALUE=DATE:20260905 (ou só a data) é evento de dia inteiro."""
+    prefix, _, val = dt_line.strip().rpartition(":")
+    return "VALUE=DATE" in prefix.upper() or len(val.strip().rstrip("Z")) == 8
+
 
 KNOWN_KEYS = {
     "BEGIN", "END", "UID", "SUMMARY", "DESCRIPTION", "LOCATION",
@@ -117,7 +124,11 @@ def parse_ics_content(ics_text: str) -> List[MeetingEvent]:
             if in_event and "DTSTART" in current_data and "SUMMARY" in current_data:
                 try:
                     start_dt = parse_ical_datetime(current_data["DTSTART"])
-                    end_dt = parse_ical_datetime(current_data.get("DTEND", current_data["DTSTART"]))
+                    all_day = is_ical_all_day(current_data["DTSTART"])
+                    if "DTEND" in current_data:
+                        end_dt = parse_ical_datetime(current_data["DTEND"])
+                    else:
+                        end_dt = start_dt + (datetime.timedelta(days=1) if all_day else datetime.timedelta(0))
 
                     full_text = f"{current_data.get('DESCRIPTION', '')} {current_data.get('LOCATION', '')}"
                     conf_url = extract_conference_url(full_text)
@@ -132,6 +143,7 @@ def parse_ics_content(ics_text: str) -> List[MeetingEvent]:
                         conference_url=conf_url,
                         description=current_data.get("DESCRIPTION"),
                         location=current_data.get("LOCATION"),
+                        all_day=all_day,
                     )
                     events.append(event)
                 except Exception:

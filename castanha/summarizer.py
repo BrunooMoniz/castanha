@@ -64,6 +64,27 @@ def _dividir_texto(texto: str, max_chars: int) -> List[str]:
     return partes
 
 
+def _extrair_json(texto: str) -> Optional[Dict[str, Any]]:
+    """O objeto JSON da resposta, mesmo com cerca de código ou prosa em volta."""
+    if not texto or not texto.strip():
+        return None
+    candidatos = [texto.strip()]
+    cerca = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", texto, re.S)
+    if cerca:
+        candidatos.append(cerca.group(1))
+    inicio, fim = texto.find("{"), texto.rfind("}")
+    if inicio != -1 and fim > inicio:
+        candidatos.append(texto[inicio:fim + 1])
+    for c in candidatos:
+        try:
+            dados = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(dados, dict):
+            return dados
+    return None
+
+
 PARTIAL_SYSTEM_PROMPT = """Você recebe UMA PARTE de uma transcrição longa de reunião, em ordem.
 Escreva em Português do Brasil, direto, sem floreios. Produza notas parciais só desta parte:
 
@@ -368,13 +389,17 @@ Transcrição:
         if raw_transcript.strip():
             try:
                 llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
+                if not llm_output:
+                    # O modo JSON da Groq recusa a resposta inteira quando o
+                    # modelo tropeça ("json_validate_failed", visto em 05/09
+                    # numa reunião de 2h). Sem o modo, o texto vem e o JSON
+                    # sai dele.
+                    llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=False)
             except LlmTooLarge as e:
                 print(f"[Castanha] Fatos: mensagem grande demais ({e}). Fica o fallback estruturado.", file=sys.stderr)
-        if llm_output:
-            try:
-                return json.loads(llm_output)
-            except Exception:
-                pass
+        dados = _extrair_json(llm_output)
+        if isinstance(dados, dict):
+            return dados
 
         # Fallback estruturado
         attendees = metadata.get("calendar_event", {}).get("attendees", [])

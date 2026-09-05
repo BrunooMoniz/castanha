@@ -51,6 +51,14 @@ class BaseTranscriber:
 GROQ_MAX_FILE_BYTES = 20 * 1024 * 1024
 DEFAULT_CHUNK_DURATION_SEC = 600        # 10 minutos por fatia (~5 MB a 64 kbps)
 GROQ_ATTEMPTS_PER_CHUNK = 3
+# O Retry-After da Groq pode ser de minutos (janela de áudio por hora). Vale
+# esperar até 15 min por vez, mas nunca mais de 30 min somados: além disso a
+# VPS ou o "tentar de novo" do painel resolvem melhor do que uma tela presa.
+GROQ_MAX_WAIT_SEC = 900.0
+GROQ_MAX_TOTAL_WAIT_SEC = 1800.0
+# Resto de áudio menor que isto se junta à fatia anterior: fatia quase vazia
+# volta 400 da Groq e derrubava a reunião inteira para a VPS.
+MIN_CHUNK_TAIL_SEC = 5.0
 # A VPS transcreve em CPU: 2,5x a duração, entre 30 min e 3 h. Passado isso a
 # resposta certa é falhar, e o "tentar de novo" do painel resolve depois.
 VPS_MIN_TIMEOUT_SEC = 1800
@@ -78,13 +86,28 @@ def chunk_audio(audio_path: Path, chunk_sec: int = DEFAULT_CHUNK_DURATION_SEC) -
         return [(audio_path, 0.0)]
 
     temp_dir = Path(tempfile.mkdtemp(prefix="castanha_chunks_"))
+    try:
+        return _fatiar(audio_path, chunk_sec, duration, temp_dir)
+    except Exception:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def _fatiar(audio_path: Path, chunk_sec: int, duration: Optional[float], temp_dir: Path) -> List[tuple[Path, float]]:
+    from castanha.audio import probe_duration_seconds
+
     chunks: List[tuple[Path, float]] = []
 
     if duration is not None and duration > 0:
-        num_chunks = int(duration // chunk_sec) + (1 if (duration % chunk_sec) > 0 else 0)
+        num_chunks = max(1, int(duration // chunk_sec) + (1 if (duration % chunk_sec) > 0 else 0))
+        resto = duration - (num_chunks - 1) * chunk_sec
+        if num_chunks > 1 and resto < MIN_CHUNK_TAIL_SEC:
+            num_chunks -= 1
         for i in range(num_chunks):
             start = i * chunk_sec
-            dur = min(chunk_sec, duration - start)
+            # A última fatia vai até o fim, inclusive o resto pequeno.
+            dur = (duration - start) if i == num_chunks - 1 else chunk_sec
             out_file = temp_dir / f"chunk_{i:03d}.ogg"
             res = subprocess.run(
                 ["ffmpeg", "-y", "-ss", str(start), "-t", str(dur), "-i", str(audio_path), "-c", "copy", str(out_file)],
@@ -117,6 +140,8 @@ class GroqTranscriber(BaseTranscriber):
     def __init__(self, api_key: str, model: str = "whisper-large-v3-turbo"):
         self.api_key = api_key
         self.model = model
+        # Quanto já se esperou por Retry-After nesta transcrição.
+        self._esperado = 0.0
 
     def _request_groq(self, file_path: Path) -> Dict[str, Any]:
         url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -156,6 +181,7 @@ class GroqTranscriber(BaseTranscriber):
         Sem isto, um único 429 no meio de catorze fatias mandava a reunião
         inteira para a VPS, que leva horas.
         """
+        import http.client
         import time as _time
         import urllib.error
 
@@ -172,16 +198,41 @@ class GroqTranscriber(BaseTranscriber):
                     pass
                 if e.code in (408, 429) or e.code >= 500:
                     ultimo = RuntimeError(f"Groq HTTP {e.code}: {corpo}")
-                    espera = _retry_after_seconds(e) or espera
+                    pedido = _retry_after_seconds(e)
+                    if pedido and pedido > GROQ_MAX_WAIT_SEC:
+                        # Dormir 15 min para tentar antes da hora não adianta.
+                        raise RuntimeError(
+                            f"Groq pediu para esperar {int(pedido // 60)} min, mais do que o Castanha aceita ({corpo})"
+                        ) from e
+                    espera = pedido or espera
                 else:
                     # 400, 401, 413: repetir não muda nada.
                     raise RuntimeError(f"Groq recusou o áudio (HTTP {e.code}): {corpo}") from e
-            except OSError as e:
-                # URLError, timeout de socket, conexão derrubada.
+            except (OSError, http.client.HTTPException, ValueError) as e:
+                # URLError, timeout de socket, conexão derrubada, resposta
+                # truncada (IncompleteRead) ou JSON pela metade.
                 ultimo = e
             if tentativa < attempts:
-                _time.sleep(min(espera, 60.0))
+                espera = min(espera, GROQ_MAX_WAIT_SEC)
+                if self._esperado + espera > GROQ_MAX_TOTAL_WAIT_SEC:
+                    raise RuntimeError(
+                        f"Groq pediu para esperar mais do que os {int(GROQ_MAX_TOTAL_WAIT_SEC // 60)} min "
+                        f"que o Castanha aceita ({ultimo})"
+                    )
+                self._esperado += espera
+                _time.sleep(espera)
         raise RuntimeError(f"Groq falhou em {attempts} tentativas: {ultimo}")
+
+    @staticmethod
+    def _registrar_consumo(total_duration: float, utterances: List[Utterance]) -> None:
+        try:
+            from castanha.budget import BudgetManager
+            if not total_duration and utterances:
+                total_duration = utterances[-1].end
+            if total_duration > 0:
+                BudgetManager().record_usage(total_duration)
+        except Exception:
+            pass
 
     def transcribe(self, audio_path: Path, mode: str = "dual") -> TranscriptionResult:
         if not self.api_key:
@@ -200,6 +251,7 @@ class GroqTranscriber(BaseTranscriber):
         full_text_parts: List[str] = []
         raw_responses: List[Dict[str, Any]] = []
         total_duration = 0.0
+        self._esperado = 0.0
 
         # Se uma fatia falhar de vez, a exceção sobe: quem decide o fallback
         # para a VPS é o engine, e decide UMA vez. Em 05/09 o fallback morava
@@ -230,17 +282,8 @@ class GroqTranscriber(BaseTranscriber):
             import shutil
             for t_dir in temp_dirs_to_clean:
                 shutil.rmtree(t_dir, ignore_errors=True)
-
-        # Registra consumo no Budget
-        try:
-            from castanha.budget import BudgetManager
-            budget_mgr = BudgetManager()
-            if not total_duration and all_utterances:
-                total_duration = all_utterances[-1].end
-            if total_duration > 0:
-                budget_mgr.record_usage(total_duration)
-        except Exception:
-            pass
+            # A Groq cobra as fatias que transcreveu mesmo que a seguinte falhe.
+            self._registrar_consumo(total_duration, all_utterances)
 
         full_text = " ".join(full_text_parts)
         return TranscriptionResult(
@@ -332,9 +375,17 @@ class VpsSshTranscriber(BaseTranscriber):
         import time, uuid
         remote_tmp = f"/tmp/castanha_{uuid.uuid4().hex[:8]}.ogg"
 
-        # 1. Copia áudio para a VPS via SCP
-        scp_cmd = ["scp", "-o", "ConnectTimeout=10", str(audio_path), f"{self.host}:{remote_tmp}"]
-        res_scp = subprocess.run(scp_cmd, capture_output=True, text=True)
+        # 1. Copia áudio para a VPS via SCP. Com teto: upload travado de 65 MB
+        # não pode segurar o `stop` para sempre.
+        tamanho = audio_path.stat().st_size if audio_path.exists() else 0
+        scp_timeout = max(300, int(tamanho / (100 * 1024)))  # 100 KB/s como piso
+        scp_cmd = ["scp", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
+                   str(audio_path), f"{self.host}:{remote_tmp}"]
+        try:
+            res_scp = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=scp_timeout)
+        except subprocess.TimeoutExpired:
+            self._cleanup_remote(remote_tmp, f"{remote_tmp}.json")
+            raise RuntimeError(f"Envio do áudio para a VPS passou de {scp_timeout // 60} min e foi abortado.")
         if res_scp.returncode != 0:
             raise RuntimeError(f"Falha ao enviar áudio para a VPS: {res_scp.stderr}")
 
@@ -361,6 +412,8 @@ class VpsSshTranscriber(BaseTranscriber):
                 f"Transcrição na VPS passou de {vps_timeout // 60} min e foi abortada."
             )
         if res_ssh.returncode != 0:
+            # O `&&` não chega ao rm quando o whisper falha: limpa aqui.
+            self._cleanup_remote(remote_tmp, out_json)
             raise RuntimeError(f"Falha na transcrição remota na VPS: {res_ssh.stderr.strip() or res_ssh.stdout.strip()}")
 
         data = json.loads(res_ssh.stdout.strip())
@@ -436,6 +489,14 @@ class MockTranscriber(BaseTranscriber):
 def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
     cfg = load_config()
     t_cfg = cfg.get("transcription", {})
+
+    # O mock só existe para teste e demonstração, e só quando pedido. Como
+    # último recurso ele inventava uma reunião ("[Transcrição Simulada]")
+    # justamente quando o Bruno estava sem internet, marcava a gravação como
+    # transcrita e mandava fatos falsos para o Zinom.
+    if str(t_cfg.get("provider", "")).lower() == "mock" or os.environ.get("CASTANHA_MOCK_TRANSCRIBER") == "1":
+        return MockTranscriber()
+
     groq_key = t_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
 
     # 1. Verifica se Groq está configurada e se o budget de R$ 5,00 não estourou
@@ -453,5 +514,9 @@ def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
     except Exception:
         pass
 
-    # 3. Fallback mock elegante
-    return MockTranscriber()
+    # 3. Sem transcritor: falha declarada. O áudio fica no Bronze e o painel
+    # oferece "tentar de novo".
+    raise RuntimeError(
+        "Nenhum transcritor disponível: sem chave da Groq (ou orçamento do mês esgotado) "
+        f"e a VPS '{vps_host}' não responde."
+    )
