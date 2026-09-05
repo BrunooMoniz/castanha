@@ -333,6 +333,33 @@ Panel {
     hideProcess.running = true
   }
 
+  property string retryingSlug: ""
+
+  Process {
+    id: retryProcess
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.retryingSlug = ""
+        root.refreshNotes()
+        stateFile.reload()
+      }
+    }
+    onExited: {
+      root.retryingSlug = ""
+      root.refreshNotes()
+      stateFile.reload()
+    }
+  }
+
+  function retryMeeting(slug) {
+    if (!slug || retryProcess.running) return
+    root.retryingSlug = slug
+    retryProcess.command = ["castanha", "retry", String(slug), "--json"]
+    retryProcess.running = true
+  }
+
   Process {
     id: refreshAgendaProcess
     running: false
@@ -743,7 +770,11 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: meetingRow.meeting ? root.formatClock(meetingRow.meeting.start) : ""
+            text: {
+              if (!meetingRow.meeting) return ""
+              if (meetingRow.meeting.all_day) return "Dia"
+              return root.formatClock(meetingRow.meeting.start)
+            }
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -958,6 +989,20 @@ Panel {
         }
 
         Button {
+          text: "Gravar reunião"
+          iconText: "󰻂"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: !(meetingRow.meeting && meetingRow.meeting.conference_url)
+          onClicked: {
+            var tit = (meetingRow.meeting && meetingRow.meeting.title) ? meetingRow.meeting.title : "Reunião"
+            root.run("castanha start --title '" + tit.replace(/'/g, "'\\''") + "'")
+            root.close()
+          }
+        }
+
+        Button {
           visible: !!(meetingRow.meeting && meetingRow.meeting.html_link)
           text: "No Google"
           iconText: "󰏌"
@@ -965,6 +1010,15 @@ Panel {
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           onClicked: root.openPath(meetingRow.meeting.html_link)
+        }
+
+        Button {
+          text: "Ocultar do Castanha"
+          iconText: "󰈉"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.hideMeeting(meetingRow.meeting)
         }
       }
     }
@@ -984,7 +1038,9 @@ Panel {
     // O destino do Zinom vem do metadata da própria reunião, e não do estado
     // da sessão: assim toda linha sabe o seu, não só a mais recente.
     readonly property var zinomInfo: note && note.zinom ? note.zinom : null
-    readonly property bool precisaSync: !!zinomInfo && zinomInfo.status !== "ok" && zinomInfo.status !== "skipped"
+    readonly property bool precisaRetry: !!note && !!note.can_retry
+    readonly property bool reprocessando: !!note && root.retryingSlug === note.slug
+    readonly property bool precisaSync: !!zinomInfo && zinomInfo.status !== "ok" && zinomInfo.status !== "skipped" && !precisaRetry
     readonly property bool sincronizando: !!note && root.syncingSlug === note.slug
 
     readonly property var participantes: (note && note.attendees) ? note.attendees : []
@@ -1040,18 +1096,33 @@ Panel {
 
           Item {
             width: Math.max(quando.implicitWidth, Style.space(20))
-            height: Math.max(quando.implicitHeight, sincronizar.height)
+            height: Math.max(quando.implicitHeight, Style.space(20))
             anchors.verticalCenter: parent.verticalCenter
 
             Text {
               id: quando
               anchors.centerIn: parent
               textFormat: Text.PlainText
-              opacity: sincronizar.opacity > 0 ? 0 : 1
+              opacity: (sincronizar.opacity > 0 || reprocessar.opacity > 0) ? 0 : 1
               text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+
+            // Segunda chance para reprocessar upload / transcrição que falhou
+            PanelActionButton {
+              id: reprocessar
+              anchors.centerIn: parent
+              opacity: noteRow.precisaRetry && (noteHover.containsMouse || noteRow.reprocessando) ? 1 : 0
+              enabled: opacity > 0 && !noteRow.reprocessando
+              iconText: "󰑐"
+              tooltipText: noteRow.reprocessando ? "Reprocessando upload/transcrição…" : "Tentar upload e transcrição novamente"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.retryMeeting(noteRow.note ? noteRow.note.slug : "")
               Behavior on opacity { NumberAnimation { duration: 120 } }
             }
 
@@ -1099,7 +1170,18 @@ Panel {
         Text {
           textFormat: Text.PlainText
           width: parent.width
-          visible: noteRow.comProblema && !noteRow.aberta
+          visible: noteRow.precisaRetry && !noteRow.aberta
+          text: noteRow.reprocessando ? "󰑐  Reprocessando upload e transcrição…" : "󰀦  Upload/Transcrição pendente (clique para tentar novamente)"
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: noteRow.comProblema && !noteRow.precisaRetry && !noteRow.aberta
           text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
           color: root.urgent
           font.family: root.fontFamily
@@ -1418,6 +1500,18 @@ Panel {
       Row {
         spacing: Style.space(8)
         topPadding: Style.space(4)
+
+        Button {
+          visible: !!(noteRow.note && noteRow.note.can_retry)
+          text: noteRow.reprocessando ? "Reprocessando…" : "Tentar upload/transcrição de novo"
+          iconText: "󰑐"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          enabled: !root.retryingSlug
+          onClicked: root.retryMeeting(noteRow.note ? noteRow.note.slug : "")
+        }
 
         Button {
           text: "Notas"

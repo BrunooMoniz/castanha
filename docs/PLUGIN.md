@@ -73,3 +73,15 @@ linha da nota mostra o botão 󰑐 quando o envio falhou, e
 a nota é EDITADA pelo id gravado no metadata do Bronze, e `brain_fact`
 supersede o fato do mesmo par sujeito-predicado. Rodar duas vezes não cria
 duas notas.
+
+**Tentar upload e transcrição de novo.** Se a gravação terminou sem internet,
+com a Groq fora do ar ou com a VPS lenta demais, o áudio fica no Bronze e a
+nota aparece com o aviso "Upload/Transcrição pendente". O botão 󰑐 na linha (e
+"Tentar upload/transcrição de novo" no detalhe) roda `castanha retry <slug>`:
+transcreve, gera Silver e Gold e manda ao Zinom. Repetir é seguro, o áudio
+não muda. Gravação muda não ganha o botão: repetir não inventa fala.
+
+**Evento de dia inteiro.** Entra na lista com "Dia" no lugar da hora, depois
+das reuniões com horário. Nunca vira "a próxima reunião" da barra nem dispara
+o aviso de dois minutos antes. "Gravar reunião" aparece em todo evento, com ou
+sem link de chamada, e usa o título do evento.

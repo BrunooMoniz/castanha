@@ -18,12 +18,16 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
    - **Modo Presencial**: Grava apenas o microfone do computador para reuniões presenciais.
 2. **Integração com Google Calendar**:
    - Sincronização direta via feed privado iCal ou integração com o hub Zinom.
+   - Todos os eventos da agenda principal, inclusive os de dia inteiro e os sem link de chamada;
+     o que não for reunião você esconde no painel (a série inteira, de uma vez).
    - Popup interativo 2 minutos antes com botão para entrar na chamada e botão para gravar.
    - Captura automática dos participantes (nomes e e-mails), pauta e links.
 3. **Esteira Bronze -> Silver -> Gold**:
    - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
    - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
    - **Gold**: Fatos atômicos estruturados prontos para ingestão no Zinom (`remember` e `brain_fact`).
+   - O áudio nunca sai do Bronze: se a transcrição falhar (sem internet, Groq fora do ar), o painel
+     mostra "tentar de novo" e `castanha retry` reprocessa. Reunião longa vai em fatias para a Groq.
 4. **Plugin Nativo do Omarchy (Quickshell)**:
    - Widget discreto na barra com status ao vivo (`● REC 00:14:20`).
    - Painel popout com controle de gravação, próxima reunião e acesso rápido às notas.
@@ -103,6 +107,15 @@ castanha daemon --background
 # Listar e abrir notas
 castanha notes
 castanha notes --open
+
+# Segunda chance: transcrever de novo uma gravação que ficou sem notas
+# (sem internet na hora do stop, Groq fora do ar, VPS lenta)
+castanha retry                     # a última pendente
+castanha retry <slug>              # uma reunião específica
+castanha retry --all               # todas as pendentes
+
+# Reenviar ao Zinom uma reunião já transcrita
+castanha sync [slug]
 ```
 
 ---
