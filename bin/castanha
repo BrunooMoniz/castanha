@@ -248,7 +248,7 @@ def cmd_sync(args):
     if args.all:
         resultados = sync_pending(limit=args.limit)
         if not resultados:
-            print("Nada pendente: todas as reuniões recentes já estão no Zinom.")
+            print("Nenhuma entrega pendente nesta execução.")
             return
     elif args.slug:
         resultados = [sync_meeting(args.slug)]
@@ -268,6 +268,11 @@ def cmd_sync(args):
         if r.get("status") == "ok":
             fatos = r.get("facts_ingested", 0)
             print(f"✅ {r['slug']}: salvo no Zinom" + (f", com {fatos} fato(s)" if fatos else ""))
+        elif r.get("status") == "pending":
+            falhou = True
+            print(f"⏳ {r['slug']}: pendente ({r.get('reason') or 'aguardando nova tentativa'})")
+        elif r.get("status") == "tombstoned":
+            print(f"⏭️  {r['slug']}: exclusão no Zinom preservada")
         elif r.get("status") == "skipped":
             print(f"⏭️  {r['slug']}: não enviado ({r.get('reason')})")
         else:
@@ -485,7 +490,7 @@ def main():
     p_sync = subparsers.add_parser("sync", help="Reenvia uma reunião ao Zinom (a última, por padrão)")
     p_sync.add_argument("slug", nargs="?", default=None, help="Slug da reunião; vazio = a última")
     p_sync.add_argument("--all", action="store_true", help="Reenvia tudo que ficou pendente")
-    p_sync.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
+    p_sync.add_argument("--limit", type=int, default=None, help="Máximo de pendências por execução; padrão: todas")
     p_sync.add_argument("--json", action="store_true", help="Saída em JSON")
     p_sync.set_defaults(func=cmd_sync)
 

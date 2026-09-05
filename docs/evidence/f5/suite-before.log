@@ -1,0 +1,74 @@
+................FFFFF..F.F......................................................................
+======================================================================
+FAIL: test_deleted_memory_is_not_recreated_by_sync (test_brain_integrity_contract.TestBrainIntegrityContract.test_deleted_memory_is_not_recreated_by_sync)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_brain_integrity_contract.py", line 64, in test_deleted_memory_is_not_recreated_by_sync
+    self.assertNotIn("remember", calls)
+AssertionError: 'remember' unexpectedly found in ['brain_update', 'remember']
+
+======================================================================
+FAIL: test_llm_failure_does_not_turn_invite_into_attendance (test_brain_integrity_contract.TestBrainIntegrityContract.test_llm_failure_does_not_turn_invite_into_attendance)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_brain_integrity_contract.py", line 48, in test_llm_failure_does_not_turn_invite_into_attendance
+    self.assertEqual(result.get("facts", []), [])
+AssertionError: Lists differ: [{'subject': 'Convidada Teste', 'predicate[64 chars]te'}] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+{'subject': 'Convidada Teste', 'predicate': 'participou_da_reuniao', 'object': 'Reunião sintética de aceite'}
+
++ []
+- [{'object': 'Reunião sintética de aceite',
+-   'predicate': 'participou_da_reuniao',
+-   'subject': 'Convidada Teste'}]
+
+======================================================================
+FAIL: test_long_note_cannot_report_success_after_silent_truncation (test_brain_integrity_contract.TestBrainIntegrityContract.test_long_note_cannot_report_success_after_silent_truncation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_brain_integrity_contract.py", line 79, in test_long_note_cannot_report_success_after_silent_truncation
+    self.assertTrue(marker in json.dumps(submitted, ensure_ascii=False),
+AssertionError: False is not true : Entrega declarou sucesso sem preservar o final da nota
+
+======================================================================
+FAIL: test_missing_credentials_leave_delivery_pending (test_brain_integrity_contract.TestBrainIntegrityContract.test_missing_credentials_leave_delivery_pending)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_brain_integrity_contract.py", line 83, in test_missing_credentials_leave_delivery_pending
+    self.assertTrue(meeting_needs_sync({
+AssertionError: False is not true
+
+======================================================================
+FAIL: test_simulated_transcript_never_reaches_memory (test_brain_integrity_contract.TestBrainIntegrityContract.test_simulated_transcript_never_reaches_memory)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_brain_integrity_contract.py", line 40, in test_simulated_transcript_never_reaches_memory
+    client.return_value.call_tool.assert_not_called()
+  File "/usr/lib/python3.12/unittest/mock.py", line 905, in assert_not_called
+    raise AssertionError(msg)
+AssertionError: Expected 'call_tool' to not have been called. Called 1 times.
+Calls: [call('remember', {'text': '# Reunião: Reunião sintética de aceite (2026-09-05T12:00:00Z)\n\nParticipantes: Não identificados\n\nUma decisão simulada.', 'title': 'Reunião: Reunião sintética de aceite (2026-09-05)', 'tags': ['castanha', 'reuniao']})].
+
+======================================================================
+FAIL: test_original_is_durable_before_processing_can_crash (test_capture_durability_contract.TestCaptureDurabilityContract.test_original_is_durable_before_processing_can_crash)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_capture_durability_contract.py", line 62, in test_original_is_durable_before_processing_can_crash
+    self.assertTrue(durable, "O processamento começou sem preservar o original")
+AssertionError: [] is not true : O processamento começou sem preservar o original
+
+======================================================================
+FAIL: test_cli_notes_and_delete_recording (test_cli.TestCLI.test_cli_notes_and_delete_recording)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/root/orca/workspaces/castanha/zinom-u-f5-castanha/tests/test_cli.py", line 107, in test_cli_notes_and_delete_recording
+    self.assertEqual(res_del.returncode, 0)
+AssertionError: 1 != 0
+
+----------------------------------------------------------------------
+Ran 96 tests in 2.483s
+
+FAILED (failures=7)
+[Castanha] Erro no transcritor primário: groq caiu. Tentando VPS local como fallback...

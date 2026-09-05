@@ -1,6 +1,8 @@
 """Coordenador principal do Castanha (orquestra áudio, transcrição, notas e armazenamento)."""
 
 import os
+import json
+import uuid
 import subprocess
 import time
 from datetime import datetime
@@ -18,6 +20,7 @@ from castanha.audio import (
 )
 from castanha.calendar import MeetingEvent
 from castanha.config import load_config
+from castanha.durability import atomic_write, write_json, meeting_lock, sync_directory, file_sha256
 from castanha.state import StateManager
 from castanha.storage import MeetingStorage
 from castanha.summarizer import MeetingSummarizer
@@ -58,8 +61,8 @@ class CastanhaEngine:
         meeting_slug: Optional[str] = None,
     ) -> Dict[str, Any]:
         state = self.state_mgr.read()
-        if state.get("status") in ["recording", "paused"]:
-            return {"status": "error", "message": "Gravação já está em andamento."}
+        if state.get("status") in ["recording", "paused", "processing"]:
+            return {"status": "error", "message": "Gravação ou finalização já está em andamento. Retome com castanha sync --all."}
 
         audio_cfg = self.config.get("audio", {})
         chosen_mode = mode or audio_cfg.get("default_mode", "dual")
@@ -116,6 +119,8 @@ class CastanhaEngine:
             "elapsed_seconds": 0,
             "current_meeting": current_meeting_info,
             "target_meeting_slug": meeting_slug,
+            "capture_slug": None,
+            "capture_job_id": None,
             "mic_muted_at_start": mic_muted,
             "error": None,
         })
@@ -165,7 +170,7 @@ class CastanhaEngine:
 
     def stop_recording(self) -> Dict[str, Any]:
         state = self.state_mgr.read()
-        if state.get("status") not in ["recording", "paused"]:
+        if state.get("status") not in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Nenhuma gravação em andamento para finalizar."}
 
         self.state_mgr.write({"status": "processing"})
@@ -175,7 +180,7 @@ class CastanhaEngine:
         audio_path = Path(state.get("audio_path", ""))
 
         # Finaliza processo do áudio
-        if pid:
+        if pid and state.get("status") in ("recording", "paused"):
             try:
                 import signal
                 os.kill(pid, signal.SIGINT)
@@ -195,158 +200,179 @@ class CastanhaEngine:
             except Exception:
                 pass
 
+        self.state_mgr.write({"pid": None})
+        if state.get("capture_slug") and state.get("capture_job_id"):
+            saved = (self.storage.bronze_dir / state["capture_slug"] /
+                     f"capture_{state['capture_job_id']}{audio_path.suffix}")
+            if saved.exists():
+                audio_path = saved
+
         if not audio_path.exists() or audio_path.stat().st_size == 0:
             self.state_mgr.reset()
             return {"status": "error", "message": "Arquivo de áudio não foi gravado ou está vazio."}
 
+        # O identificador sobrevive ao processo antes de copiar o original.
         current_meeting = state.get("current_meeting") or {}
         title = current_meeting.get("title") or "Reunião"
-        mode = state.get("mode", "dual")
+        slug = state.get("capture_slug") or state.get("target_meeting_slug") or self.storage.create_meeting_slug(title)
+        job_id = state.get("capture_job_id") or uuid.uuid4().hex
+        self.state_mgr.write({"capture_slug": slug, "capture_job_id": job_id})
+        bronze = self.storage.bronze_dir / slug
+        bronze.mkdir(parents=True, exist_ok=True)
+        sync_directory(bronze.parent)
+        with meeting_lock(bronze):
+            jobs = bronze / ".jobs"
+            jobs.mkdir(exist_ok=True)
+            sync_directory(bronze)
+            job_file = jobs / f"{job_id}.json"
+            if not job_file.exists():
+                # Capturas legadas não são reescritas nem inferidas como mock.
+                base = jobs / "base_transcript.txt"
+                if not base.exists():
+                    transcript = bronze / "transcript_raw.txt"
+                    atomic_write(base, transcript.read_text(encoding="utf-8") if transcript.exists() else "")
+                durable_audio = bronze / f"capture_{job_id}{audio_path.suffix}"
+                atomic_write(durable_audio, audio_path)
+                job = {"id": job_id, "audio_path": str(durable_audio), "sha256": file_sha256(durable_audio), "state": state,
+                       "stage": "pending", "recorded_at": state.get("started_at") or datetime.now().isoformat()}
+                write_json(job_file, job)
+                metadata = self.storage._read_bronze_metadata(slug) or {
+                    "slug": slug, "title": title, "recorded_at": job["recorded_at"],
+                    "mode": state.get("mode", "dual"), "calendar_event": current_meeting,
+                    "mic_muted_at_start": state.get("mic_muted_at_start"), "recordings": [],
+                }
+                metadata["processing_status"] = "pending"
+                write_json(bronze / "metadata.json", metadata)
 
-        # 1. Sanidade do áudio antes de qualquer coisa cara.
-        # Whisper alucina em cima de silêncio ("Thank you. Thank you."), então
-        # gravação muda não vai para transcrição nenhuma.
-        levels = measure_channel_levels(audio_path, mode=mode)
-        audio_status = classify_audio(levels)
-        audio_levels = [
-            {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
-             "max_db": ch.max_db, "silencio": ch.silent}
-            for ch in levels
-        ]
-        real_duration = probe_duration_seconds(audio_path)
-
-        # 2. Transcrição (Whisper na Groq / VPS)
-        transcription_error = None
-        if audio_status == "sem_audio":
-            raw_transcript = ""
-            provider_name = "nenhum (áudio em silêncio)"
+        result = self.process_pending(slug)
+        self.state_mgr.write({"status": "idle", "pid": None, "audio_path": None,
+                              "current_meeting": None, "capture_slug": None, "capture_job_id": None,
+                              "elapsed_seconds": 0, "last_result": result["result"]})
+        if result["status"] == "partial":
+            notify("Gravação preservada, processamento pendente", title, timeout=10000)
         else:
-            estimated = real_duration or state.get("elapsed_seconds") or 60
-            transcriber = get_transcriber(estimated_duration_sec=estimated)
+            notify("Notas Prontas! 🌰", title)
+        return result
+
+    def process_pending(self, slug: str) -> Dict[str, Any]:
+        """Retoma checkpoints do Bronze sem recapturar nem duplicar transcrições."""
+        bronze = self.storage.bronze_dir / slug
+        with meeting_lock(bronze):
+            return self._process_pending_locked(slug)
+
+    def _process_pending_locked(self, slug: str) -> Dict[str, Any]:
+        bronze = self.storage.bronze_dir / slug
+        metadata = self.storage._read_bronze_metadata(slug)
+        jobs_dir = bronze / ".jobs"
+        jobs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in jobs_dir.glob("*.json")]
+        jobs.sort(key=lambda item: (item[1]["recorded_at"], item[1]["id"]))
+        if not metadata and jobs:
+            first = jobs[0][1]
+            state = first["state"]
+            metadata = {"slug": slug, "title": (state.get("current_meeting") or {}).get("title") or "Reunião",
+                        "recorded_at": first["recorded_at"], "calendar_event": state.get("current_meeting") or {},
+                        "mode": state.get("mode", "dual"), "recordings": []}
+        errors = []
+        for job_file, job in jobs:
+            if job["stage"] != "pending":
+                continue
+            source = Path(job["audio_path"])
+            state = job["state"]
+            mode = state.get("mode", "dual")
+            levels = measure_channel_levels(source, mode=mode)
+            audio_status = classify_audio(levels)
+            duration = probe_duration_seconds(source)
+            job.update(audio_status=audio_status, duration_seconds=duration or state.get("elapsed_seconds", 0),
+                       audio_levels=[{"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
+                                      "max_db": ch.max_db, "silencio": ch.silent} for ch in levels])
             try:
-                trans_res = transcriber.transcribe(audio_path, mode=mode)
-                raw_transcript = trans_res.text
-                provider_name = getattr(trans_res, "provider", getattr(transcriber, "__class__", {}).__name__)
-            except Exception as e:
-                print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...")
-                try:
-                    from castanha.transcription import VpsSshTranscriber
-                    trans_res = VpsSshTranscriber().transcribe(audio_path, mode=mode)
-                    raw_transcript = trans_res.text
-                    provider_name = trans_res.provider
-                except Exception as err2:
-                    # Vazio, e não a mensagem de erro: string não vazia ia para a
-                    # LLM e virava um "resumo" fabricado em cima de um traceback.
-                    raw_transcript = ""
-                    transcription_error = str(err2)
-                    provider_name = "failed"
+                if audio_status == "sem_audio":
+                    job.update(transcript="", provider="nenhum (áudio em silêncio)")
+                else:
+                    transcriber = get_transcriber(estimated_duration_sec=duration or state.get("elapsed_seconds") or 60)
+                    try:
+                        transcription = transcriber.transcribe(source, mode=mode)
+                    except Exception as exc:
+                        from castanha.transcription import VpsSshTranscriber, TranscriptionPending
+                        # Job remoto já aceito ou indisponível: próximo sync retoma.
+                        if isinstance(exc, TranscriptionPending):
+                            raise
+                        host = self.config.get("transcription", {}).get("vps_ssh_host", "zinom-vps-2")
+                        transcription = VpsSshTranscriber(host).transcribe(source, mode=mode)
+                    if not transcription.text.strip():
+                        raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
+                    job.update(transcript=transcription.text, provider=transcription.provider)
+                job.update(stage="transcribed", error=None)
+            except Exception as exc:
+                job.update(error=str(exc), provider="failed")
+                errors.append(f"a transcrição falhou ({exc})")
+            write_json(job_file, job)
 
-        # 3. Metadados e Bronze
-        target_slug = state.get("target_meeting_slug")
-        if target_slug and (self.storage.bronze_dir / target_slug).exists():
-            slug = target_slug
-            self.storage.add_recording(
-                slug,
-                audio_path,
-                metadata_update={
-                    "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
-                    "audio_status": audio_status,
-                },
-                raw_transcript=raw_transcript,
-            )
-            bronze_dir = self.storage.bronze_dir / slug
-            meta = self.storage._read_bronze_metadata(slug)
-            full_transcript_file = bronze_dir / "transcript_raw.txt"
-            full_transcript = full_transcript_file.read_text(encoding="utf-8") if full_transcript_file.exists() else raw_transcript
-            metadata = meta
-        else:
-            slug = self.storage.create_meeting_slug(title)
-            metadata = {
-                "slug": slug,
-                "title": title,
-                "recorded_at": state.get("started_at") or datetime.now().isoformat(),
-                "duration_seconds": real_duration if real_duration is not None else state.get("elapsed_seconds", 0),
-                "mode": mode,
-                "transcription_provider": provider_name,
-                "audio_status": audio_status,
-                "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
-                "audio_levels": audio_levels,
-                "transcription_error": transcription_error,
-                "mic_muted_at_start": state.get("mic_muted_at_start"),
-                "calendar_event": current_meeting,
-            }
-            bronze_dir = self.storage.save_bronze(slug, audio_path, metadata, raw_transcript)
-            full_transcript = raw_transcript
-
-        # 4. Processamento Silver (Markdown)
-        silver_content = self.summarizer.generate_silver(metadata, full_transcript)
+        # Reconstrói sempre a mesma transcrição a partir de checkpoints imutáveis.
+        base = jobs_dir / "base_transcript.txt"
+        legacy_provider = metadata.get("legacy_transcription_provider", metadata.get("transcription_provider"))
+        metadata["legacy_transcription_provider"] = legacy_provider
+        parts = [base.read_text(encoding="utf-8")] if base.exists() and legacy_provider != "mock" else []
+        records = [r for r in metadata.get("recordings", []) if not r.get("job_id")]
+        for record in records:
+            record.setdefault("transcription_provider", legacy_provider)
+            record.setdefault("id", record.get("filename"))
+        for _, job in jobs:
+            if job.get("transcript") and job.get("provider") != "mock":
+                parts.append(job["transcript"])
+            source = Path(job["audio_path"])
+            records.append({"id": source.name, "filename": source.name, "path": str(source),
+                            "job_id": job["id"], "sha256": job.get("sha256"), "recorded_at": job["recorded_at"],
+                            "size_bytes": source.stat().st_size if source.exists() else 0,
+                            "duration_seconds": job.get("duration_seconds", 0),
+                            "audio_status": job.get("audio_status", "desconhecido"),
+                            "transcription_provider": job.get("provider")})
+        transcript = "\n\n".join(p for p in parts if p)
+        atomic_write(bronze / "transcript_raw.txt", transcript)
+        last_job = jobs[-1][1]
+        memory_records = [r for r in records if r.get("transcription_provider") not in ("mock", "failed")
+                          and r.get("audio_status") != "sem_audio"]
+        providers = {r.get("transcription_provider") for r in memory_records if r.get("transcription_provider")}
+        provider = (next(iter(providers)) if len(providers) == 1 else "mixed") if providers else last_job.get("provider", "failed")
+        statuses = {r.get("audio_status") for r in memory_records}
+        audio_status = ("ok" if "ok" in statuses else "mic_mudo" if "mic_mudo" in statuses
+                        else last_job.get("audio_status", "desconhecido"))
+        metadata.update(recordings=records, recordings_count=len(records),
+                        duration_seconds=sum(r.get("duration_seconds", 0) for r in records),
+                        bronze_audio_file=last_job["audio_path"], transcription_provider=provider,
+                        memory_recording_ids=[r["id"] for r in memory_records],
+                        transcription_error=last_job.get("error"), audio_status=audio_status,
+                        audio_diagnostico=AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+                        audio_levels=last_job.get("audio_levels", []),
+                        processing_status="pending" if errors else "complete")
+        write_json(bronze / "metadata.json", metadata)
+        silver_content = self.summarizer.generate_silver(metadata, transcript)
         silver_path = self.storage.save_silver(slug, silver_content)
-
-        # 5. Processamento Gold (Fatos para Zinom / LLM Wiki)
-        gold_data = self.summarizer.generate_gold(metadata, silver_content, full_transcript)
+        gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
         gold_path = self.storage.save_gold(slug, gold_data)
-
-        # 6. Ingestão Zinom (se habilitado)
-        zinom_status = self.zinom.ingest_meeting(metadata, silver_content, gold_data)
-        # O resultado fica NO METADATA, e não só no estado da sessão: é por ele
-        # que o `castanha sync` sabe o que ficou para trás e qual nota editar.
+        zinom_status = self.zinom.ingest_meeting(
+            metadata, silver_content, gold_data,
+            on_remember=lambda receipt: self.storage.record_zinom_result(slug, receipt),
+        )
         self.storage.record_zinom_result(slug, zinom_status)
-
-        # Limpa arquivo temporário
-        try:
-            if audio_path.exists():
-                audio_path.unlink()
-        except Exception:
-            pass
-
-        result_summary = {
-            "slug": slug,
-            "title": title,
-            "bronze_dir": str(bronze_dir),
-            "silver_file": str(silver_path),
-            "gold_file": str(gold_path),
-            "audio_status": audio_status,
-            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
-            "transcription_provider": provider_name,
-            "transcription_error": transcription_error,
-            "zinom": zinom_status,
-        }
-
-        self.state_mgr.write({
-            "status": "idle",
-            "pid": None,
-            "audio_path": None,
-            "current_meeting": None,
-            "mic_muted_at_start": None,
-            "last_result": result_summary,
-            "elapsed_seconds": 0,
-        })
-
-        # A notificação diz o que realmente aconteceu: "Notas prontas" em cima de
-        # uma gravação muda foi exatamente o que enganou no teste de 04/09.
-        if audio_status == "sem_audio":
-            notify("Gravação sem áudio 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['sem_audio']}", timeout=10000)
-        elif audio_status == "mic_mudo":
-            notify("Notas prontas, sem o seu microfone 🔇", f"{title}\n{AUDIO_STATUS_MESSAGES['mic_mudo']}", timeout=10000)
-        elif provider_name == "failed":
-            notify("Transcrição falhou ⚠️", f"{title}\nO áudio está salvo no Bronze, mas não há notas.", timeout=10000)
-        elif audio_status == "desconhecido":
-            notify("Notas prontas, áudio não medido 🌰", f"Reunião: {title}\nNão deu para medir os níveis do áudio.", timeout=8000)
-        else:
-            notify("Notas Prontas! 🌰", f"Reunião: {title}\nSalvo em {silver_path.name}")
-
-        problemas = []
-        if provider_name == "failed":
-            problemas.append(f"a transcrição falhou ({transcription_error})")
+        if not errors:
+            for job_file, job in jobs:
+                job["stage"] = "done"
+                write_json(job_file, job)
         if audio_status in ("sem_audio", "mic_mudo"):
-            problemas.append(AUDIO_STATUS_MESSAGES.get(audio_status, audio_status))
-        if isinstance(zinom_status, dict) and zinom_status.get("status") == "error":
-            problemas.extend(zinom_status.get("errors", []))
-        result_summary["problemas"] = problemas
-
-        # O áudio está no Bronze de qualquer jeito, mas "sucesso" com transcrição
-        # falha é o tipo de verde mentiroso que este projeto não pode ter.
-        return {"status": "partial" if problemas else "success", "result": result_summary}
+            errors.append(AUDIO_STATUS_MESSAGES[audio_status])
+        if any(r.get("transcription_provider") == "mock" for r in records):
+            errors.append("Transcrição simulada preservada separadamente, não enviada à memória")
+        if zinom_status.get("facts_status") == "pending_lineage":
+            errors.append(zinom_status["reason"])
+        if zinom_status.get("status") == "error":
+            errors.extend(zinom_status.get("errors", []))
+        summary = {"slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
+                   "silver_file": str(silver_path), "gold_file": str(gold_path),
+                   "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
+                   "transcription_provider": provider, "transcription_error": last_job.get("error"),
+                   "zinom": zinom_status, "problemas": errors}
+        return {"status": "partial" if errors else "success", "result": summary}
 
     def toggle_recording(self) -> Dict[str, Any]:
         state = self.state_mgr.read()

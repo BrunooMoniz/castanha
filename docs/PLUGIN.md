@@ -69,7 +69,7 @@ escreve ali é o clique.
 **Sincronizar de novo com o Zinom.** A ingestão roda uma vez, no fim da
 gravação. Se o hub estava fora do ar, a reunião ficava só em disco. Agora a
 linha da nota mostra o botão 󰑐 quando o envio falhou, e
-`castanha sync [slug]` (ou `--all`) faz o mesmo pela CLI. Reenviar é seguro:
-a nota é EDITADA pelo id gravado no metadata do Bronze, e `brain_fact`
-supersede o fato do mesmo par sujeito-predicado. Rodar duas vezes não cria
-duas notas.
+`castanha sync [slug]` (ou `--all`) faz o mesmo pela CLI e retoma jobs do Bronze.
+Quando há recibo, a nota é editada pelo id gravado no metadata. Fatos atômicos
+continuam pendentes até o servidor suportar origem recuperável; a versão F5
+não envia `brain_fact`. Não há limpeza automática de histórico.

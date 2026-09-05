@@ -121,7 +121,7 @@ class MeetingSummarizer:
 
         prompt = f"""Título: {title}
 Data: {date_str}
-Participantes: {attendees_str}
+Convidados (presença não confirmada): {attendees_str}
 
 Transcrição Bruta:
 {raw_transcript}
@@ -144,7 +144,7 @@ Transcrição Bruta:
             llm_output = f"""# {title}
 {aviso}
 ## 📌 Resumo Executivo
-Sem resumo: {motivo}. Gravada em {date_str}. Participantes: {attendees_str}.
+Sem resumo: {motivo}. Gravada em {date_str}. Convidados (presença não confirmada): {attendees_str}.
 
 ## 💬 Principais Discussões
 _Pendente: depende do resumo automático._
@@ -199,21 +199,5 @@ Transcrição:
             except Exception:
                 pass
 
-        # Fallback estruturado
-        attendees = metadata.get("calendar_event", {}).get("attendees", [])
-        facts = []
-        for att in attendees:
-            name = att.get("name")
-            if name:
-                facts.append({
-                    "subject": name,
-                    "predicate": "participou_da_reuniao",
-                    "object": metadata.get("title", "Reunião"),
-                })
-
-        return {
-            "facts": facts,
-            "decisions": [],
-            "action_items": [],
-            "people_notes": [{"name": a.get("name", ""), "note": "Presente na reunião"} for a in attendees],
-        }
+        # Convite não prova presença. Sem extração, não há fatos duráveis.
+        return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}

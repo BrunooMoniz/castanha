@@ -6,16 +6,15 @@ disco e a memória durável nunca recebia nada. Este módulo é a segunda chance
 e ele é a resposta à pergunta "dá para forçar a sincronização?".
 
 Reenviar é seguro: a nota é EDITADA pelo id que ficou gravado no metadata do
-Bronze, e `brain_fact` supersede o fato do mesmo par sujeito-predicado em vez
-de duplicar.
+Bronze. Fatos atômicos ficam pendentes até haver suporte a linhagem no servidor.
 """
 
-import datetime
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from castanha.storage import MeetingStorage
+from castanha.durability import meeting_lock, write_json
 from castanha.zinom_adapter import ZinomAdapter
 
 
@@ -29,10 +28,39 @@ def _read_json(path: Path) -> Dict[str, Any]:
 def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
     """Precisa de sync quando nunca foi, ou quando a última tentativa falhou."""
     z = metadata.get("zinom") or {}
-    return z.get("status") not in ("ok", "skipped")
+    if z.get("status") == "tombstoned":
+        return False
+    if metadata.get("processing_status") == "pending":
+        return True
+    if z.get("status") == "skipped":
+        # Legado: skipped sem motivo representava descarte deliberado.
+        reason = (z.get("reason") or "").lower()
+        return "token" in reason or "credencia" in reason or "desligada" in reason
+    return z.get("status") != "ok"
 
 
 def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[str, Any]:
+    storage = storage or MeetingStorage()
+    bronze = storage.bronze_dir / slug
+    if not bronze.exists():
+        return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
+    jobs = [_read_json(p) for p in (bronze / ".jobs").glob("*.json")]
+    if any(job.get("stage") != "done" for job in jobs):
+        from castanha.engine import CastanhaEngine
+        engine = CastanhaEngine()
+        engine.storage = storage
+        result = engine.process_pending(slug)["result"]
+        state = engine.state_mgr.read()
+        if state.get("status") == "processing" and state.get("capture_slug") == slug:
+            engine.state_mgr.write({"status": "idle", "pid": None, "audio_path": None,
+                                    "capture_slug": None, "capture_job_id": None,
+                                    "current_meeting": None, "last_result": result})
+        return {"slug": slug, **result["zinom"]}
+    with meeting_lock(bronze):
+        return _sync_meeting_locked(slug, storage)
+
+
+def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[str, Any]:
     storage = storage or MeetingStorage()
     bronze = storage.bronze_dir / slug
     metadata_file = bronze / "metadata.json"
@@ -67,28 +95,30 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     gold = _read_json(gold_file)
 
     anterior = (metadata.get("zinom") or {}).get("remember_id")
-    resultado = ZinomAdapter().ingest_meeting(metadata, silver, gold, previous_remember_id=anterior)
-
-    remember = resultado.get("remember") or {}
-    metadata["zinom"] = {
-        "status": resultado.get("status", "error"),
-        "remember_id": remember.get("id") or anterior,
-        "facts_ingested": resultado.get("facts_ingested", 0),
-        "errors": resultado.get("errors", []),
-        "reason": resultado.get("reason"),
-        "synced_at": datetime.datetime.now().isoformat(timespec="seconds"),
-    }
-    metadata_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return {"slug": slug, **metadata["zinom"]}
+    write_json(metadata_file, metadata)
+    resultado = ZinomAdapter().ingest_meeting(
+        metadata, silver, gold, previous_remember_id=anterior,
+        on_remember=lambda receipt: storage.record_zinom_result(slug, receipt),
+    )
+    storage.record_zinom_result(slug, resultado)
+    return {"slug": slug, **storage._read_bronze_metadata(slug)["zinom"]}
 
 
-def sync_pending(limit: int = 20, storage: Optional[MeetingStorage] = None) -> List[Dict[str, Any]]:
-    """Reenvia tudo que ainda não entrou, da mais recente para a mais antiga."""
+def sync_pending(limit: Optional[int] = None, storage: Optional[MeetingStorage] = None) -> List[Dict[str, Any]]:
+    """Varre o Bronze inteiro, incluindo jobs sem Silver. Limite conta pendências."""
     storage = storage or MeetingStorage()
-    saida = []
-    for nota in storage.list_recent_meetings(limit=limit):
-        metadata = _read_json(storage.bronze_dir / nota["slug"] / "metadata.json")
-        if meeting_needs_sync(metadata):
-            saida.append(sync_meeting(nota["slug"], storage))
-    return saida
+    candidates = []
+    for bronze in storage.bronze_dir.iterdir():
+        if not bronze.is_dir():
+            continue
+        path = bronze / "metadata.json"
+        if not path.exists() and not any((bronze / ".jobs").glob("*.json")):
+            continue
+        metadata = _read_json(path)
+        unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
+        if meeting_needs_sync(metadata) or unfinished:
+            candidates.append(((metadata.get("zinom") or {}).get("synced_at") or "", path.parent.name))
+    candidates.sort()
+    if limit is not None:
+        candidates = candidates[:max(0, limit)]
+    return [sync_meeting(slug, storage) for _, slug in candidates]

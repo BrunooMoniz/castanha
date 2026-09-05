@@ -224,15 +224,20 @@ class TestIngestMeeting(unittest.TestCase):
         self.assertIsNone(res["remember"])
         self.assertTrue(any("Cota estourada" in e for e in res["errors"]))
 
-    def test_fatos_viram_brain_fact(self):
+    def test_fatos_aguardam_linhagem_sem_publicacao_solto(self):
         gold = {"facts": [
             {"subject": "Bruno", "predicate": "testou", "object": "Castanha"},
             {"subject": "", "predicate": "x", "object": "y"},
         ]}
         res, t = self._run({"title": "R", "recorded_at": "2026-09-04"}, gold)
         nomes = [r["params"]["name"] for r in t.requests if r.get("method") == "tools/call"]
-        self.assertEqual(nomes, ["remember", "brain_fact"])
-        self.assertEqual(res["facts_ingested"], 1)
+        # Decisão F5: o schema atual de brain_fact não vincula a fonte.
+        self.assertEqual(nomes, ["remember"])
+        self.assertEqual(res["facts_ingested"], 0)
+        self.assertEqual(res["status"], "pending")
+        self.assertEqual(res["facts_status"], "pending_lineage")
+        self.assertEqual(res["facts_pending"], [gold["facts"][0]])
+        self.assertEqual(res["source"]["remember_id"], "conversation:remember")
 
     def test_gravacao_muda_nao_entra_no_cerebro(self):
         res, t = self._run({"title": "R", "recorded_at": "2026-09-04", "audio_status": "sem_audio"})
@@ -299,11 +304,13 @@ class TestFiltroDeFatos(unittest.TestCase):
         ]}
         with patch("castanha.zinom_adapter.ZinomMcpClient", side_effect=lambda *a, **k: make_client(t)):
             res = adapter.ingest_meeting({"title": "R", "recorded_at": "2026-09-04"}, "# Notas", gold)
-        self.assertEqual(res["facts_ingested"], 1)
+        self.assertEqual(res["facts_ingested"], 0)
+        self.assertEqual(res["facts_status"], "pending_lineage")
         self.assertEqual(len(res["facts_descartados"]), 1)
         enviados = [r["params"]["arguments"] for r in t.requests
                     if r.get("method") == "tools/call" and r["params"]["name"] == "brain_fact"]
-        self.assertEqual(enviados, [{"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"}])
+        self.assertEqual(enviados, [])
+        self.assertEqual(res["facts_pending"], [{"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"}])
 
 
 if __name__ == "__main__":

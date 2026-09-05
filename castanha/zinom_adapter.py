@@ -21,6 +21,7 @@ O que a revisão cruzada de 04/09 encontrou depois, e está consertado aqui:
 """
 
 import json
+import hashlib
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -284,18 +285,31 @@ class ZinomAdapter:
         silver_markdown: str,
         gold_data: Dict[str, Any],
         previous_remember_id: Optional[str] = None,
+        on_remember=None,
     ) -> Dict[str, Any]:
         """Envia fatos e notas da reunião para a memória durável do Zinom."""
-        if not self.enabled or not self.token:
-            return {"status": "skipped", "reason": "Integração com o Zinom desligada ou sem token"}
-
         # Nada de alimentar o segundo cérebro com gravação muda ou transcrição
         # falha: o que entra no Zinom é durável, e vale mais calar do que gravar lixo.
+        previous = metadata.get("zinom") or {}
+        if previous.get("status") == "tombstoned":
+            return {"status": "tombstoned", "reason": "Nota removida no Zinom; exclusão preservada"}
+        previous_remember_id = previous_remember_id or previous.get("remember_id")
+        memory_ids = metadata.get("memory_recording_ids")
+        providers = [metadata.get("transcription_provider")] + [
+            r.get("transcription_provider") for r in metadata.get("recordings", [])
+            if memory_ids is None or r.get("id") in memory_ids
+        ]
+        if "mock" in providers:
+            return {"status": "skipped", "reason": "Transcrição simulada, proibida na memória real"}
+        if metadata.get("processing_status") == "pending":
+            return {"status": "pending", "reason": "Processamento da gravação pendente"}
         audio_status = metadata.get("audio_status", "ok")
         if audio_status == "sem_audio":
             return {"status": "skipped", "reason": "Gravação sem áudio, nada para lembrar"}
         if metadata.get("transcription_provider") == "failed":
             return {"status": "skipped", "reason": "Transcrição falhou, nada para lembrar"}
+        if not self.enabled or not self.token:
+            return {"status": "pending", "reason": "Integração com o Zinom desligada ou sem token"}
 
         title = metadata.get("title", "Reunião")
         date_str = metadata.get("recorded_at", "")
@@ -304,15 +318,29 @@ class ZinomAdapter:
 
         note_content = (
             f"# Reunião: {title} ({date_str})\n\n"
-            f"Participantes: {attendees_str or 'Não identificados'}\n\n"
+            f"Convidados do calendário (presença não confirmada): {attendees_str or 'Não identificados'}\n\n"
             f"{silver_markdown}"
         )
+
+        source = {
+            "slug": metadata.get("slug"),
+            "recordings": [{"id": r.get("id") or r.get("filename"), "sha256": r.get("sha256"),
+                            "provider": r.get("transcription_provider")}
+                           for r in metadata.get("recordings", [])
+                           if memory_ids is None or r.get("id") in memory_ids],
+        }
+        note_content += "\n\nOrigem Castanha: " + json.dumps(source, ensure_ascii=False)
+        source["note_sha256"] = hashlib.sha256(note_content.encode("utf-8")).hexdigest()
+        pending_facts = [fato_normalizado(f) for f in gold_data.get("facts", []) if is_fato_util(f)]
 
         results: Dict[str, Any] = {
             "status": "ok",
             "remember": None,
             "facts_ingested": 0,
-            "facts_descartados": [],
+            "facts_descartados": [f for f in gold_data.get("facts", []) if not is_fato_util(f)],
+            "facts_status": "pending_lineage" if pending_facts else "none",
+            "facts_pending": pending_facts,
+            "source": source,
             "errors": [],
         }
 
@@ -327,7 +355,7 @@ class ZinomAdapter:
         # 1. Nota da reunião. Reenvio EDITA a nota que já existe: rodar o
         # sync duas vezes não pode encher o cérebro de cópias da mesma reunião.
         nota = {
-            "text": note_content[:4000],
+            "text": note_content,
             "title": f"Reunião: {title} ({date_str[:10]})",
             "tags": ["castanha", "reuniao"],
         }
@@ -338,40 +366,31 @@ class ZinomAdapter:
                 res = client.call_tool("remember", nota)
             payload = tool_json(res)
             # O hub devolve as duas chaves; `source_id` é a documentada.
+            if not (payload.get("source_id") or payload.get("id") or previous_remember_id):
+                raise ZinomError("Resposta sem identificador durável da nota")
             results["remember"] = {
                 "ok": True,
                 "id": payload.get("source_id") or payload.get("id") or previous_remember_id,
                 "updated": bool(previous_remember_id),
             }
+            results["source"]["remember_id"] = results["remember"]["id"]
+            if on_remember:
+                on_remember({**results, "status": "pending", "note_status": "ok"})
         except ZinomError as e:
-            # Nota apagada no portal: o id velho não vale mais, grava de novo.
             if previous_remember_id and "not found" in str(e).lower():
-                try:
-                    res = client.call_tool("remember", nota)
-                    payload = tool_json(res)
-                    results["remember"] = {
-                        "ok": True,
-                        "id": payload.get("source_id") or payload.get("id"),
-                        "updated": False,
-                    }
-                except ZinomError as e2:
-                    results["status"] = "error"
-                    results["errors"].append(f"Erro no remember: {e2}")
+                results["status"] = "tombstoned"
+                results["reason"] = "Nota removida no Zinom; exclusão preservada"
             else:
                 results["status"] = "error"
                 results["errors"].append(f"Erro no remember: {e}")
+            return results
 
-        # 2. Fatos atômicos via 'brain_fact'
-        for fact in gold_data.get("facts", []):
-            if not is_fato_util(fact):
-                results["facts_descartados"].append(fact)
-                continue
-            trio = fato_normalizado(fact)
-            try:
-                client.call_tool("brain_fact", trio)
-                results["facts_ingested"] += 1
-            except ZinomError as e:
-                results["status"] = "error"
-                results["errors"].append(f"Erro no brain_fact para {trio['subject']}: {e}")
-
+        # O schema atual de brain_fact não aceita linhagem/idempotency key.
+        # Fatos ficam no Bronze até existir endpoint que preserve a origem no
+        # servidor. Nunca criar um fato solto que a exclusão da fonte não alcança.
+        results["source"]["remember_id"] = results["remember"]["id"]
+        results["note_status"] = "ok"
+        if pending_facts:
+            results["status"] = "pending"
+            results["reason"] = "Nota entregue; fatos aguardam suporte de origem no servidor"
         return results

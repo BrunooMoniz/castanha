@@ -53,8 +53,7 @@ def get_audio_devices() -> AudioDeviceInfo:
 
 class AudioRecorder:
     def __init__(self):
-        check_dependencies()
-        self.devices = get_audio_devices()
+        self.devices = None
         self.process: Optional[subprocess.Popen] = None
         self.output_path: Optional[Path] = None
         self.start_time: Optional[float] = None
@@ -69,6 +68,8 @@ class AudioRecorder:
         if self.is_recording():
             raise RuntimeError("Uma gravação já está em andamento.")
 
+        if self.devices is None:
+            self.devices = get_audio_devices()
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode

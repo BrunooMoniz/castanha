@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from castanha.config import load_config
+from castanha.durability import atomic_write, write_json
 
 AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac", ".aac"}
 
@@ -101,7 +102,7 @@ class MeetingStorage:
         # Copia ou move áudio para a pasta bronze
         target_audio = target_dir / f"audio{audio_source_path.suffix}"
         if audio_source_path.exists() and audio_source_path != target_audio:
-            shutil.copy2(audio_source_path, target_audio)
+            atomic_write(target_audio, audio_source_path)
 
         # Salva metadados
         metadata["bronze_audio_file"] = str(target_audio)
@@ -120,13 +121,11 @@ class MeetingStorage:
         metadata["recordings_count"] = len(metadata.get("recordings", []))
 
         metadata_file = target_dir / "metadata.json"
-        with open(metadata_file, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        write_json(metadata_file, metadata)
 
         # Salva transcrição bruta
         transcript_file = target_dir / "transcript_raw.txt"
-        with open(transcript_file, "w", encoding="utf-8") as f:
-            f.write(raw_transcript)
+        atomic_write(transcript_file, raw_transcript)
 
         return target_dir
 
@@ -156,7 +155,7 @@ class MeetingStorage:
                 dest_name = f"audio_{counter}{ext}"
 
         dest_file = target_dir / dest_name
-        shutil.copy2(audio_source_path, dest_file)
+        atomic_write(dest_file, audio_source_path)
         size = dest_file.stat().st_size if dest_file.exists() else 0
 
         dur = (metadata_update or {}).get("duration_seconds") or 0
@@ -177,8 +176,7 @@ class MeetingStorage:
         meta["bronze_audio_file"] = str(dest_file)
 
         meta_file = target_dir / "metadata.json"
-        with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+        write_json(meta_file, meta)
 
         if raw_transcript and raw_transcript.strip():
             transcript_file = target_dir / "transcript_raw.txt"
@@ -285,8 +283,7 @@ class MeetingStorage:
         markdown_content: str,
     ) -> Path:
         target_file = self.silver_dir / f"{slug}.md"
-        with open(target_file, "w", encoding="utf-8") as f:
-            f.write(markdown_content)
+        atomic_write(target_file, markdown_content)
         return target_file
 
     def save_gold(
@@ -295,8 +292,7 @@ class MeetingStorage:
         gold_data: Dict[str, Any],
     ) -> Path:
         target_file = self.gold_dir / f"{slug}.json"
-        with open(target_file, "w", encoding="utf-8") as f:
-            json.dump(gold_data, f, indent=2, ensure_ascii=False)
+        write_json(target_file, gold_data)
         return target_file
 
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -396,18 +392,20 @@ class MeetingStorage:
             return
         metadata = self._read_bronze_metadata(slug)
         remember = (resultado or {}).get("remember") or {}
+        previous = metadata.get("zinom") or {}
         metadata["zinom"] = {
             "status": (resultado or {}).get("status", "error"),
-            "remember_id": remember.get("id"),
+            "remember_id": remember.get("id") or (metadata.get("zinom") or {}).get("remember_id"),
             "facts_ingested": (resultado or {}).get("facts_ingested", 0),
+            "facts_status": resultado.get("facts_status", previous.get("facts_status", "none")),
+            "facts_pending": resultado.get("facts_pending", previous.get("facts_pending", [])),
+            "source": resultado.get("source", previous.get("source")),
+            "note_status": resultado.get("note_status", previous.get("note_status")),
             "errors": (resultado or {}).get("errors", []),
             "reason": (resultado or {}).get("reason"),
             "synced_at": datetime.now().isoformat(timespec="seconds"),
         }
-        try:
-            arquivo.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            print(f"[Castanha] Não deu para anotar o resultado do Zinom em {slug}: {e}")
+        write_json(arquivo, metadata)
 
     def _read_bronze_metadata(self, slug: str) -> Dict[str, Any]:
         arquivo = self.bronze_dir / slug / "metadata.json"

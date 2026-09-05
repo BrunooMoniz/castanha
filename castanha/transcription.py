@@ -1,6 +1,8 @@
 """Provedores de transcrição para o Castanha (Groq, Deepgram, Local Whisper, VPS Webhook)."""
 
 import json
+import hashlib
+import shlex
 import os
 import subprocess
 import urllib.request
@@ -87,7 +89,7 @@ class GroqTranscriber(BaseTranscriber):
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             print(f"[Castanha] Falha na Groq ({e}). Fazendo fallback automático para o modelo pesado na VPS...")
-            vps_transcriber = VpsSshTranscriber()
+            vps_transcriber = VpsSshTranscriber(load_config().get("transcription", {}).get("vps_ssh_host", "zinom-vps-2"))
             return vps_transcriber.transcribe(audio_path, mode=mode)
 
         full_text = data.get("text", "")
@@ -182,44 +184,69 @@ class DeepgramTranscriber(BaseTranscriber):
             raw_response=data,
         )
 
+class TranscriptionPending(RuntimeError):
+    """Job aceito ou transporte indisponível; retomar usando o mesmo original."""
+
+
 class VpsSshTranscriber(BaseTranscriber):
     def __init__(self, host: str = "zinom-vps-2"):
         self.host = host
 
     def transcribe(self, audio_path: Path, mode: str = "dual") -> TranscriptionResult:
-        import time, uuid
-        remote_tmp = f"/tmp/castanha_{uuid.uuid4().hex[:8]}.ogg"
+        if not self.host:
+            raise TranscriptionPending("VPS de transcrição não configurada")
+        digest = hashlib.sha256()
+        with audio_path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update((mode + ":whisper-large-v3").encode())
+        # Caminho estável: repetir SCP/SSH consulta ou retoma o MESMO job.
+        remote = f".local/state/castanha/jobs/{digest.hexdigest()}"
+        opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"]
 
-        # 1. Copia áudio para a VPS via SCP
-        scp_cmd = ["scp", "-o", "ConnectTimeout=10", str(audio_path), f"{self.host}:{remote_tmp}"]
-        res_scp = subprocess.run(scp_cmd, capture_output=True, text=True)
-        if res_scp.returncode != 0:
-            raise RuntimeError(f"Falha ao enviar áudio para a VPS: {res_scp.stderr}")
+        def ssh(command):
+            try:
+                result = subprocess.run(["ssh", *opts, self.host, command],
+                                        capture_output=True, text=True, timeout=15)
+            except subprocess.TimeoutExpired as exc:
+                raise TranscriptionPending("SSH indisponível; job preservado para retomar") from exc
+            if result.returncode != 0:
+                raise TranscriptionPending("SSH falhou; job preservado para retomar")
+            return result.stdout.strip()
 
-        # 2. Executa a transcrição com Whisper large-v3 na VPS
-        ssh_cmd = [
-            "ssh", "-o", "ConnectTimeout=15", self.host,
-            f"/root/castanha-transcribe.py {remote_tmp} && rm -f {remote_tmp}"
-        ]
-        res_ssh = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=600)
-        if res_ssh.returncode != 0:
-            raise RuntimeError(f"Falha na transcrição remota na VPS: {res_ssh.stderr}")
-
-        data = json.loads(res_ssh.stdout.strip())
-        utterances: List[Utterance] = []
-        for s in data.get("segments", []):
-            utterances.append(Utterance(
-                speaker="Falante",
-                text=s.get("text", ""),
-                start=s.get("start", 0.0),
-                end=s.get("end", 0.0),
-            ))
-
+        output = ssh(f"mkdir -p {remote} && if test -f {remote}/result.json; then "
+                     f"cat {remote}/result.json; elif test -f {remote}/audio.ogg; then "
+                     "echo READY; else echo UPLOAD; fi")
+        if output == "UPLOAD":
+            upload = f"{remote}/upload-{uuid.uuid4().hex}.ogg"
+            try:
+                result = subprocess.run(["scp", *opts, str(audio_path), f"{self.host}:{upload}"],
+                                        capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as exc:
+                raise TranscriptionPending("SCP indisponível; original preservado para retomar") from exc
+            if result.returncode != 0:
+                raise TranscriptionPending("SCP falhou; original preservado para retomar")
+            ssh(f"mv {upload} {remote}/audio.ogg")
+            output = "READY"
+        if output == "READY":
+            script = (f"test -f {remote}/result.json && exit 0; "
+                      f"/root/castanha-transcribe.py {remote}/audio.ogg > {remote}/result.part "
+                      f"&& mv {remote}/result.part {remote}/result.json")
+            # flock evita duas transcrições após queda do cliente. nohup libera
+            # a conexão enquanto o Whisper trabalha, sem esperar 600 segundos.
+            ssh(f"nohup flock -n {remote}/job.lock sh -c {shlex.quote(script)} "
+                f">{remote}/worker.log 2>&1 </dev/null &")
+            raise TranscriptionPending("Transcrição remota em andamento; execute castanha sync --all para retomar")
+        data = json.loads(output)
+        if not isinstance(data.get("text"), str) or not data["text"].strip():
+            raise TranscriptionPending("Resultado remoto vazio; original preservado")
         return TranscriptionResult(
-            text=data.get("text", ""),
-            utterances=utterances,
-            provider="vps_whisper_large_v3",
-            raw_response=data,
+            text=data["text"],
+            utterances=[Utterance(speaker="Falante", text=s.get("text", ""),
+                                  start=s.get("start", 0.0), end=s.get("end", 0.0))
+                        for s in data.get("segments", [])],
+            provider="vps_whisper_large_v3", raw_response=data,
         )
 
 class VpsTranscriber(BaseTranscriber):
@@ -278,6 +305,8 @@ class MockTranscriber(BaseTranscriber):
 def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
     cfg = load_config()
     t_cfg = cfg.get("transcription", {})
+    if t_cfg.get("provider") == "mock":
+        return MockTranscriber()
     groq_key = t_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
 
     # 1. Verifica se Groq está configurada e se o budget de R$ 5,00 não estourou
@@ -286,14 +315,7 @@ def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
     if groq_key and budget_mgr.can_use_groq(estimated_duration_sec):
         return GroqTranscriber(groq_key, t_cfg.get("groq_model", "whisper-large-v3-turbo"))
 
-    # 2. Fallback / Primário: Modelo Pesado Local na VPS (Whisper large-v3 via SSH)
     vps_host = t_cfg.get("vps_ssh_host", "zinom-vps-2")
-    try:
-        test = subprocess.run(["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes", vps_host, "true"], capture_output=True)
-        if test.returncode == 0:
-            return VpsSshTranscriber(vps_host)
-    except Exception:
-        pass
-
-    # 3. Fallback mock elegante
-    return MockTranscriber()
+    if vps_host:
+        return VpsSshTranscriber(vps_host)
+    raise TranscriptionPending("Nenhum transcritor configurado; original preservado")

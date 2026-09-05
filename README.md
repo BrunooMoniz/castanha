@@ -23,7 +23,7 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
 3. **Esteira Bronze -> Silver -> Gold**:
    - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
    - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
-   - **Gold**: Fatos atômicos estruturados prontos para ingestão no Zinom (`remember` e `brain_fact`).
+   - **Gold**: Fatos atômicos preservados no Bronze/Gold, pendentes de suporte a origem no servidor. A entrega atual publica somente a nota narrativa via `remember`.
 4. **Plugin Nativo do Omarchy (Quickshell)**:
    - Widget discreto na barra com status ao vivo (`● REC 00:14:20`).
    - Painel popout com controle de gravação, próxima reunião e acesso rápido às notas.
@@ -93,6 +93,10 @@ castanha resume
 # Finalizar e processar notas
 castanha stop
 
+# Retomar jobs e entregas pendentes, incluindo gravações sem notas
+castanha sync --all
+castanha sync --all --limit 20     # Limita pendências, não apenas reuniões recentes
+
 # Consultar status
 castanha status
 castanha status --json
@@ -140,3 +144,15 @@ O arquivo de configuração vive em `~/.config/castanha/config.json`:
   }
 }
 ```
+
+A captura preserva o áudio no Bronze antes da transcrição. Jobs remotos continuam
+na VPS sem prender a conexão SSH; `castanha sync --all` consulta o resultado e
+retoma checkpoints. SCP tem limite de 30 segundos e cada SSH, 15 segundos.
+A VPS precisa de `flock`, `nohup` e do transcritor `/root/castanha-transcribe.py`.
+
+Uma nota pode estar entregue enquanto seus fatos continuam em `pending_lineage`.
+O Castanha não envia `brain_fact` até o servidor oferecer linhagem recuperável.
+Transcrições mock ficam nos jobs locais e são excluídas das notas reais.
+Notas longas são enviadas inteiras: eventual rejeição do servidor permanece erro
+pendente, sem truncamento silencioso. Consulte `docs/F5-ENTREGA.md` para instalação
+e reversão desta versão sem alterar a worktree XPS ativa.

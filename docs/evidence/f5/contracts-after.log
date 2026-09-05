@@ -1,0 +1,11 @@
+test_deleted_memory_is_not_recreated_by_sync (test_brain_integrity_contract.TestBrainIntegrityContract.test_deleted_memory_is_not_recreated_by_sync) ... ok
+test_llm_failure_does_not_turn_invite_into_attendance (test_brain_integrity_contract.TestBrainIntegrityContract.test_llm_failure_does_not_turn_invite_into_attendance) ... ok
+test_long_note_cannot_report_success_after_silent_truncation (test_brain_integrity_contract.TestBrainIntegrityContract.test_long_note_cannot_report_success_after_silent_truncation) ... ok
+test_missing_credentials_leave_delivery_pending (test_brain_integrity_contract.TestBrainIntegrityContract.test_missing_credentials_leave_delivery_pending) ... ok
+test_simulated_transcript_never_reaches_memory (test_brain_integrity_contract.TestBrainIntegrityContract.test_simulated_transcript_never_reaches_memory) ... ok
+test_original_is_durable_before_processing_can_crash (test_capture_durability_contract.TestCaptureDurabilityContract.test_original_is_durable_before_processing_can_crash) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.175s
+
+OK
