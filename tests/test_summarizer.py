@@ -211,5 +211,83 @@ class TestReuniaoLonga(unittest.TestCase):
         self.assertIn("Sem resumo", silver)
 
 
+class TestCalendarGrounding(unittest.TestCase):
+    def setUp(self):
+        with patch('castanha.summarizer.load_config', return_value={'llm': {'api_key': ''}}):
+            self.s = MeetingSummarizer()
+        self.meta = {'title': 'Reunião sintética', 'calendar_event': {
+            'attendees': [{'name': 'Luigi Rossi', 'email': 'luigi@example.invalid',
+                           'responseStatus': 'accepted'}]}}
+        self.transcript = 'Áudio do sistema: orçamento aprovado para outubro.'
+
+    def test_silver_refuses_hallucinated_calendar_person_or_collective_attendance(self):
+        for claim in ('Luigi participou da reunião.', 'LUIGI ROSSI estava presente.',
+                      'luigi@example.invalid confirmou o orçamento.', 'Todos os convidados participaram.',
+                      'Rossi explicou a proposta.'):
+            with self.subTest(claim=claim), patch.object(self.s, '_call_llm', return_value=claim):
+                silver = self.s.generate_silver(self.meta, self.transcript)
+            self.assertIn('Resumo retido', silver)
+            self.assertNotIn(claim, silver)
+            self.assertIn(self.transcript, silver)
+            self.assertIn('evidence: "calendar_invitation"', silver)
+            self.assertIn('rsvp: "accepted"', silver)
+            self.assertIn('presence: "unverified"', silver)
+            self.assertIn('speech: "unverified"', silver)
+
+    def test_gold_filters_calendar_claims_in_every_collection(self):
+        fake = {'facts': [{'subject': 'Luigi', 'predicate': 'participou', 'object': 'reunião'},
+                          {'subject': 'Projeto', 'predicate': 'custo', 'object': '10'}],
+                'decisions': ['Luigi aprovou o orçamento', 'Orçamento aprovado'],
+                'action_items': [{'task': 'Enviar documento', 'assignee': 'Rossi'},
+                                 {'task': 'Planejar', 'assignee': None}],
+                'people_notes': [{'name': 'Luigi Rossi', 'note': 'participou'},
+                                 {'name': 'luigi@example.invalid', 'note': 'expert'}]}
+        with patch.object(self.s, '_call_llm', return_value=json.dumps(fake)):
+            gold = self.s.generate_gold(self.meta, 'Notas', self.transcript)
+        self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': ['Orçamento aprovado'],
+                                'action_items': [fake['action_items'][1]], 'people_notes': []})
+
+    def test_mention_invitation_or_rsvp_never_proves_voice(self):
+        for transcript in ('Convidamos Luigi.', 'Luigi aceitou o convite.',
+                           'Vamos falar com Luigi depois.', 'Eu acho que Luigi esteve lá.'):
+            with self.subTest(transcript=transcript), patch.object(self.s, '_call_llm', return_value=json.dumps({
+                'facts': [{'subject': 'Luigi', 'predicate': 'participou', 'object': 'reunião'}],
+                'people_notes': [{'name': 'Luigi', 'note': 'presente'}]})):
+                gold = self.s.generate_gold(self.meta, 'Luigi participou', transcript)
+            self.assertEqual(gold['facts'], [])
+            self.assertEqual(gold['people_notes'], [])
+
+    def test_chunked_summary_final_output_passes_same_barrier(self):
+        calls = [LlmTooLarge(100, 200, '413')]
+        with patch.object(self.s, '_call_llm', side_effect=calls), \
+             patch.object(self.s, '_silver_em_partes', return_value='Luigi participou da reunião.'):
+            silver = self.s.generate_silver(self.meta, self.transcript)
+        self.assertIn('Resumo retido', silver)
+        self.assertNotIn('Luigi participou', silver)
+        self.assertIn(self.transcript, silver)
+
+    def test_generated_person_notes_without_calendar_voice_evidence_are_refused(self):
+        # Nome de agenda nunca recebe identidade pelo canal, mesmo citado no áudio.
+        with patch.object(self.s, '_call_llm', return_value=json.dumps({
+                'people_notes': [{'name': 'Luigi', 'note': 'sabe sobre orçamento'}]})):
+            gold = self.s.generate_gold(self.meta, 'nota', 'Áudio do sistema: Luigi sabe sobre orçamento.')
+        self.assertEqual(gold['people_notes'], [])
+
+
+    def test_native_calendar_response_and_organizer_are_separate_from_attendance(self):
+        self.meta['calendar_event']['attendees'][0] = {
+            'name': 'Luigi Rossi', 'email': 'luigi@example.invalid', 'response': 'accepted'}
+        self.meta['calendar_event']['organizer'] = 'owner@example.invalid'
+        with patch.object(self.s, '_call_llm', return_value='owner@example.invalid aprovou o orçamento.'):
+            silver = self.s.generate_silver(self.meta, self.transcript)
+        self.assertIn('Resumo retido', silver)
+        self.assertIn('rsvp: "accepted"', silver)
+        self.assertIn('presence: "unverified"', silver)
+        with patch.object(self.s, '_call_llm', return_value=json.dumps({
+                'facts': [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'}]})):
+            gold = self.s.generate_gold(self.meta, 'nota', self.transcript)
+        self.assertEqual(gold['facts'], [])
+
+
 if __name__ == "__main__":
     unittest.main()

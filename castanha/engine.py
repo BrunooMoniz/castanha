@@ -6,7 +6,7 @@ import uuid
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -302,7 +302,7 @@ class CastanhaEngine:
         """Flag DESLIGADA por padrão: ligar exige contrato F4, QA no XPS e rollback."""
         return self.config.get("transcription", {}).get("por_canal") is True
 
-    def _transcrever_por_canal(self, source: Path, bronze: Path):
+    def _transcrever_por_canal(self, source: Path, bronze: Path, capture_mode: str = "dual"):
         """Um envio por canal, cada um com orçamento, teto e checkpoint próprios.
 
         O canal já transcrito fica no checkpoint dentro do Bronze: falhar no
@@ -312,13 +312,31 @@ class CastanhaEngine:
         from castanha.budget import BudgetManager
         from castanha.transcription import TranscriptionPending, VpsSshTranscriber
 
-        cfg = self.config.get("transcription", {})
-        pipeline = f"canal-v1:{cfg.get('groq_model', 'whisper-large-v3-turbo')}"
+        selected = {}
+
+        def configuration(entry):
+            # Resolver antes do replay: mudar o provedor efetivo também invalida
+            # o checkpoint. A seleção não envia áudio e não registra consumo.
+            transcriber = get_transcriber(estimated_duration_sec=entry["duration_seconds"])
+            selected[str(entry["path"])] = transcriber
+            cfg = load_config().get("transcription", {})
+            model = getattr(transcriber, "model", None)
+            return {"effective_provider": type(transcriber).__name__,
+                    "result_provider": {"GroqTranscriber": "groq", "DeepgramTranscriber": "deepgram",
+                                        "VpsSshTranscriber": "vps_whisper_large_v3",
+                                        "MockTranscriber": "mock"}.get(type(transcriber).__name__),
+                    "requested_provider": cfg.get("provider", "groq"),
+                    "model": model if isinstance(model, str) else cfg.get("groq_model", "whisper-large-v3-turbo"),
+                    "language": cfg.get("language", "auto"),
+                    "groq_model": cfg.get("groq_model", "whisper-large-v3-turbo"),
+                    "deepgram_model": cfg.get("deepgram_model", "nova-2"),
+                    "transcribe_mode": "mic_only",
+                    "origin_policy": "capture-mode-v2"}
 
         def transcrever(path: Path, duration_seconds: float):
             # A duração é a DO CANAL: o orçamento é consultado por envio, e o
             # segundo canal já enxerga o que o primeiro consumiu.
-            transcriber = get_transcriber(estimated_duration_sec=duration_seconds)
+            transcriber = selected[str(path)]
             # O job remoto guarda o áudio como .ogg e retoma por esse nome. Mandar
             # FLAC por ali quebraria a retomada de jobs já aceitos, então até a
             # ponte F4 cobrir a VPS o canal fica pendente em vez de subir errado.
@@ -328,7 +346,8 @@ class CastanhaEngine:
             return transcriber.transcribe(path, mode="mic_only")
 
         return transcribe_dual(source, bronze / ".channels", transcrever,
-                               pipeline_id=pipeline, budget=BudgetManager())
+                               pipeline_id="canal-v2", budget=BudgetManager(),
+                               capture_mode=capture_mode, configuration_for_channel=configuration)
 
     def process_pending(self, slug: str) -> Dict[str, Any]:
         """Retoma checkpoints do Bronze sem recapturar nem duplicar transcrições."""
@@ -341,14 +360,22 @@ class CastanhaEngine:
         metadata = self.storage._read_bronze_metadata(slug)
         jobs_dir = bronze / ".jobs"
         jobs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in jobs_dir.glob("*.json")]
-        jobs.sort(key=lambda item: (item[1]["recorded_at"], item[1]["id"]))
+        def recorded_time(item):
+            value = item[1].get("recorded_at")
+            try:
+                if not isinstance(value, str) or "T" not in value:
+                    raise ValueError("timestamp ausente")
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed).timestamp(), item[1]["id"]
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise ValueError("recorded_at inválido; jobs preservados antes do processamento") from exc
+        jobs.sort(key=recorded_time)
         if not metadata and jobs:
             first = jobs[0][1]
             state = first["state"]
             metadata = {"slug": slug, "title": (state.get("current_meeting") or {}).get("title") or "Reunião",
                         "recorded_at": first["recorded_at"], "calendar_event": state.get("current_meeting") or {},
                         "mode": state.get("mode", "dual"), "recordings": []}
-        errors = []
         for job_file, job in jobs:
             if job["stage"] != "pending":
                 continue
@@ -365,12 +392,12 @@ class CastanhaEngine:
                 if audio_status == "sem_audio":
                     job.update(transcript="", provider="nenhum (áudio em silêncio)")
                 elif self._por_canal():
-                    transcription = self._transcrever_por_canal(source, bronze)
+                    transcription = self._transcrever_por_canal(source, bronze, capture_mode=mode)
                     if not transcription.text.strip():
                         raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
                     job.update(transcript=transcription.text, provider=transcription.provider,
                                utterances=[asdict(segment) for segment in transcription.utterances],
-                               channel_provenance=True,
+                               channel_provenance=True, capture_mode=mode,
                                channels=transcription.raw_response.get("channels") or [])
                 else:
                     transcriber = get_transcriber(estimated_duration_sec=duration or state.get("elapsed_seconds") or 60)
@@ -392,8 +419,12 @@ class CastanhaEngine:
                 job.update(stage="transcribed", error=None)
             except Exception as exc:
                 job.update(error=str(exc), provider="failed")
-                errors.append(f"a transcrição falhou ({exc})")
             write_json(job_file, job)
+
+        # Pendência/erro histórico também contam; o último job não pode apagá-los.
+        errors = [f"{job['id']}: a transcrição falhou ({job['error']})" if job.get("error")
+                  else f"{job['id']}: transcrição pendente"
+                  for _, job in jobs if job.get("error") or job.get("stage") not in ("transcribed", "done")]
 
         # Reconstrói sempre a mesma transcrição a partir de checkpoints imutáveis.
         base = jobs_dir / "base_transcript.txt"
@@ -405,7 +436,8 @@ class CastanhaEngine:
             record.setdefault("transcription_provider", legacy_provider)
             record.setdefault("id", record.get("filename"))
         for _, job in jobs:
-            if job.get("transcript") and job.get("provider") != "mock":
+            if (job.get("transcript") and job.get("provider") not in (None, "mock", "failed")
+                    and job.get("stage") in ("transcribed", "done")):
                 parts.append(job["transcript"])
             source = Path(job["audio_path"])
             record = {"id": source.name, "filename": source.name, "path": str(source),
@@ -415,7 +447,8 @@ class CastanhaEngine:
                       "audio_status": job.get("audio_status", "desconhecido"),
                       "transcribed": job.get("stage") in ("transcribed", "done"),
                       "transcription_error": job.get("error"),
-                      "transcription_provider": job.get("provider")}
+                      "transcription_provider": job.get("provider"),
+                      "capture_mode": job.get("capture_mode", job.get("state", {}).get("mode", "dual"))}
             if job.get("channel_provenance"):
                 # A origem fica junto da gravação no Bronze, para a ponte F4 ler
                 # o canal em vez de um nome de convidado que ninguém provou ter falado.
@@ -434,6 +467,7 @@ class CastanhaEngine:
                 {"job_id": job["id"], "recorded_at": job["recorded_at"],
                  "source_sha256": job.get("sha256"), "provider": job.get("provider"),
                  "time_reference": "recording_start",
+                 "capture_mode": job.get("capture_mode", job.get("state", {}).get("mode", "dual")),
                  "channel_provenance": job.get("channel_provenance") is True,
                  "channels": job.get("channels", []),
                  "utterance_count": len(job.get("utterances", [])),
@@ -443,22 +477,43 @@ class CastanhaEngine:
             ],
         })
         last_job = jobs[-1][1]
-        memory_records = [r for r in records if r.get("transcription_provider") not in ("mock", "failed")
-                          and r.get("audio_status") != "sem_audio"]
-        providers = {r.get("transcription_provider") for r in memory_records if r.get("transcription_provider")}
-        provider = (next(iter(providers)) if len(providers) == 1 else "mixed") if providers else last_job.get("provider", "failed")
+        # Evidência de fala real vence silêncio posterior. Falha e pendência
+        # ficam separadas da evidência, mesmo quando há texto parcial aproveitável.
+        successful_jobs = {job["id"] for _, job in jobs
+                           if job.get("stage") in ("transcribed", "done") and job.get("transcript", "").strip()}
+        memory_records = [r for r in records
+                          if r.get("transcription_provider") not in (None, "mock", "failed", "pending")
+                          and not str(r.get("transcription_provider", "")).startswith("nenhum")
+                          and (r.get("job_id") in successful_jobs
+                               or (not r.get("job_id") and bool(parts and base.exists())))]
+        providers = {r["transcription_provider"] for r in memory_records}
+        provider = ((next(iter(providers)) if len(providers) == 1 else "mixed") if providers
+                    else "failed" if errors else "mock" if any(r.get("transcription_provider") == "mock" for r in records)
+                    else "nenhum (áudio em silêncio)")
         statuses = {r.get("audio_status") for r in memory_records}
         audio_status = ("ok" if "ok" in statuses else "mic_mudo" if "mic_mudo" in statuses
-                        else last_job.get("audio_status", "desconhecido"))
+                        else "desconhecido" if memory_records or errors
+                        else "sem_audio" if all(r.get("audio_status") == "sem_audio" for r in records)
+                        else "desconhecido")
+        transcription_error = "; ".join(errors) or None
         metadata.update(recordings=records, recordings_count=len(records),
                         duration_seconds=sum(r.get("duration_seconds", 0) for r in records),
                         bronze_audio_file=last_job["audio_path"], transcription_provider=provider,
                         memory_recording_ids=[r["id"] for r in memory_records],
-                        transcription_error=last_job.get("error"), audio_status=audio_status,
+                        transcription_error=transcription_error, audio_status=audio_status,
                         audio_diagnostico=AUDIO_STATUS_MESSAGES.get(audio_status, ""),
                         audio_levels=last_job.get("audio_levels", []),
                         processing_status="pending" if errors else "complete")
         write_json(bronze / "metadata.json", metadata)
+        if errors and self._por_canal():
+            # Canal recusado não pode gerar Silver/Gold parcial nem entrega nova.
+            return {"status": "partial", "result": {
+                "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
+                "silver_file": str(self.storage.silver_dir / f"{slug}.md"),
+                "gold_file": str(self.storage.gold_dir / f"{slug}.json"),
+                "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
+                "transcription_provider": provider, "transcription_error": transcription_error,
+                "zinom": metadata.get("zinom") or {"status": "pending"}, "problemas": errors}}
         silver_content = self.summarizer.generate_silver(metadata, transcript)
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
@@ -483,7 +538,7 @@ class CastanhaEngine:
         summary = {"slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
                    "silver_file": str(silver_path), "gold_file": str(gold_path),
                    "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
-                   "transcription_provider": provider, "transcription_error": last_job.get("error"),
+                   "transcription_provider": provider, "transcription_error": transcription_error,
                    "zinom": zinom_status, "problemas": errors}
         return {"status": "partial" if errors else "success", "result": summary}
 
@@ -593,7 +648,7 @@ class CastanhaEngine:
                 # inteiro para um Whisper só. Aqui o texto já vem com a origem em
                 # cada linha; os segmentos ficam no checkpoint por canal.
                 try:
-                    resultado = self._transcrever_por_canal(audio_path, self.storage.bronze_dir / slug)
+                    resultado = self._transcrever_por_canal(audio_path, self.storage.bronze_dir / slug, capture_mode=mode)
                     texto, provider, erro = resultado.text, resultado.provider, None
                 except Exception as exc:
                     texto, provider, erro = "", "failed", str(exc)

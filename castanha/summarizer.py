@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -204,6 +205,66 @@ SILVER_SYSTEM_PROMPT += CHANNEL_GROUNDING
 GOLD_SYSTEM_PROMPT += CHANNEL_GROUNDING
 
 
+def _grounding_text(value):
+    value = unicodedata.normalize("NFKD", value.casefold())
+    return " ".join("".join(c for c in value if not unicodedata.combining(c)).split())
+
+
+def _calendar_aliases(metadata):
+    """Calendário é evidência de convite/RSVP, nunca de voz ou presença.
+
+    Inclui nomes curtos e email para não aceitar a mesma pessoa sob um alias.
+    Não tenta descobrir identidades pela transcrição nem por diarização.
+    """
+    aliases = set()
+    event = metadata.get("calendar_event") or {}
+    people = list(event.get("attendees") or [])
+    if isinstance(event.get("organizer"), dict):
+        people.append(event["organizer"])
+    elif isinstance(event.get("organizer"), str) and event["organizer"].strip():
+        people.append({"email": event["organizer"]})
+    for person in people:
+        for field in ("name", "email", "displayName"):
+            value = person.get(field)
+            if isinstance(value, str) and value.strip():
+                normalized = _grounding_text(value)
+                aliases.add(normalized)
+                if field != "email":
+                    aliases.update(word for word in normalized.split()
+                                   if word not in {"da", "de", "do", "das", "dos", "e"})
+    return aliases
+
+
+def _mentions_calendar_person(value, aliases):
+    normalized = _grounding_text(value)
+    return any(re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", normalized) for alias in aliases)
+
+
+# Termos de presença também cobrem a atribuição coletiva sem nome próprio.
+# Bloqueio conservador: a saída gerada não é uma fonte de presença/identidade.
+_PRESENCE = re.compile(r"\b(particip\w*|presen\w*|comparec\w*|attend\w*|joined|spoke|falou|falaram|disse|disseram)\b")
+
+
+def _unsupported_identity(value, metadata):
+    return (_mentions_calendar_person(value, _calendar_aliases(metadata))
+            or bool(_PRESENCE.search(_grounding_text(value))))
+
+
+def _ground_gold(data, metadata):
+    """Sem vínculo de voz comprovado, pessoa da agenda não vira fato durável.
+
+    Filtra cada item inteiro, inclusive decisões/tarefas com nomes em campos
+    alternativos. Recusar uma extração é reversível; gravar autoria inventada não.
+    """
+    result = {}
+    for key in ("facts", "decisions", "action_items", "people_notes"):
+        values = data.get(key, [])
+        result[key] = [value for value in values
+                       if isinstance(value, (dict, str))
+                       and not _unsupported_identity(json.dumps(value, ensure_ascii=False), metadata)] if isinstance(values, list) else []
+    return result
+
+
 class MeetingSummarizer:
     def __init__(self):
         cfg = load_config()
@@ -341,6 +402,13 @@ Transcrição Bruta:
                 print(f"[Castanha] Transcrição grande para uma chamada ({e}); resumindo em partes...", file=sys.stderr)
                 llm_output = self._silver_em_partes(title, cabecalho, raw_transcript, self._tamanho_da_parte(prompt, e))
 
+        if llm_output and _unsupported_identity(llm_output, metadata):
+            # Não aproveita uma narrativa que atribui voz/presença à agenda.
+            # O Bronze integral segue abaixo; a recusa fica explícita no Silver.
+            llm_output = (f"# {title}\n\nResumo retido: atribuição de pessoa ou presença sem "
+                          "vínculo de voz comprovado. Convite e RSVP não confirmam presença."
+                          f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}")
+
         # Sem LLM configurada não existe resumo. O template abaixo diz isso em vez
         # de inventar "decisões tomadas" que ninguém tomou.
         if not llm_output:
@@ -379,7 +447,11 @@ attendees:
         for att in attendees:
             name = att.get("name", "")
             email = att.get("email", "")
-            frontmatter += f'  - name: "{name}"\n    email: "{email}"\n'
+            frontmatter += f'  - name: {json.dumps(name, ensure_ascii=False)}\n    email: {json.dumps(email, ensure_ascii=False)}\n'
+            # RSVP é resposta ao convite, não comparecimento observado.
+            rsvp = att.get("response") or att.get("response_status") or att.get("responseStatus") or "unknown"
+            frontmatter += (f'    evidence: "calendar_invitation"\n    rsvp: {json.dumps(rsvp, ensure_ascii=False)}\n'
+                            '    presence: "unverified"\n    speech: "unverified"\n')
         if not attendees:
             frontmatter += "  []\n"
         frontmatter += f'audio_status: "{metadata.get("audio_status", "ok")}"\n'
@@ -416,7 +488,7 @@ Transcrição:
                 print(f"[Castanha] Fatos: mensagem grande demais ({e}). Fica o fallback estruturado.", file=sys.stderr)
         dados = _extrair_json(llm_output)
         if isinstance(dados, dict):
-            return dados
+            return _ground_gold(dados, metadata)
 
         # Convite não prova presença. Sem extração, não há fatos duráveis.
         return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}

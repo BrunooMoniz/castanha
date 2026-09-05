@@ -25,7 +25,9 @@ MONO_LABEL = "Áudio da gravação"
 MONO_ORIGIN = "gravacao_mono"
 SILENT_PROVIDER = "nenhum (canal em silêncio)"
 # v3 identifica o canal pelo PCM decodificado, não pelos bytes do FLAC.
-CHECKPOINT_VERSION = 3
+CHECKPOINT_VERSION = 4
+FINGERPRINT_VERSION = 1
+TIMESTAMP_TOLERANCE = 0.5
 # Teto por canal, não por gravação: dois canais são dois envios cobrados.
 MAX_CHANNEL_SECONDS = 3 * 3600
 
@@ -69,12 +71,14 @@ def pcm_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prepare_channels(source: Path, directory: Path) -> list[dict]:
+def prepare_channels(source: Path, directory: Path, capture_mode: str = "dual") -> list[dict]:
     """Um FLAC mono por canal, sem nova compressão com perda e sem tocar no original.
 
     Estéreo vira duas origens (microfone e sistema). Mono vira UMA origem
     genérica: alegar duas origens onde só existe uma seria inventar separação.
     """
+    if capture_mode not in ("dual", "mic_only", "mic-only"):
+        raise ValueError("Modo de captura desconhecido; origem não pode ser inferida")
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
          "stream=channels", "-of", "json", str(source)],
@@ -85,6 +89,7 @@ def prepare_channels(source: Path, directory: Path) -> list[dict]:
         raise ValueError("Gravação precisa ter exatamente um ou dois canais de áudio")
     total = streams[0]["channels"]
     duration = probe_duration_seconds(source)
+    _duration(duration)
     directory.mkdir(parents=True, exist_ok=True)
     canais = []
     for channel in range(total):
@@ -98,8 +103,8 @@ def prepare_channels(source: Path, directory: Path) -> list[dict]:
         )
         _check_derived(target, duration)
         canais.append({"channel": channel, "path": target,
-                       "label": LABELS[channel] if total == 2 else MONO_LABEL,
-                       "origin": ORIGINS[channel] if total == 2 else MONO_ORIGIN,
+                       "label": (LABELS[channel] if capture_mode == "dual" else f"Áudio da gravação (canal {channel})") if total == 2 else MONO_LABEL,
+                       "origin": (ORIGINS[channel] if capture_mode == "dual" else "gravacao_microfone") if total == 2 else MONO_ORIGIN,
                        "duration_seconds": probe_duration_seconds(target)})
     return canais
 
@@ -144,32 +149,79 @@ def _guard_budget(entry, budget) -> float:
 
 
 def _require_real_provider(provider) -> None:
-    if not isinstance(provider, str) or provider in ("", "mock", "failed"):
+    if (not isinstance(provider, str) or not provider.strip()
+            or provider.strip().lower() in ("mock", "failed", "pending", "none", "mixed")
+            or provider.startswith("nenhum")):
         raise ValueError("Provedor não real; não concluir transcrição por origem")
 
 
-def _segments(result, entry, source_sha256, channel_sha256):
-    if not isinstance(result.text, str) or not result.text.strip():
-        raise ValueError("Canal com áudio e sem transcrição; checkpoint não concluído")
-    if not result.utterances:
-        raise ValueError("Transcrição sem timestamps; não é possível ordenar os canais")
-    values = []
-    for segment in result.utterances:
+def _duration(value):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError("Duração inválida; áudio preservado")
+    return value
+
+
+def configuration_fingerprint(configuration: dict) -> str:
+    """Somente configuração pública explícita. Nunca serializar credenciais."""
+    canonical = json.dumps({"version": FINGERPRINT_VERSION, "configuration": configuration},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _normalized_text(text):
+    # Só normalizamos espaço: conteúdo diferente exige inspeção, não descarte.
+    return " ".join(text.split())
+
+
+def validate_channel_result(saved, identity, entry):
+    """Uma barreira semântica para resposta ao vivo E replay, antes de gravar/usar.
+
+    O checkpoint recusado fica byte a byte intacto. Contagem e texto integral
+    detectam respostas parcialmente segmentadas; tempos são relativos ao áudio.
+    """
+    duration = _duration(entry["duration_seconds"])
+    if not isinstance(saved, dict) or json.dumps(saved.get("identity"), sort_keys=True, allow_nan=False) != json.dumps(identity, sort_keys=True, allow_nan=False):
+        raise ValueError("Checkpoint incompatível; preservado para inspeção")
+    provider, silent = saved.get("provider"), saved.get("silent")
+    text, values = saved.get("provider_text"), saved.get("utterances")
+    count = saved.get("utterance_count")
+    if (type(silent) is not bool or not isinstance(text, str) or not isinstance(values, list)
+            or type(count) is not int or count != len(values)):
+        raise ValueError("Resultado de canal inválido: tipos ou contagens")
+    if silent:
+        if provider != SILENT_PROVIDER or text != "" or values:
+            raise ValueError("Silêncio incompatível com provedor ou fala")
+        return []
+    _require_real_provider(provider)
+    if identity.get("result_provider") is not None and provider != identity["result_provider"]:
+        raise ValueError("Provedor diverge da configuração efetiva")
+    if not text.strip() or not values:
+        raise ValueError("Canal sem texto ou timestamps; áudio preservado")
+    segments = []
+    for value in values:
+        try:
+            segment = ChannelUtterance(**value)
+        except (TypeError, KeyError) as exc:
+            raise ValueError("Segmento malformado; áudio preservado") from exc
         if (not isinstance(segment.text, str) or not segment.text.strip()
                 or any(isinstance(t, bool) or not isinstance(t, (int, float))
                        or not math.isfinite(t) for t in (segment.start, segment.end))
-                or segment.start < 0 or segment.end < segment.start):
-            raise ValueError("Segmento inválido; áudio preservado")
-        # O falante devolvido pelo provedor é descartado de propósito: o canal é
-        # origem técnica, e nome vindo de fora viraria identidade sem evidência.
-        values.append(ChannelUtterance(entry["label"], segment.text, segment.start, segment.end,
-                                       entry["channel"], entry["origin"],
-                                       source_sha256, channel_sha256))
-    return values
+                or not 0 <= segment.start <= segment.end <= duration + TIMESTAMP_TOLERANCE
+                or type(segment.channel) is not int or segment.channel != entry["channel"]
+                or segment.origin != entry["origin"] or segment.speaker != entry["label"]
+                or segment.source_sha256 != identity["source_sha256"]
+                or segment.channel_sha256 != identity["pcm_sha256"]):
+            raise ValueError("Segmento inválido: tempo, origem ou hash; áudio preservado")
+        segments.append(segment)
+    if _normalized_text(text) != _normalized_text(" ".join(s.text for s in segments)):
+        raise ValueError("Texto integral diverge dos segmentos; recuse antes do checkpoint/Silver")
+    return segments
 
 
 def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
-                    pipeline_id: str, budget=None) -> TranscriptionResult:
+                    pipeline_id: str, budget=None, capture_mode: str = "dual",
+                    configuration_for_channel=None) -> TranscriptionResult:
     """Callback recebe (FLAC mono, duração em segundos) e transcreve UM canal.
 
     pipeline_id identifica versão/modelo e impede reutilizar resposta incompatível.
@@ -180,7 +232,7 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
         raise ValueError("pipeline_id obrigatório")
     digest = file_sha256(source)
     directory = checkpoint_root / digest
-    entradas = prepare_channels(source, directory)
+    entradas = prepare_channels(source, directory, capture_mode=capture_mode)
     if file_sha256(source) != digest:
         raise ValueError("Áudio alterado durante a separação; recuse o processamento")
     utterances = []
@@ -190,31 +242,38 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
         channel, path = entry["channel"], entry["path"]
         checkpoint = directory / f"channel-{channel}.json"
         pcm = pcm_sha256(path)
+        configuration = (configuration_for_channel(entry) if configuration_for_channel else {})
+        fingerprint = configuration_fingerprint({**configuration, "pipeline": pipeline_id,
+                                                  "capture_mode": capture_mode,
+                                                  "origin": entry["origin"], "label": entry["label"]})
         identity = {"version": CHECKPOINT_VERSION, "source_sha256": digest, "channel": channel,
-                    "pipeline_id": pipeline_id, "origin": entry["origin"], "pcm_sha256": pcm}
+                    "pipeline_id": pipeline_id, "origin": entry["origin"], "pcm_sha256": pcm,
+                    "label": entry["label"], "capture_mode": capture_mode,
+                    "duration_seconds": entry["duration_seconds"], "fingerprint": fingerprint,
+                    "result_provider": configuration.get("result_provider")}
+        measured_silent = _silent(path)
         if checkpoint.exists():
             saved = json.loads(checkpoint.read_text(encoding="utf-8"))
-            if not isinstance(saved, dict) or saved.get("identity") != identity:
-                raise ValueError("Checkpoint incompatível; preservado para inspeção")
-            provider, silent = saved["provider"], saved.get("silent") is True
-            if not silent:
-                _require_real_provider(provider)
-            segments = [ChannelUtterance(**s) for s in saved["utterances"]]
-        elif _silent(path):
-            # Canal mudo não vai ao provedor: o Whisper alucina em silêncio e o
-            # minuto seria cobrado igual. Silêncio fica registrado, não inventado.
-            provider, silent, segments, provider_text = SILENT_PROVIDER, True, [], ""
         else:
-            duration = _guard_budget(entry, budget)
-            result = transcribe_mono(path, duration)
-            _require_real_provider(result.provider)
-            provider, silent, provider_text = result.provider, False, result.text
-            segments = _segments(result, entry, digest, pcm)
+            if measured_silent:
+                provider, silent, values, provider_text = SILENT_PROVIDER, True, [], ""
+            else:
+                duration = _guard_budget(entry, budget)
+                result = transcribe_mono(path, duration)
+                provider, silent, provider_text = result.provider, False, result.text
+                # Provedor não prova identidade pessoal. Apenas a origem de captura.
+                values = [asdict(ChannelUtterance(entry["label"], s.text, s.start, s.end,
+                                                  channel, entry["origin"], digest, pcm))
+                          for s in result.utterances]
+            saved = {"identity": identity, "provider": provider, "silent": silent,
+                     "provider_text": provider_text, "utterances": values,
+                     "utterance_count": len(values)}
+        segments = validate_channel_result(saved, identity, entry)
+        provider, silent = saved["provider"], saved["silent"]
+        if silent != measured_silent:
+            raise ValueError("Checkpoint discorda da medição de silêncio; preservado")
         if not checkpoint.exists():
-            # provider_text é auditoria da resposta original; a junção usa os segmentos.
-            write_json(checkpoint, {"identity": identity, "provider": provider, "silent": silent,
-                                    "provider_text": provider_text,
-                                    "utterances": [asdict(s) for s in segments]})
+            write_json(checkpoint, saved)
         utterances.extend(segments)
         channels.append({"channel": channel, "origin": entry["origin"], "label": entry["label"],
                          "provider": provider, "silent": silent, "channel_sha256": pcm,
@@ -236,4 +295,4 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
                                {"channel_provenance": True, "identity_inferred": False,
                                 "mono_fallback": len(entradas) == 1,
                                 "source_sha256": digest, "pipeline_id": pipeline_id,
-                                "channels": channels, "utterance_count": total})
+                                "capture_mode": capture_mode, "channels": channels, "utterance_count": total})

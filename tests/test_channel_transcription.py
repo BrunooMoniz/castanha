@@ -38,10 +38,10 @@ class ChannelTranscriptionTests(unittest.TestCase):
         self.source = self.gerar("original.wav", "0.1*sin(2*PI*440*t)|0.2*sin(2*PI*880*t)")
         self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
 
-    def gerar(self, nome, expressao):
+    def gerar(self, nome, expressao, duration=1):
         caminho = self.root / nome
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-                        f"aevalsrc={expressao}:d=1:s=16000", str(caminho)],
+                        f"aevalsrc={expressao}:d={duration}:s=16000", str(caminho)],
                        check=True, capture_output=True)
         return caminho
 
@@ -95,6 +95,8 @@ class ChannelTranscriptionTests(unittest.TestCase):
         self.assertIn("Áudio do sistema: fala remota", result.text)
 
     def test_interleaved_order_keeps_every_turn_and_simultaneous_speech(self):
+        self.source = self.gerar("longa.wav", "0.1*sin(2*PI*440*t)|0.2*sin(2*PI*880*t)", duration=3)
+        self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
         result = self.run_transcription(self.por_canal(self.varias))
         self.assertEqual([s.text for s in result.utterances],
                          ["local A", "remota A", "local B", "remota B", "local C", "remota C"])
@@ -105,6 +107,8 @@ class ChannelTranscriptionTests(unittest.TestCase):
         self.assertEqual(result.raw_response["utterance_count"], 6)
 
     def test_full_content_reaches_the_merged_text_and_hashes(self):
+        self.source = self.gerar("longa.wav", "0.1*sin(2*PI*440*t)|0.2*sin(2*PI*880*t)", duration=3)
+        self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
         result = self.run_transcription(self.por_canal(self.varias))
         self.assertEqual(len(result.text.splitlines()), len(result.utterances))
         for segmento in result.utterances:
@@ -153,6 +157,8 @@ class ChannelTranscriptionTests(unittest.TestCase):
         self.run_transcription(lambda *_: self.fail("replay não deve chamar provedor"))
 
     def test_replay_repeats_the_same_content_without_calling_the_provider(self):
+        self.source = self.gerar("longa.wav", "0.1*sin(2*PI*440*t)|0.2*sin(2*PI*880*t)", duration=3)
+        self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
         primeiro = self.run_transcription(self.por_canal(self.varias))
         antes = {p.name: p.read_bytes() for p in (self.root / "checkpoints").rglob("*.json")}
         segundo = self.run_transcription(lambda *_: self.fail("replay não deve chamar provedor"))
@@ -297,6 +303,119 @@ class ChannelTranscriptionTests(unittest.TestCase):
         result = self.run_transcription(callback, budget=OrcamentoFalso())
         self.assertEqual(chamados, [0, 1])
         self.assertEqual(len(result.utterances), 2)
+
+    def test_unsegmented_marker_is_refused_before_checkpoint(self):
+        result = self.result(0)
+        result.text += ' MARCADOR_NAO_SEGMENTADO'
+        with self.assertRaisesRegex(ValueError, 'Texto integral'):
+            self.run_transcription(lambda *_: result)
+        self.assertFalse(self.checkpoints())
+
+    def test_live_segments_must_fit_recording_duration(self):
+        for start, end in [(0, 1.6), (1700000000, 1700000001), (-1, 0),
+                           (1, 0), (False, 1), (0, float('inf')), (0, float('nan'))]:
+            with self.subTest(start=start, end=end), self.assertRaises(ValueError):
+                self.run_transcription(lambda *_: TranscriptionResult(
+                    'fala', [Utterance('X', 'fala', start, end)], 'fixture', {}))
+        self.assertFalse(self.checkpoints())
+
+    def test_semantic_checkpoint_corruption_is_preserved_and_refused(self):
+        import copy
+        self.run_transcription(self.por_canal(self.result))
+        checkpoint = self.root / 'checkpoints' / self.digest / 'channel-0.json'
+        saved = json.loads(checkpoint.read_text())
+        changes = [('provider_text', 'fala local MARCADOR'), ('provider_text', None),
+                   ('utterance_count', 0), ('utterance_count', True), ('silent', 'false'),
+                   ('silent', True), ('provider', 'mock'), ('provider', 'pending'),
+                   ('provider', ' '), ('utterances', []), ('utterances', [None])]
+        segment_changes = [('text', ''), ('text', None), ('start', -1), ('start', True),
+                           ('end', 99), ('end', float('nan')), ('end', float('inf')),
+                           ('channel', 1), ('channel', False), ('origin', 'audio_sistema'),
+                           ('speaker', 'Bruno'), ('source_sha256', 'bad'), ('channel_sha256', 'bad')]
+        for field, value in changes + [('segment:' + f, v) for f, v in segment_changes]:
+            with self.subTest(field=field, value=value):
+                corrupted = copy.deepcopy(saved)
+                if field.startswith('segment:'):
+                    corrupted['utterances'][0][field.split(':')[1]] = value
+                else:
+                    corrupted[field] = value
+                checkpoint.write_text(json.dumps(corrupted))
+                before = checkpoint.read_bytes()
+                with self.assertRaises(ValueError):
+                    self.run_transcription(lambda *_: self.fail('checkpoint inválido não cobra'))
+                self.assertEqual(checkpoint.read_bytes(), before)
+
+    def test_forged_silence_cannot_hide_audible_channel(self):
+        self.run_transcription(self.por_canal(self.result))
+        checkpoint = self.root / 'checkpoints' / self.digest / 'channel-0.json'
+        saved = json.loads(checkpoint.read_text())
+        saved.update(silent=True, provider='nenhum (canal em silêncio)',
+                     provider_text='', utterances=[], utterance_count=0)
+        checkpoint.write_text(json.dumps(saved))
+        before = checkpoint.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'silêncio'):
+            self.run_transcription(lambda *_: self.fail('não enviar'))
+        self.assertEqual(before, checkpoint.read_bytes())
+
+    def test_versioned_configuration_changes_prevent_replay(self):
+        from castanha.channel_transcription import configuration_fingerprint
+        configuration = {'effective_provider': 'fixture', 'model': 'v1', 'language': 'pt',
+                         'transcribe_mode': 'mic_only', 'origin_policy': 'v2'}
+        def run(config=configuration, pipeline='v1', mode='dual', callback=None):
+            return transcribe_dual(self.source, self.root / 'checkpoints',
+                                  callback or self.por_canal(self.result), pipeline_id=pipeline,
+                                  capture_mode=mode, configuration_for_channel=lambda _: config)
+        run()
+        self.assertEqual(configuration_fingerprint(configuration),
+                         configuration_fingerprint(dict(reversed(list(configuration.items())))))
+        for field in configuration:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'incompatível'):
+                run({**configuration, field: 'changed'}, callback=lambda *_: self.fail('não cobrar'))
+        for kwargs in ({'pipeline': 'v2'}, {'mode': 'mic_only'}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, 'incompatível'):
+                run(**kwargs, callback=lambda *_: self.fail('não cobrar'))
+        with patch('castanha.channel_transcription.FINGERPRINT_VERSION', 999):
+            with self.assertRaisesRegex(ValueError, 'incompatível'):
+                run(callback=lambda *_: self.fail('não cobrar'))
+
+    def test_stereo_mic_only_has_no_system_or_remote_origin(self):
+        result = transcribe_dual(self.source, self.root / 'checkpoints',
+                                 self.por_canal(self.result), pipeline_id='fixture', capture_mode='mic_only')
+        self.assertEqual({s.origin for s in result.utterances}, {'gravacao_microfone'})
+        self.assertEqual(result.raw_response['capture_mode'], 'mic_only')
+        self.assertNotIn('Áudio do sistema', result.text)
+        self.assertNotIn('microfone_local', {s.origin for s in result.utterances})
+        self.assertFalse(result.raw_response['identity_inferred'])
+
+    def test_unknown_capture_mode_and_invalid_duration_refuse_before_provider(self):
+        with self.assertRaises(ValueError):
+            transcribe_dual(self.source, self.root / 'checkpoints', lambda *_: self.fail('não cobrar'),
+                            pipeline_id='fixture', capture_mode='unknown')
+        for duration in (None, 0, -1, float('nan'), float('inf'), True):
+            with self.subTest(duration=duration), patch(
+                    'castanha.channel_transcription.probe_duration_seconds', return_value=duration):
+                with self.assertRaises(ValueError):
+                    self.run_transcription(lambda *_: self.fail('não cobrar'))
+        self.assertFalse(self.checkpoints())
+
+
+    def test_live_and_checkpoint_provider_must_match_effective_configuration(self):
+        def run(callback):
+            return transcribe_dual(self.source, self.root / 'checkpoints', callback,
+                                   pipeline_id='fixture',
+                                   configuration_for_channel=lambda _: {'result_provider': 'fixture'})
+        with self.assertRaisesRegex(ValueError, 'Provedor diverge'):
+            run(lambda *_: TranscriptionResult('fala', [Utterance('X', 'fala', 0, 1)], 'groq', {}))
+        self.assertFalse(self.checkpoints())
+        run(self.por_canal(self.result))
+        path = self.root / 'checkpoints' / self.digest / 'channel-0.json'
+        saved = json.loads(path.read_text())
+        saved['provider'] = 'groq'
+        path.write_text(json.dumps(saved))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'Provedor diverge'):
+            run(lambda *_: self.fail('não cobrar'))
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -405,6 +405,166 @@ class TestDurableJobs(unittest.TestCase):
             self.assertEqual(len(sync_pending(limit=20, storage=storage)), 5)
             self.assertEqual(sync_pending(storage=storage), [])
 
+    def test_channel_incomplete_text_never_reaches_silver_or_gold(self):
+        from castanha.transcription import Utterance
+        engine = self.engine_por_canal()
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(engine.summarizer, 'generate_silver') as silver, \
+             patch.object(engine.summarizer, 'generate_gold') as gold, \
+             patch.object(engine.zinom, 'ingest_meeting') as ingest:
+            provider.return_value.transcribe.return_value = TranscriptionResult(
+                'fala MARCADOR_PERDIDO', [Utterance('X', 'fala', 0, 0.5)], 'fixture', {})
+            result = engine.stop_recording()
+        self.assertEqual(result['status'], 'partial')
+        self.assertIn('Texto integral', result['result']['transcription_error'])
+        silver.assert_not_called()
+        gold.assert_not_called()
+        ingest.assert_not_called()
+        bronze = engine.storage.bronze_dir / result['result']['slug']
+        self.assertFalse(list((bronze / '.channels').rglob('*.json')))
+
+    def test_engine_carries_stereo_mic_only_policy_to_bronze(self):
+        from castanha.transcription import Utterance
+        engine = self.engine_por_canal()
+        engine.state_mgr.write({'mode': 'mic_only'})
+        with patch('castanha.engine.get_transcriber') as provider:
+            provider.return_value.transcribe.return_value = TranscriptionResult(
+                'fala', [Utterance('Nome não comprovado', 'fala', 0, 0.5)], 'fixture', {})
+            result = engine.stop_recording()
+        bronze = engine.storage.bronze_dir / result['result']['slug']
+        record = json.loads((bronze / 'transcript_segments.json').read_text())['recordings'][0]
+        self.assertEqual(record['capture_mode'], 'mic_only')
+        self.assertEqual({s['origin'] for s in record['utterances']}, {'gravacao_microfone'})
+        self.assertNotIn('Áudio do sistema', (bronze / 'transcript_raw.txt').read_text())
+
+    def two_jobs(self, *, first_status='desconhecido', first_stage='done', first_error=None):
+        """Dois jobs em disco: fala/pendência antiga e silêncio posterior."""
+        slug = self.crash()
+        bronze = self.engine.storage.bronze_dir / slug
+        first_path = next((bronze / '.jobs').glob('*.json'))
+        first = json.loads(first_path.read_text())
+        first.update(stage=first_stage, transcript='Fala antiga preservada' if first_stage == 'done' else '',
+                     provider='groq' if first_stage == 'done' else 'failed',
+                     audio_status=first_status, error=first_error, recorded_at='2026-09-05T10:00:00Z')
+        first_path.write_text(json.dumps(first))
+        second = {**first, 'id': 'second', 'stage': 'done', 'transcript': '',
+                  'provider': 'nenhum (áudio em silêncio)', 'audio_status': 'sem_audio',
+                  'error': None, 'recorded_at': '2026-09-05T11:00:00Z'}
+        (bronze / '.jobs/second.json').write_text(json.dumps(second))
+        return slug, bronze, first_path
+
+    def test_real_speech_with_unknown_measurement_beats_later_silence(self):
+        slug, bronze, _ = self.two_jobs()
+        result = self.engine.process_pending(slug)
+        meta = json.loads((bronze / 'metadata.json').read_text())
+        self.assertEqual(meta['transcription_provider'], 'groq')
+        self.assertEqual(meta['audio_status'], 'desconhecido')
+        self.assertEqual(meta['processing_status'], 'complete')
+        self.assertEqual(result['result']['transcription_provider'], 'groq')
+        self.assertIn('Fala antiga', (bronze / 'transcript_raw.txt').read_text())
+
+    def test_old_pending_and_error_survive_later_silent_job(self):
+        slug, bronze, _ = self.two_jobs(first_stage='pending', first_error='erro antigo')
+        with patch('castanha.engine.get_transcriber') as provider:
+            provider.return_value.transcribe.side_effect = TranscriptionPending('erro persistente')
+            result = self.engine.process_pending(slug)
+        meta = json.loads((bronze / 'metadata.json').read_text())
+        self.assertEqual(meta['transcription_provider'], 'failed')
+        self.assertEqual(meta['audio_status'], 'desconhecido')
+        self.assertEqual(meta['processing_status'], 'pending')
+        self.assertIn('erro persistente', meta['transcription_error'])
+        self.assertIn('erro persistente', result['result']['transcription_error'])
+        self.assertEqual(result['status'], 'partial')
+
+    def test_error_on_previously_completed_job_is_not_cleared_by_next_job(self):
+        slug, bronze, _ = self.two_jobs(first_status='ok', first_error='erro persistido')
+        result = self.engine.process_pending(slug)
+        meta = json.loads((bronze / 'metadata.json').read_text())
+        self.assertEqual(meta['transcription_provider'], 'groq')
+        self.assertEqual(meta['audio_status'], 'ok')
+        self.assertEqual(meta['processing_status'], 'pending')
+        self.assertIn('erro persistido', result['result']['transcription_error'])
+
+    def test_invalid_recorded_at_is_refused_without_mutating_jobs(self):
+        slug = self.crash()
+        bronze = self.engine.storage.bronze_dir / slug
+        path = next((bronze / '.jobs').glob('*.json'))
+        original = json.loads(path.read_text())
+        for value in (None, 1, 'not-a-date', '2026-09-05', '2026-99-05T00:00:00'):
+            with self.subTest(recorded_at=value):
+                path.write_text(json.dumps({**original, 'recorded_at': value}))
+                before = path.read_bytes()
+                with patch.object(self.engine.summarizer, 'generate_silver') as silver, \
+                     patch('castanha.engine.get_transcriber') as provider:
+                    with self.assertRaisesRegex(ValueError, 'recorded_at'):
+                        self.engine.process_pending(slug)
+                self.assertEqual(path.read_bytes(), before)
+                provider.assert_not_called()
+                silver.assert_not_called()
+
+    def test_multiple_jobs_order_by_absolute_recorded_at_without_fake_time_offsets(self):
+        slug, bronze, path = self.two_jobs()
+        first = json.loads(path.read_text())
+        first['recorded_at'] = '2026-09-05T10:00:00-03:00'  # 13 UTC, após o segundo
+        path.write_text(json.dumps(first))
+        self.engine.process_pending(slug)
+        records = json.loads((bronze / 'transcript_segments.json').read_text())['recordings']
+        self.assertEqual([r['job_id'] for r in records], ['second', first['id']])
+        self.assertTrue(all(r['time_reference'] == 'recording_start' for r in records))
+
+
+    def test_engine_fingerprint_covers_effective_provider_model_language_and_mode(self):
+        from castanha.transcription import Utterance
+        engine = self.engine_por_canal()
+        source = self.gravacao_estereo()
+        bronze = self.root / 'fingerprint-bronze'
+        class ProviderA:
+            model = 'model-a'
+            def transcribe(_self, path, mode='dual'):
+                return TranscriptionResult('fala', [Utterance('X', 'fala', 0, 0.5)], 'fixture', {})
+        class ProviderB(ProviderA):
+            pass
+        with patch('castanha.engine.get_transcriber', return_value=ProviderA()):
+            engine._transcrever_por_canal(source, bronze)
+        checkpoints = list((bronze / '.channels').rglob('*.json'))
+        before = {p: p.read_bytes() for p in checkpoints}
+        config_path = self.root / 'config/castanha/config.json'
+        original = json.loads(config_path.read_text())
+        for field, value in [('provider', 'mock'), ('language', 'en'), ('groq_model', 'other'),
+                             ('deepgram_model', 'other')]:
+            with self.subTest(field=field):
+                cfg = json.loads(json.dumps(original))
+                cfg['transcription'][field] = value
+                config_path.write_text(json.dumps(cfg))
+                with patch('castanha.engine.get_transcriber', return_value=ProviderA()), \
+                     patch.object(ProviderA, 'transcribe') as transcribe:
+                    with self.assertRaisesRegex(ValueError, 'incompatível'):
+                        engine._transcrever_por_canal(source, bronze)
+                transcribe.assert_not_called()
+        config_path.write_text(json.dumps(original))
+        for provider in (ProviderB(), ProviderA()):
+            if type(provider) is ProviderA:
+                provider.model = 'model-b'
+            with self.subTest(provider=type(provider).__name__), \
+                 patch('castanha.engine.get_transcriber', return_value=provider), \
+                 patch.object(provider, 'transcribe') as transcribe:
+                with self.assertRaisesRegex(ValueError, 'incompatível'):
+                    engine._transcrever_por_canal(source, bronze)
+                transcribe.assert_not_called()
+        with patch('castanha.engine.get_transcriber', return_value=ProviderA()):
+            with self.assertRaisesRegex(ValueError, 'incompatível'):
+                engine._transcrever_por_canal(source, bronze, capture_mode='mic_only')
+        self.assertEqual(before, {p: p.read_bytes() for p in checkpoints})
+        cfg = json.loads(json.dumps(original))
+        cfg['transcription']['groq_api_key'] = 'fixture-secret-not-to-be-serialized'
+        config_path.write_text(json.dumps(cfg))
+        with patch('castanha.engine.get_transcriber', return_value=ProviderA()), \
+             patch.object(ProviderA, 'transcribe') as transcribe:
+            engine._transcrever_por_canal(source, bronze)
+        transcribe.assert_not_called()
+        self.assertTrue(all(b'fixture-secret' not in p.read_bytes() for p in checkpoints))
+
+
 
 class TestRemoteJob(unittest.TestCase):
     def setUp(self):
