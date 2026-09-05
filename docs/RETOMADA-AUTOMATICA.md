@@ -61,3 +61,16 @@ Suíte integrada: 187 testes verdes no XPS, sem instalar nem publicar.
 Complemento: o finalizador registra `processing_pid`. A retomada automática pode recuperar o
 estado `processing` se esse processo comprovadamente não existir mais; não interfere em processo
 vivo ou em estado legado sem identidade suficiente. Mais dois testes, total 189 verdes.
+
+O painel usa `DeliveryStatus.js` para distinguir exclusão, envio pendente, nota entregue com fatos
+pendentes e recibo inválido. Antes da correção, quatro desses casos exibiam sucesso falso ou nenhum
+estado; depois, todos passam com o motor Qt real:
+
+```sh
+QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml -o -,txt
+```
+
+São seis casos de produto, mais inicialização/finalização do Qt (8 passes, zero falhas).
+Esse teste é adicional aos 189 testes Python; não exige Node ou serviço externo. Não substitui
+o smoke do painel instalado. O qmllint amplo tem avisos de tipos dinâmicos também no baseline
+do Omarchy; não foi declarado verde nem teve avisos desabilitados para simular sucesso.

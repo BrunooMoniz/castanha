@@ -13,6 +13,7 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
+import "DeliveryStatus.js" as DeliveryStatus
 
 Panel {
   id: root
@@ -223,23 +224,7 @@ Panel {
   }
 
   // O aviso do Zinom em português, e não um triângulo sem legenda.
-  function zinomLine(result) {
-    if (!result) return ""
-    var z = result.zinom
-    if (!z) return ""
-    if (z.status === "skipped") return "Não enviado ao Zinom: " + (z.reason || "sem motivo declarado")
-    if (z.errors && z.errors.length > 0) {
-      // "Erro no remember: HTTP 406..." é linguagem de log, não de produto.
-      var motivo = String(z.errors[0]).replace(/^Erro no \w+( para .+?)?: /, "")
-      if (motivo.length > 60) motivo = motivo.substring(0, 59) + "…"
-      return "Não salvou no Zinom (" + motivo + ")"
-    }
-    var fatos = z.facts_ingested || 0
-    if (fatos > 0) return "Salvo no Zinom, com " + fatos + (fatos === 1 ? " fato" : " fatos")
-    // O bloco do metadata traz remember_id; o do estado da sessão traz remember.
-    if (z.status === "ok" || z.remember || z.remember_id) return "Salvo no Zinom"
-    return ""
-  }
+  function zinomLine(result) { return DeliveryStatus.zinomLine(result) }
 
   function zinomFalhou(result) {
     if (!result || !result.zinom) return false
