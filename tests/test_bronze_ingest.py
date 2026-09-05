@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 from castanha.bronze_ingest import (BronzeIngestError, build_transcript_request,
                                     prepare_transcript_upload, submit_transcript_upload)
-from castanha.zinom_adapter import ZinomMcpClient
+from castanha.zinom_adapter import ZinomError, ZinomMcpClient
 
 
 class TestBronzeEnvelope(unittest.TestCase):
@@ -18,7 +18,7 @@ class TestBronzeEnvelope(unittest.TestCase):
         return build_transcript_request("fixture-meeting", {
             "title": "Reunião sintética", "recorded_at": "2026-09-05T10:30:11",
             "transcription_provider": "groq", "audio_status": "ok", **metadata,
-        }, text, captured_at="2026-09-05T17:00:00-03:00")
+        }, text, captured_at="2026-09-05T17:00:00-03:00", workspace="fixture-workspace")
 
     def test_integral_unicode_content_and_exact_hash(self):
         text = "Decisão com ação e emoji 🌰\r\n" * 4000
@@ -32,9 +32,19 @@ class TestBronzeEnvelope(unittest.TestCase):
         self.assertEqual(first, self.build())
         changed = self.build("Conteúdo corrigido")
         self.assertNotEqual(first["idempotency_key"], changed["idempotency_key"])
-        self.assertNotEqual(first["envelope"]["source_id"], changed["envelope"]["source_id"])
-        self.assertEqual(first["envelope"]["proveniencia"]["referencia"],
-                         changed["envelope"]["proveniencia"]["referencia"])
+        self.assertEqual(first["envelope"]["source_id"], changed["envelope"]["source_id"])
+        self.assertEqual(first["envelope"]["proveniencia"]["origem_id"],
+                         changed["envelope"]["proveniencia"]["origem_id"])
+
+    def test_explicit_workspace_and_stable_origin_are_required(self):
+        request = self.build()
+        self.assertEqual(request["envelope"]["workspace"], "fixture-workspace")
+        self.assertEqual(request["envelope"]["source_id"],
+                         request["envelope"]["proveniencia"]["origem_id"])
+        for workspace in (None, "", " ", " fixture", 123):
+            with self.subTest(workspace=workspace), self.assertRaises(BronzeIngestError):
+                build_transcript_request("fixture", {}, "texto", workspace=workspace,
+                                         captured_at="2026-09-05T10:00:00-03:00")
 
     def test_does_not_invent_account_presence_or_facts(self):
         request = self.build(calendar_event={"attendees": [{"name": "Convidado"}]})
@@ -63,7 +73,8 @@ class TestBronzeEnvelope(unittest.TestCase):
 
     def test_capture_requires_explicit_timezone(self):
         with self.assertRaises(BronzeIngestError):
-            build_transcript_request("fixture", {}, "texto", captured_at="2026-09-05T10:00:00")
+            build_transcript_request("fixture", {}, "texto", workspace="fixture-workspace",
+                                     captured_at="2026-09-05T10:00:00")
 
     def test_missing_source_date_is_explicit(self):
         self.assertEqual(self.build(recorded_at=None)["envelope"]["timestamp"],
@@ -80,11 +91,14 @@ class TestBronzeUpload(unittest.TestCase):
 
     def prepare(self, instant="2026-09-05T17:00:00-03:00", text="transcrição"):
         return prepare_transcript_upload(self.directory, "fixture", self.metadata, text,
-                                         captured_at=instant)
+                                         captured_at=instant, workspace="fixture-workspace")
 
-    def response(self, status="pending", **extra):
+    def response(self, state="pending", **extra):
         return {"content": [{"type": "text", "text": json.dumps({
-            "ok": True, "jobId": 12, "revisionId": 34, "status": status, **extra})}]}
+            "ok": True, "jobId": 12, "revisionId": 34, "status": state,
+            "checkpoint": 0, "replay": True, "attempts": 1, "lastError": None,
+            "sourceId": json.loads(self.path.read_text())["request"]["envelope"]["source_id"],
+            "sourceType": "castanha", **extra})}]}
 
     def test_restart_reuses_frozen_request_despite_later_clock(self):
         original = self.path.read_bytes()
@@ -104,13 +118,15 @@ class TestBronzeUpload(unittest.TestCase):
         second = submit_transcript_upload(self.prepare(), client)
         self.assertEqual(first["status"], "error")
         self.assertEqual(second["status"], "ok")
-        self.assertEqual(client.call_tool.call_args_list[0], client.call_tool.call_args_list[1])
+        first_request = client.call_tool.call_args_list[0].args[1]
+        self.assertEqual(client.call_tool.call_args_list[1].args[1],
+                         {"idempotency_key": first_request["idempotency_key"]})
         self.assertEqual(client.call_tool.call_args.args[0], "brain_ingest")
 
     def test_queue_ack_is_not_searchable_success(self):
         for state, expected in (("pending", "pending"), ("processing", "pending"),
                                 ("retry", "pending"), ("failed", "error"),
-                                ("tombstoned", "tombstoned"), ("completed", "ok")):
+                                ("completed", "ok"), ("tombstoned", "tombstoned")):
             with self.subTest(state=state):
                 client = Mock()
                 client.call_tool.return_value = self.response(state)
@@ -120,6 +136,66 @@ class TestBronzeUpload(unittest.TestCase):
         client = Mock()
         client.call_tool.return_value = self.response("completed", jobId=True)
         self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+
+    def test_initial_enqueue_accepts_only_server_enqueue_fields(self):
+        client = Mock()
+        client.call_tool.return_value = {"content": [{"type": "text", "text": json.dumps({
+            "ok": True, "jobId": 12, "revisionId": 34, "status": "pending",
+            "checkpoint": 0, "replay": False})}]}
+        self.assertEqual(submit_transcript_upload(self.path, client)["status"], "pending")
+
+    def test_only_typed_ingest_tombstone_is_terminal(self):
+        for code, tool, expected in (("source_tombstoned", "brain_ingest", "tombstoned"),
+                                     ("not_found", "brain_ingest", "error"),
+                                     ("source_tombstoned", "brain_update", "error")):
+            with self.subTest(code=code, tool=tool):
+                self.path = self.prepare(text=f"fixture {code} {tool}")
+                client = Mock()
+                client.call_tool.side_effect = ZinomError("fixture", code=code, tool=tool)
+                self.assertEqual(submit_transcript_upload(self.path, client)["status"], expected)
+
+    def test_unknown_key_reuses_frozen_envelope_without_changing_destination(self):
+        client = Mock()
+        client.call_tool.side_effect = [TimeoutError(),
+            ZinomError("fixture", code="unknown_idempotency_key", tool="brain_ingest"),
+            self.response("completed")]
+        submit_transcript_upload(self.path, client)
+        self.assertEqual(submit_transcript_upload(self.path, client)["status"], "ok")
+        self.assertEqual(client.call_tool.call_args_list[0], client.call_tool.call_args_list[2])
+
+    def test_lookup_must_match_origin(self):
+        client = Mock()
+        client.call_tool.side_effect = [self.response(), self.response("completed", sourceId="other")]
+        submit_transcript_upload(self.path, client)
+        self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+
+    def test_lookup_cannot_change_job_identity_or_return_malformed_state(self):
+        for extra in ({"jobId": 99}, {"revisionId": 99}, {"checkpoint": True},
+                      {"checkpoint": -1}, {"attempts": True}, {"lastError": {}},
+                      {"replay": False}, {"status": None}):
+            self.path = self.prepare(text=json.dumps(extra))
+            client = Mock()
+            client.call_tool.side_effect = [self.response(), self.response("completed", **extra)]
+            submit_transcript_upload(self.path, client)
+            self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+
+    def test_authorization_error_does_not_trigger_full_upload_fallback(self):
+        client = Mock()
+        client.call_tool.side_effect = [self.response(),
+            ZinomError("fixture", code="workspace_forbidden", tool="brain_ingest")]
+        submit_transcript_upload(self.path, client)
+        self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+        self.assertEqual(client.call_tool.call_count, 2)
+        self.assertEqual(list(client.call_tool.call_args.args[1]), ["idempotency_key"])
+
+    def test_deleted_and_superseded_revisions_are_terminal_without_resend(self):
+        for state in ("tombstoned", "superseded"):
+            self.path = self.prepare(text=f"fixture {state}")
+            client = Mock()
+            client.call_tool.return_value = self.response(state)
+            self.assertEqual(submit_transcript_upload(self.path, client)["status"], state)
+            self.assertEqual(submit_transcript_upload(self.path, client)["status"], state)
+            self.assertEqual(client.call_tool.call_count, 1)
 
     def test_corrupt_checkpoint_is_preserved_without_network(self):
         saved = json.loads(self.path.read_text())
@@ -165,6 +241,8 @@ class TestBronzeUpload(unittest.TestCase):
                         return
                     result = {"content": [{"type": "text", "text": json.dumps({
                         "ok": True, "jobId": 12, "revisionId": 34,
+                        "checkpoint": 0, "replay": True, "attempts": 1, "lastError": None,
+                        "sourceId": accepted[key]["envelope"]["source_id"], "sourceType": "castanha",
                         "idempotent": True, "status": "completed"})}]}
                 encoded = json.dumps({"jsonrpc": "2.0", "id": body["id"],
                                       "result": result}).encode()
@@ -188,7 +266,8 @@ class TestBronzeUpload(unittest.TestCase):
             self.assertEqual(submit_transcript_upload(checkpoint, client)["status"], "ok")
             self.assertEqual(len(accepted), 1)
             self.assertEqual(len(calls), 2)
-            self.assertEqual(calls[0], calls[1])
+            self.assertEqual(calls[1]["arguments"],
+                             {"idempotency_key": calls[0]["arguments"]["idempotency_key"]})
             self.assertEqual(calls[0]["name"], "brain_ingest")
         finally:
             server.shutdown()

@@ -20,17 +20,30 @@ a chave e o payload; nunca cai para `remember`. ACK pending/processing/retry nã
 sucesso de indexação. Apenas completed confirma o processamento da transcrição,
 não a entrega de resumo ou fatos. O aceite final ainda exige consulta real no MCP.
 
-O envelope pode omitir `account_id` na fronteira MCP, que deve preenchê-lo pela
-sessão autenticada antes da validação canônica. Esse ajuste ainda depende do F4.
-Conta explícita deve ser conferida pelo servidor, nunca inferida do email.
+O envelope omite `account_id` por padrão: F4 o preenche pela sessão autenticada.
+O chamador deve passar `workspace` explícito de uma configuração autorizada, nunca
+inferido do título ou email. `source_id` e `proveniencia.origem_id` são estáveis por
+reunião; o hash identifica a revisão, não cria outro documento a cada correção.
 
-Provas: 15 testes novos de integridade, retry, ACK e corrupção. O teste HTTP local
+Após qualquer tentativa, consulta somente pela chave. Só o erro estruturado
+`unknown_idempotency_key` de `brain_ingest` autoriza reenviar o envelope congelado,
+sem trocar workspace. Consulta exige identidade da origem e do job, tipos estritos,
+checkpoint e estado válidos. `source_tombstoned` tipado e `superseded` são terminais;
+HTTP 404 ou outra tool não prova exclusão. Nenhum desses caminhos usa `remember`.
+
+O chamador ainda precisa escolher o checkpoint da REVISÃO ATUAL: um job antigo
+completed pode continuar completed depois de outro substituí-lo. Nunca agregar
+esse recibo antigo como conclusão da reunião atual. A integração de sync/adapter
+e essa prova ponta a ponta ainda estão pendentes, assim como destino real de Nora.
+
+Provas atuais: 23 testes de integridade, retry, ACK, autorização e corrupção. O teste HTTP local
 usa o transporte MCP real: aceita o pedido, fecha a conexão antes do recibo e
-confirma que outra instância do cliente reutiliza a mesma chave e um único job.
-Com dois testes adicionais de notificação ausente, são 208 testes Python verdes.
-Um envelope sintético de 136.000 bytes produzido pelo Python passou
-no `parseBronzeRequest` real do F4 na VPS com conta de fixture explícita. Nenhum
-conteúdo pessoal foi enviado e nenhum banco de produção foi conectado.
+confirma que outra instância consulta pela mesma chave e um único job.
+O pedido atualizado passou no parser TypeScript REAL do F4 f45050b: 136.000 bytes
+Unicode/CRLF, texto e hash exatos, workspace explícito, source_id/origem_id estáveis,
+conta preenchida só na fronteira sintética. A revisão auxiliar local não encontrou
+bloqueador neste diff. Nenhum conteúdo pessoal foi enviado e nenhum banco de
+produção foi conectado. Essa prova não substitui review Claude ou integração real.
 
 Reversão futura: desligar a seleção do novo transporte, preservar `.brain-ingest`
 e não reenviar pelo legado origens já recebidas pelo F4. Checkpoints e originais
