@@ -1,12 +1,16 @@
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import socket
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock
 
 from castanha.bronze_ingest import (BronzeIngestError, build_transcript_request,
                                     prepare_transcript_upload, submit_transcript_upload)
+from castanha.zinom_adapter import ZinomMcpClient
 
 
 class TestBronzeEnvelope(unittest.TestCase):
@@ -129,6 +133,67 @@ class TestBronzeUpload(unittest.TestCase):
             self.prepare()
         client.connect.assert_not_called()
         self.assertEqual(self.path.read_bytes(), original)
+
+    def test_real_http_lost_response_reuses_one_server_job(self):
+        accepted = {}
+        calls = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass  # Fixture sem log de cabeçalhos ou payload.
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.headers.get("Authorization") != "Bearer fixture-only":
+                    self.send_error(401)
+                    return
+                method = body["method"]
+                if method == "notifications/initialized":
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                result = {"protocolVersion": "2025-06-18", "capabilities": {}}
+                if method == "tools/call":
+                    calls.append(body["params"])
+                    request = body["params"]["arguments"]
+                    key = request["idempotency_key"]
+                    if key not in accepted:
+                        accepted[key] = request
+                        # Servidor aceitou, mas a conexão cai antes do recibo.
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        return
+                    result = {"content": [{"type": "text", "text": json.dumps({
+                        "ok": True, "jobId": 12, "revisionId": 34,
+                        "idempotent": True, "status": "completed"})}]}
+                encoded = json.dumps({"jsonrpc": "2.0", "id": body["id"],
+                                      "result": result}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("mcp-session-id", "fixture-session")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            endpoint = f"http://127.0.0.1:{server.server_port}/mcp"
+            client = ZinomMcpClient(endpoint, "fixture-only", timeout=2)
+            self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+            # Nova instância de transporte simula reinício, sem sessão em memória.
+            client = ZinomMcpClient(endpoint, "fixture-only", timeout=2)
+            checkpoint = self.prepare("2026-09-06T18:00:00-03:00")
+            self.assertEqual(submit_transcript_upload(checkpoint, client)["status"], "ok")
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], calls[1])
+            self.assertEqual(calls[0]["name"], "brain_ingest")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

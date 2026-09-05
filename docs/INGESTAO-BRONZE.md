@@ -24,8 +24,11 @@ O envelope pode omitir `account_id` na fronteira MCP, que deve preenchê-lo pela
 sessão autenticada antes da validação canônica. Esse ajuste ainda depende do F4.
 Conta explícita deve ser conferida pelo servidor, nunca inferida do email.
 
-Provas: 14 testes novos de integridade, retry, ACK e corrupção; 205 testes Python
-totais verdes. Um envelope sintético de 136.000 bytes produzido pelo Python passou
+Provas: 15 testes novos de integridade, retry, ACK e corrupção. O teste HTTP local
+usa o transporte MCP real: aceita o pedido, fecha a conexão antes do recibo e
+confirma que outra instância do cliente reutiliza a mesma chave e um único job.
+Com dois testes adicionais de notificação ausente, são 208 testes Python verdes.
+Um envelope sintético de 136.000 bytes produzido pelo Python passou
 no `parseBronzeRequest` real do F4 na VPS com conta de fixture explícita. Nenhum
 conteúdo pessoal foi enviado e nenhum banco de produção foi conectado.
 
