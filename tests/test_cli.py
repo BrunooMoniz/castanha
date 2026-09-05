@@ -26,7 +26,7 @@ class TestCLI(unittest.TestCase):
                 "gold_dir": str(self.gold),
             },
             "llm": {"api_key": ""},
-            "transcription": {"groq_api_key": ""},
+            "transcription": {"groq_api_key": "", "vps_ssh_host": "nonexistent"},
             "zinom": {"enabled": False},
         }), encoding="utf-8")
 
@@ -131,6 +131,59 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(res_alias.returncode, 0)
         data_alias = json.loads(res_alias.stdout)
         self.assertEqual(data_alias["status"], "ok")
+
+    def test_cli_retry_reprocess(self):
+        slug = "2026-09-05_1300_falha-teste"
+        m_bronze = self.bronze / slug
+        m_bronze.mkdir(parents=True, exist_ok=True)
+        # Gera áudio de teste com ffmpeg para passar na verificação de canais
+        audio_file = m_bronze / "audio.ogg"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1", "-c:a", "libopus", "-b:a", "64k", str(audio_file)],
+            capture_output=True, check=True
+        )
+        (m_bronze / "transcript_raw.txt").write_text("", encoding="utf-8")
+        (m_bronze / "metadata.json").write_text(json.dumps({
+            "title": "Reunião Falha Inicial",
+            "slug": slug,
+            "recorded_at": "2026-09-05T13:00:00",
+            "duration_seconds": 1.0,
+            "transcription_provider": "failed",
+            "transcription_error": "Connection timed out",
+            "recordings": [{
+                "id": "audio.ogg",
+                "filename": "audio.ogg",
+                "path": str(audio_file),
+                "size_bytes": audio_file.stat().st_size,
+                "size_human": "10 KB",
+                "duration_seconds": 1.0,
+            }],
+        }), encoding="utf-8")
+
+        # 1. notes --json mostra can_retry = True
+        res_notes = self._run_cli("notes", "--json")
+        notes_data = json.loads(res_notes.stdout)
+        matching = [n for n in notes_data["notes"] if n["slug"] == slug]
+        self.assertTrue(len(matching) == 1)
+        self.assertTrue(matching[0]["can_retry"])
+
+        # 2. Executa retry
+        res_retry = self._run_cli("retry", slug, "--json")
+        self.assertEqual(res_retry.returncode, 0)
+        retry_data = json.loads(res_retry.stdout)
+        self.assertTrue(len(retry_data["results"]) > 0)
+        self.assertIn(retry_data["results"][0]["status"], ("success", "partial"))
+
+        # 3. Transcrição e notas foram geradas
+        self.assertTrue((self.silver / f"{slug}.md").exists())
+        raw_text = (m_bronze / "transcript_raw.txt").read_text(encoding="utf-8")
+        self.assertTrue(len(raw_text) > 0)
+
+        # 4. can_retry agora é False
+        res_notes2 = self._run_cli("notes", "--json")
+        notes_data2 = json.loads(res_notes2.stdout)
+        matching2 = [n for n in notes_data2["notes"] if n["slug"] == slug]
+        self.assertFalse(matching2[0]["can_retry"])
 
 if __name__ == "__main__":
     unittest.main()

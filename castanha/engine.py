@@ -1,7 +1,9 @@
 """Coordenador principal do Castanha (orquestra áudio, transcrição, notas e armazenamento)."""
 
+import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +51,36 @@ class CastanhaEngine:
 
     def get_status(self) -> Dict[str, Any]:
         return self.state_mgr.read()
+
+    def _transcribe_with_fallback(self, audio_path: Path, mode: str, estimated_sec: float):
+        """Transcreve com o provedor escolhido e, se ele cair, UMA vez pela VPS.
+
+        Devolve (texto, provedor, erro). Em 05/09/2026 a Groq recusou um áudio
+        de 65 MB e o fallback para a VPS rodou duas vezes, uma dentro do
+        transcritor e outra aqui, cada uma esperando 10 minutos: vinte minutos
+        de "processando" para terminar sem transcrição. O fallback mora só aqui.
+        """
+        # Import local: o teste troca esta classe por mock em tempo de chamada.
+        from castanha.transcription import VpsSshTranscriber
+
+        transcriber = get_transcriber(estimated_duration_sec=estimated_sec)
+        try:
+            trans_res = transcriber.transcribe(audio_path, mode=mode)
+            return trans_res.text, getattr(trans_res, "provider", transcriber.__class__.__name__), None
+        except Exception as e:
+            # Pelo nome, e não por isinstance: com a classe trocada por mock,
+            # isinstance estoura.
+            if transcriber.__class__.__name__ == "VpsSshTranscriber":
+                return "", "failed", str(e)
+            print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...", file=sys.stderr)
+            host = (self.config.get("transcription", {}) or {}).get("vps_ssh_host") or "zinom-vps-2"
+            try:
+                trans_res = VpsSshTranscriber(host).transcribe(audio_path, mode=mode)
+                return trans_res.text, trans_res.provider, None
+            except Exception as err2:
+                # Vazio, e não a mensagem de erro: string não vazia ia para a
+                # LLM e virava um "resumo" fabricado em cima de um traceback.
+                return "", "failed", str(err2)
 
     def start_recording(
         self,
@@ -222,24 +254,9 @@ class CastanhaEngine:
             provider_name = "nenhum (áudio em silêncio)"
         else:
             estimated = real_duration or state.get("elapsed_seconds") or 60
-            transcriber = get_transcriber(estimated_duration_sec=estimated)
-            try:
-                trans_res = transcriber.transcribe(audio_path, mode=mode)
-                raw_transcript = trans_res.text
-                provider_name = getattr(trans_res, "provider", getattr(transcriber, "__class__", {}).__name__)
-            except Exception as e:
-                print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...")
-                try:
-                    from castanha.transcription import VpsSshTranscriber
-                    trans_res = VpsSshTranscriber().transcribe(audio_path, mode=mode)
-                    raw_transcript = trans_res.text
-                    provider_name = trans_res.provider
-                except Exception as err2:
-                    # Vazio, e não a mensagem de erro: string não vazia ia para a
-                    # LLM e virava um "resumo" fabricado em cima de um traceback.
-                    raw_transcript = ""
-                    transcription_error = str(err2)
-                    provider_name = "failed"
+            raw_transcript, provider_name, transcription_error = self._transcribe_with_fallback(
+                audio_path, mode, estimated
+            )
 
         # 3. Metadados e Bronze
         target_slug = state.get("target_meeting_slug")
@@ -368,3 +385,109 @@ class CastanhaEngine:
                     self.state_mgr.write({"last_result": last_res})
         return res
 
+    def reprocess_meeting(self, slug: str) -> Dict[str, Any]:
+        """Roda de novo a esteira (transcrição, Silver, Gold, Zinom) de uma reunião do Bronze.
+
+        É a segunda chance da gravação que ficou sem transcrição: sem internet
+        na hora do `stop`, Groq fora do ar, VPS lenta. O áudio nunca sai do
+        Bronze, então repetir é seguro e idempotente.
+        """
+        bronze_dir = self.storage.bronze_dir / slug
+        if not bronze_dir.exists():
+            return {"status": "error", "message": f"Reunião '{slug}' não encontrada no Bronze."}
+
+        meta = self.storage._read_bronze_metadata(slug)
+        title = meta.get("title") or slug
+        mode = meta.get("mode") or "dual"
+
+        recordings = self.storage.list_meeting_recordings(slug)
+        if not recordings:
+            return {"status": "error", "message": f"Nenhum arquivo de áudio encontrado para a reunião '{slug}'."}
+
+        audio_path = Path(recordings[0]["path"])
+        if not audio_path.exists() or audio_path.stat().st_size == 0:
+            return {"status": "error", "message": f"Arquivo de áudio '{audio_path.name}' não existe ou está vazio."}
+
+        notify("Reprocessando Reunião ⏳", f"{title}\nEnviando para transcrição e gerando notas...")
+
+        # 1. Sanidade do áudio
+        levels = measure_channel_levels(audio_path, mode=mode)
+        audio_status = classify_audio(levels)
+        audio_levels = [
+            {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
+             "max_db": ch.max_db, "silencio": ch.silent}
+            for ch in levels
+        ]
+        real_duration = probe_duration_seconds(audio_path) or meta.get("duration_seconds", 0)
+
+        # 2. Transcrição
+        transcription_error = None
+        if audio_status == "sem_audio":
+            raw_transcript = ""
+            provider_name = "nenhum (áudio em silêncio)"
+        else:
+            estimated = real_duration or 60.0
+            raw_transcript, provider_name, transcription_error = self._transcribe_with_fallback(
+                audio_path, mode, estimated
+            )
+
+        # 3. Salva transcript_raw.txt e atualiza metadata.json
+        transcript_file = bronze_dir / "transcript_raw.txt"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(raw_transcript)
+
+        meta["transcription_provider"] = provider_name
+        meta["transcription_error"] = transcription_error
+        meta["audio_status"] = audio_status
+        meta["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(audio_status, "")
+        meta["audio_levels"] = audio_levels
+        meta["duration_seconds"] = real_duration
+        meta_file = bronze_dir / "metadata.json"
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+
+        # 4. Processamento Silver (Markdown)
+        silver_content = self.summarizer.generate_silver(meta, raw_transcript)
+        silver_path = self.storage.save_silver(slug, silver_content)
+
+        # 5. Processamento Gold (Fatos para Zinom / LLM Wiki)
+        gold_data = self.summarizer.generate_gold(meta, silver_content, raw_transcript)
+        gold_path = self.storage.save_gold(slug, gold_data)
+
+        # 6. Ingestão Zinom
+        zinom_status = self.zinom.ingest_meeting(meta, silver_content, gold_data)
+        self.storage.record_zinom_result(slug, zinom_status)
+
+        result_summary = {
+            "slug": slug,
+            "title": title,
+            "bronze_dir": str(bronze_dir),
+            "silver_file": str(silver_path),
+            "gold_file": str(gold_path),
+            "audio_status": audio_status,
+            "audio_diagnostico": AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+            "transcription_provider": provider_name,
+            "transcription_error": transcription_error,
+            "zinom": zinom_status,
+        }
+
+        # Atualiza o state caso seja a última reunião
+        state = self.state_mgr.read()
+        last_res = state.get("last_result")
+        if last_res and last_res.get("slug") == slug:
+            self.state_mgr.write({"last_result": result_summary})
+
+        problemas = []
+        if provider_name == "failed":
+            problemas.append(f"a transcrição falhou ({transcription_error})")
+            notify("Falha ao reprocessar ⚠️", f"{title}\nNão foi possível transcrever o áudio.", timeout=10000)
+        else:
+            notify("Reunião Reprocessada! 🌰", f"{title}\nNotas e fatos atualizados.")
+
+        if audio_status in ("sem_audio", "mic_mudo"):
+            problemas.append(AUDIO_STATUS_MESSAGES.get(audio_status, audio_status))
+        if isinstance(zinom_status, dict) and zinom_status.get("status") == "error":
+            problemas.extend(zinom_status.get("errors", []))
+        result_summary["problemas"] = problemas
+
+        return {"status": "partial" if problemas else "success", "result": result_summary}

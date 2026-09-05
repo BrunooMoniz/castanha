@@ -279,6 +279,74 @@ def cmd_sync(args):
         sys.exit(2)
 
 
+def cmd_retry(args):
+    """Tenta reenviar áudio para transcrição e rodar toda a esteira (Silver, Gold, Zinom)."""
+    engine = CastanhaEngine()
+    storage = engine.storage
+
+    if args.all:
+        recentes = storage.list_recent_meetings(limit=args.limit)
+        pendentes = [m["slug"] for m in recentes if m.get("can_retry")]
+        if not pendentes:
+            if getattr(args, "json", False):
+                print(json.dumps({"status": "ok", "message": "Nenhuma reunião pendente.", "results": []}, ensure_ascii=False))
+            else:
+                print("Nada pendente: nenhuma reunião com áudio aguardando transcrição.")
+            return
+        slugs = pendentes
+    elif args.slug:
+        slug = args.slug
+        if slug in ("last", "latest"):
+            recentes = storage.list_recent_meetings(limit=1)
+            if not recentes:
+                print("Nenhuma reunião encontrada.")
+                sys.exit(1)
+            slug = recentes[0]["slug"]
+        slugs = [slug]
+    else:
+        recentes = storage.list_recent_meetings(limit=5)
+        if not recentes:
+            print("Nenhuma reunião encontrada.")
+            sys.exit(1)
+        pendente = next((m["slug"] for m in recentes if m.get("can_retry")), None)
+        slugs = [pendente or recentes[0]["slug"]]
+
+    resultados = []
+    falhou = False
+    for s in slugs:
+        if not getattr(args, "json", False):
+            print(f"⏳ Reprocessando reunião '{s}'...")
+        res = engine.reprocess_meeting(s)
+        resultados.append({"slug": s, **res})
+        if res.get("status") not in ("success", "partial"):
+            falhou = True
+
+    if getattr(args, "json", False):
+        print(json.dumps({"results": resultados}, ensure_ascii=False))
+        if falhou:
+            sys.exit(1)
+        return
+
+    for r in resultados:
+        if r.get("status") in ("success", "partial"):
+            res_data = r.get("result", {})
+            problemas = res_data.get("problemas") or []
+            if not problemas:
+                print(f"✅ {r['slug']}: áudio transcrito e notas geradas com sucesso!")
+            else:
+                print(f"⚠️  {r['slug']}: reprocessado com observações:")
+                for p in problemas:
+                    print(f"     · {p}")
+            print(f"   📁 Bronze: {res_data.get('bronze_dir')}")
+            print(f"   📝 Silver: {res_data.get('silver_file')}")
+            print(f"   🧠 Gold:   {res_data.get('gold_file')}")
+        else:
+            print(f"❌ {r['slug']}: erro ao reprocessar ({r.get('message')})")
+
+    if falhou:
+        sys.exit(2)
+
+
 def cmd_agenda(args):
     from castanha.agenda import collect_upcoming
     proximas = collect_upcoming(window_minutes=args.horas * 60)
@@ -488,6 +556,18 @@ def main():
     p_sync.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
     p_sync.add_argument("--json", action="store_true", help="Saída em JSON")
     p_sync.set_defaults(func=cmd_sync)
+
+    # Retry / Reprocess
+    p_retry = subparsers.add_parser(
+        "retry",
+        aliases=["reprocess", "retry-upload", "retry-transcription"],
+        help="Tenta reenviar áudio para transcrição e processar notas/fatos/Zinom",
+    )
+    p_retry.add_argument("slug", nargs="?", default=None, help="Slug da reunião (ou 'last' para a última)")
+    p_retry.add_argument("--all", action="store_true", help="Reprocessa todas as reuniões pendentes de transcrição")
+    p_retry.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
+    p_retry.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_retry.set_defaults(func=cmd_retry)
 
     # Agenda
     p_agenda = subparsers.add_parser("agenda", help="Próximas reuniões das contas Google conectadas no Zinom")

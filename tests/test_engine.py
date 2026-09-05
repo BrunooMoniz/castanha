@@ -182,6 +182,41 @@ class TestEngine(unittest.TestCase):
         self.assertNotIn("groq caiu", silver)
         self.assertNotIn("vps fora do ar", silver)
 
+    def test_fallback_para_vps_roda_uma_vez_so(self):
+        """Groq caiu: a VPS é tentada UMA vez, e não duas (05/09/2026: dois uploads de 65 MB)."""
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+
+        with patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=42.0), \
+             patch("castanha.engine.get_transcriber") as get_t, \
+             patch("castanha.transcription.VpsSshTranscriber") as vps, \
+             patch("castanha.engine.notify"), patch("os.kill"):
+            get_t.return_value.transcribe.side_effect = RuntimeError("groq caiu")
+            vps.return_value.transcribe.side_effect = RuntimeError("vps fora do ar")
+            res = engine.stop_recording()
+
+        self.assertEqual(res["result"]["transcription_provider"], "failed")
+        self.assertEqual(vps.return_value.transcribe.call_count, 1)
+
+    def test_vps_como_primario_nao_tenta_a_vps_de_novo(self):
+        """Sem orçamento para a Groq, o primário já é a VPS: falhou, acabou."""
+        from castanha.transcription import VpsSshTranscriber
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+
+        with patch("castanha.engine.measure_channel_levels", return_value=_levels(False, True)), \
+             patch("castanha.engine.probe_duration_seconds", return_value=42.0), \
+             patch("castanha.engine.get_transcriber", return_value=VpsSshTranscriber("host-teste")), \
+             patch.object(VpsSshTranscriber, "transcribe", side_effect=RuntimeError("vps caiu")) as t, \
+             patch("castanha.engine.notify"), patch("os.kill"):
+            res = engine.stop_recording()
+
+        self.assertEqual(res["result"]["transcription_provider"], "failed")
+        self.assertEqual(t.call_count, 1)
+
     def test_gravacao_boa_nao_lista_problema(self):
         engine = self._engine()
         with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):

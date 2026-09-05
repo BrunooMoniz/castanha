@@ -150,3 +150,58 @@ class TestStorage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPodeReprocessar(unittest.TestCase):
+    """O botão de "tentar de novo" só aparece quando repetir pode render transcrição."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.storage = MeetingStorage(base_dir=self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _bronze(self, slug, transcript="", **meta):
+        d = self.storage.bronze_dir / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "audio.ogg").write_bytes(b"x" * 1024)
+        (d / "transcript_raw.txt").write_text(transcript, encoding="utf-8")
+        base = {
+            "slug": slug, "title": slug, "recorded_at": "2026-09-05T10:00:00", "mode": "dual",
+            "recordings": [{"id": "audio.ogg", "filename": "audio.ogg", "path": str(d / "audio.ogg"),
+                            "size_bytes": 1024, "size_human": "1 KB", "duration_seconds": 10.0}],
+        }
+        base.update(meta)
+        (d / "metadata.json").write_text(json.dumps(base), encoding="utf-8")
+        return slug
+
+    def _flag(self, slug):
+        return self.storage.get_meeting(slug)["can_retry"]
+
+    def test_transcricao_falhou_pode(self):
+        slug = self._bronze("a", transcription_provider="failed", transcription_error="timeout", audio_status="ok")
+        self.assertTrue(self._flag(slug))
+        self.assertTrue(any(m["can_retry"] for m in self.storage.list_recent_meetings() if m["slug"] == slug))
+
+    def test_transcrita_nao_pode(self):
+        slug = self._bronze("b", transcript="fala transcrita", transcription_provider="groq", audio_status="ok")
+        self.assertFalse(self._flag(slug))
+
+    def test_gravacao_muda_nao_ganha_botao(self):
+        slug = self._bronze("c", transcription_provider="nenhum (áudio em silêncio)", audio_status="sem_audio")
+        self.assertFalse(self._flag(slug))
+
+    def test_sem_audio_no_bronze_nao_pode(self):
+        slug = self._bronze("d", transcription_provider="failed", audio_status="ok")
+        (self.storage.bronze_dir / slug / "audio.ogg").unlink()
+        meta = json.loads((self.storage.bronze_dir / slug / "metadata.json").read_text())
+        meta["recordings"] = []
+        (self.storage.bronze_dir / slug / "metadata.json").write_text(json.dumps(meta))
+        self.assertFalse(self._flag(slug))
+
+    def test_reuniao_so_no_bronze_aparece_na_lista(self):
+        """Sem Silver (a esteira morreu antes), a reunião ainda tem que aparecer para dar a segunda chance."""
+        slug = self._bronze("e", transcription_provider="failed", audio_status="ok")
+        slugs = [m["slug"] for m in self.storage.list_recent_meetings()]
+        self.assertIn(slug, slugs)
