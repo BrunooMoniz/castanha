@@ -273,6 +273,161 @@ class TestBronzeCaller(unittest.TestCase):
         self.assertEqual(len(self.client.calls), calls)
         self.assertEqual(pending_candidates(self.storage), [])
 
+    def terminal_fixture(self, slug="fixture", *, state="tombstoned", crash=False):
+        self.assertEqual(sync_meeting(slug, self.storage)["status"], "ok")
+        key = list(self.client.requests)[-1]
+        self.client.states[key] = state
+        if crash:
+            class MetadataCrash(BaseException):
+                pass
+            with patch.object(self.storage, "record_zinom_result", side_effect=MetadataCrash):
+                with self.assertRaises(MetadataCrash):
+                    sync_meeting(slug, self.storage)
+        else:
+            self.assertEqual(sync_meeting(slug, self.storage)["status"], state)
+        bronze = self.storage.bronze_dir / slug
+        paths = [p for p in (bronze / ".brain-ingest").glob("*.json")
+                 if p.name not in ("destination.json", "terminal-evidence.json")]
+        self.assertEqual(len(paths), 1)
+        return paths[0]
+
+    def test_terminal_checkpoint_corruption_blocks_changed_text_even_after_crash(self):
+        mutations = {
+            "origin": lambda cp: cp["request"]["envelope"].update(source_id="castanha:corrupt"),
+            "missing_origin": lambda cp: cp["request"]["envelope"].pop("source_id"),
+            "provenance": lambda cp: cp["request"]["envelope"]["proveniencia"].update(origem_id="wrong"),
+            "key": lambda cp: cp["request"].update(idempotency_key="wrong"),
+            "receipt_origin": lambda cp: cp["result"]["ingestion"].update(source_id="wrong"),
+            "remote_identity": lambda cp: cp["remote_identity"].update(job_id=999),
+        }
+        for crash in (False, True):
+            for label, mutate in mutations.items():
+                with self.subTest(crash=crash, field=label):
+                    slug = f"corrupt-{crash}-{label}"
+                    bronze = self.meeting(slug)
+                    checkpoint = self.terminal_fixture(slug, crash=crash)
+                    saved = json.loads(checkpoint.read_bytes())
+                    mutate(saved)
+                    write_json(checkpoint, saved)
+                    evidence = checkpoint.read_bytes()
+                    self.save_job(bronze, "native-" + slug, "Alteração depois da exclusão")
+                    calls = len(self.client.calls)
+                    names = set((bronze / ".brain-ingest").iterdir())
+                    for _ in range(3):
+                        self.assertEqual(sync_meeting(slug, self.storage)["status"], "error")
+                        self.assertIn(slug, [s for _, s in pending_candidates(self.storage)])
+                    self.assertEqual(len(self.client.calls), calls)
+                    self.assertEqual(checkpoint.read_bytes(), evidence)
+                    self.assertEqual(set((bronze / ".brain-ingest").iterdir()), names)
+
+    def test_independent_terminal_registry_detects_loss_and_conflict_without_metadata(self):
+        for damage in ("checkpoint_deleted", "checkpoint_renamed", "registry_deleted",
+                       "registry_corrupt", "registry_conflict", "terminal_downgraded"):
+            with self.subTest(damage=damage):
+                bronze = self.meeting(damage)
+                checkpoint = self.terminal_fixture(damage)
+                registry = bronze / ".brain-ingest/terminal-evidence.json"
+                self.assertTrue(registry.exists())
+                meta = json.loads((bronze / "metadata.json").read_bytes())
+                meta.pop("zinom")
+                write_json(bronze / "metadata.json", meta)
+                if damage == "checkpoint_deleted":
+                    checkpoint.unlink()
+                elif damage == "checkpoint_renamed":
+                    checkpoint.rename(checkpoint.with_name("wrong.json"))
+                elif damage == "registry_deleted":
+                    registry.unlink()
+                elif damage == "registry_corrupt":
+                    registry.write_text("corrupt")
+                elif damage == "registry_conflict":
+                    ledger = json.loads(registry.read_bytes())
+                    ledger[checkpoint.name]["source_id"] = "wrong"
+                    write_json(registry, ledger)
+                else:
+                    cp = json.loads(checkpoint.read_bytes())
+                    cp.update(status="prepared")
+                    cp.pop("result")
+                    cp.pop("remote_identity")
+                    write_json(checkpoint, cp)
+                self.save_job(bronze, "native-" + damage, "Texto modificado")
+                calls = len(self.client.calls)
+                for _ in range(3):
+                    self.assertEqual(sync_meeting(damage, self.storage)["status"], "error")
+                self.assertEqual(len(self.client.calls), calls)
+
+    def test_changed_terminal_text_creates_no_revision_and_b_stays_sendable(self):
+        for state in ("tombstoned", "superseded"):
+            with self.subTest(state=state):
+                slug = "stable-" + state
+                bronze = self.meeting(slug)
+                checkpoint = self.terminal_fixture(slug, state=state)
+                before = checkpoint.read_bytes()
+                registry = bronze / ".brain-ingest/terminal-evidence.json"
+                terminal_evidence = registry.read_bytes()
+                self.save_job(bronze, "native-" + slug, "A mudou após estado terminal")
+                meta = json.loads((bronze / "metadata.json").read_bytes())
+                native_b = "b-" + state
+                self.save_job(bronze, native_b, "B independente")
+                meta["recordings"].append({"id": "b.ogg", "job_id": native_b,
+                                            "transcription_provider": "groq"})
+                meta["memory_recording_ids"].append("b.ogg")
+                write_json(bronze / "metadata.json", meta)
+                calls = len(self.client.calls)
+                for _ in range(3):
+                    result = sync_meeting(slug, self.storage)
+                    self.assertEqual([r["status"] for r in result["source"]["revisions"]], [state, "ok"])
+                new_calls = self.client.calls[calls:]
+                self.assertEqual(sum("envelope" in args for _, args in new_calls), 1)
+                self.assertTrue(all(args["idempotency_key"] != json.loads(before)["request"]["idempotency_key"]
+                                    for _, args in new_calls))
+                self.assertEqual(checkpoint.read_bytes(), before)
+                self.assertEqual(registry.read_bytes(), terminal_evidence)
+                self.assertNotIn(slug, [s for _, s in pending_candidates(self.storage)])
+                checkpoints = [p for p in (bronze / ".brain-ingest").glob("*.json")
+                               if p.name not in ("destination.json", "terminal-evidence.json")]
+                self.assertEqual(len(checkpoints), 2)
+
+    def test_completed_destination_changes_stay_in_inventory_without_new_identity(self):
+        for field, changed in (("endpoint", "http://changed.invalid/mcp"),
+                               ("token", "rotated-fixture-only"), ("workspace", "different-workspace"),
+                               ("account_id", "different-account")):
+            with self.subTest(field=field):
+                slug = "destination-" + field
+                bronze = self.meeting(slug)
+                self.assertEqual(sync_meeting(slug, self.storage)["status"], "ok")
+                before = {p.name: p.read_bytes() for p in (bronze / ".brain-ingest").glob("*.json")}
+                old = self.config["zinom"].get(field)
+                self.config["zinom"][field] = changed
+                if field in ("endpoint", "token"):
+                    setattr(self.client, field, changed)
+                calls = len(self.client.calls)
+                for _ in range(3):
+                    self.assertIn(slug, [s for _, s in pending_candidates(self.storage)])
+                    self.assertEqual(sync_meeting(slug, self.storage)["status"], "error")
+                self.assertEqual(len(self.client.calls), calls)
+                self.assertEqual({p.name: p.read_bytes() for p in (bronze / ".brain-ingest").glob("*.json")}, before)
+                self.config["zinom"][field] = old
+                if field in ("endpoint", "token"):
+                    setattr(self.client, field, old)
+                self.assertEqual(sync_meeting(slug, self.storage)["status"], "ok")
+                self.assertEqual(list(self.client.calls[-1][1]), ["idempotency_key"])
+                self.assertNotIn(slug, [s for _, s in pending_candidates(self.storage)])
+
+    def test_lost_destination_is_not_refrozen_or_sent_to_legacy(self):
+        self.terminal_fixture()
+        (self.bronze / ".brain-ingest/destination.json").unlink()
+        calls = len(self.client.calls)
+        self.config["zinom"]["bronze_ingest_enabled"] = False
+        meta = self.metadata()
+        meta.pop("zinom")
+        write_json(self.bronze / "metadata.json", meta)
+        self.assertEqual(sync_meeting("fixture", self.storage)["status"], "pending")
+        self.config["zinom"]["bronze_ingest_enabled"] = True
+        self.assertIn("fixture", [s for _, s in pending_candidates(self.storage)])
+        self.assertEqual(sync_meeting("fixture", self.storage)["status"], "error")
+        self.assertFalse((self.bronze / ".brain-ingest/destination.json").exists())
+        self.assertEqual(len(self.client.calls), calls)
+
     def test_concurrent_sync_freezes_one_request(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: sync_meeting("fixture", self.storage), range(2)))

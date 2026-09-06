@@ -311,7 +311,7 @@ class ZinomAdapter:
         safe_slug = isinstance(slug, str) and slug not in ("", ".", "..") and "/" not in slug and "\\" not in slug
         bronze = (Path(bronze_directory) if bronze_directory is not None else
                   self.bronze_dir / slug if safe_slug else None)
-        has_bronze_history = bronze is not None and (bronze / ".brain-ingest" / "destination.json").exists()
+        has_bronze_history = bronze is not None and (bronze / ".brain-ingest").exists()
         if self.bronze_enabled or has_bronze_history or (isinstance(source, dict) and source.get("transport") == "bronze"):
             pending_source = {**source, "transport": "bronze"} if isinstance(source, dict) else {"transport": "bronze"}
             if not self.bronze_enabled or not self.enabled or not self.token:

@@ -25,22 +25,98 @@ def has_origin_receipts(delivery: dict) -> bool:
             and isinstance(source.get("revisions"), list) and bool(source["revisions"]))
 
 
-def _verify_terminal_receipts(directory: Path, metadata: dict):
+TERMINAL_STATES = ("tombstoned", "superseded")
+TERMINAL_EVIDENCE = "terminal-evidence.json"
+
+
+def _read_checkpoint(path: Path) -> dict:
+    """Valida inclusive revisões antigas, antes de confiar em sua origem."""
+    saved = json.loads(path.read_bytes())
+    request = saved["request"]
+    envelope = request["envelope"]
+    origin = envelope["source_id"]
+    provenance = envelope["proveniencia"]
+    canonical = json.dumps({"envelope": envelope, "facts": request["facts"]},
+                           sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    if (not isinstance(origin, str) or not origin.startswith("castanha:") or
+            len(origin) != 73 or any(c not in "0123456789abcdef" for c in origin[9:]) or
+            provenance["origem_id"] != origin or envelope["source_type"] != "castanha" or
+            provenance["sha256_texto"] != _sha(envelope["texto"]) or
+            request["idempotency_key"] != "castanha:v1:" + _sha(canonical) or
+            path.name != revision_fingerprint(request) + ".json"):
+        raise BronzeIngestError("Identidade do checkpoint ausente ou divergente")
+    result = saved.get("result")
+    if result is not None:
+        if not isinstance(result, dict) or result.get("status") != saved.get("status"):
+            raise BronzeIngestError("Estado do checkpoint diverge do recibo")
+        ingestion = result.get("ingestion")
+        if ingestion is not None and (
+                ingestion.get("source_id") != origin or
+                saved.get("remote_identity") != {"job_id": ingestion.get("job_id"),
+                                                  "revision_id": ingestion.get("revision_id")}):
+            raise BronzeIngestError("Origem ou identidade remota divergente")
+    if saved.get("status") in TERMINAL_STATES:
+        if not isinstance(result, dict) or result.get("status") != saved["status"]:
+            raise BronzeIngestError("Recibo terminal ausente")
+        if result.get("ingestion", {}).get("state") != saved["status"] and not (
+                saved["status"] == "tombstoned" and result.get("error_type") == "ZinomError"):
+            raise BronzeIngestError("Evidência terminal inválida")
+    return saved
+
+
+def _terminal_entry(saved: dict) -> dict:
+    request = saved["request"]
+    return {"source_id": request["envelope"]["source_id"],
+            "idempotency_key": request["idempotency_key"], "result": saved["result"]}
+
+
+def _verify_terminal_receipts(directory: Path, metadata: dict) -> dict:
+    # Validar TODO o histórico: uma origem corrompida não pode simplesmente
+    # deixar de corresponder à busca e liberar outra revisão após um crash.
+    checkpoints = {path.name: _read_checkpoint(path) for path in directory.glob("*.json")
+                   if path.name not in ("destination.json", TERMINAL_EVIDENCE)}
+    evidence_path = directory / TERMINAL_EVIDENCE
+    evidence = json.loads(evidence_path.read_bytes()) if evidence_path.exists() else {}
+    if not isinstance(evidence, dict):
+        raise BronzeIngestError("Registro terminal inválido")
+    for name, entry in evidence.items():
+        saved = checkpoints.get(name)
+        if (saved is None or saved.get("status") not in TERMINAL_STATES or
+                entry != _terminal_entry(saved)):
+            raise BronzeIngestError("Evidência terminal independente ausente ou divergente")
+    for name, saved in checkpoints.items():
+        if saved.get("terminal_evidence") is True and name not in evidence:
+            raise BronzeIngestError("Registro terminal independente perdido")
     delivery = metadata.get("zinom") or {}
-    if not has_origin_receipts(delivery):
-        return
-    for receipt in delivery["source"]["revisions"]:
-        if not isinstance(receipt, dict):
-            raise BronzeIngestError("Recibo de origem inválido")
-        if receipt.get("status") not in ("tombstoned", "superseded"):
-            continue
-        name = receipt.get("checkpoint")
-        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".json"):
-            raise BronzeIngestError("Checkpoint terminal inválido")
-        saved = json.loads((directory / name).read_bytes())
-        if (saved.get("status") != receipt["status"] or
-                saved.get("result") != {k: v for k, v in receipt.items() if k != "checkpoint"}):
-            raise BronzeIngestError("Evidência terminal ausente ou divergente")
+    if has_origin_receipts(delivery):
+        for receipt in delivery["source"]["revisions"]:
+            if not isinstance(receipt, dict):
+                raise BronzeIngestError("Recibo de origem inválido")
+            if receipt.get("status") not in TERMINAL_STATES:
+                continue
+            name = receipt.get("checkpoint")
+            if not isinstance(name, str) or name not in checkpoints:
+                raise BronzeIngestError("Checkpoint terminal ausente")
+            saved = checkpoints[name]
+            if (saved.get("status") != receipt["status"] or saved.get("result") !=
+                    {k: v for k, v in receipt.items() if k != "checkpoint"}):
+                raise BronzeIngestError("Evidência terminal ausente ou divergente")
+    return checkpoints
+
+
+def _persist_terminal_evidence(checkpoint: Path, saved: dict):
+    path = checkpoint.parent / TERMINAL_EVIDENCE
+    evidence = json.loads(path.read_bytes()) if path.exists() else {}
+    entry = _terminal_entry(saved)
+    if checkpoint.name in evidence and evidence[checkpoint.name] != entry:
+        raise BronzeIngestError("Conflito no registro terminal")
+    if checkpoint.name not in evidence:
+        write_json(path, {**evidence, checkpoint.name: entry})
+
+
+def frozen_destination(*, endpoint, token, workspace, account_id=None) -> dict:
+    return {"endpoint": endpoint, "workspace": workspace, "account_id": account_id,
+            "credential_sha256": _sha(token)}
 
 
 def _sha(text: str) -> str:
@@ -177,14 +253,8 @@ def submit_transcript_upload(checkpoint: Path, client) -> dict:
     O chamador mantém meeting_lock e faz nova tentativa com o mesmo checkpoint.
     """
     checkpoint = Path(checkpoint)
-    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    saved = _verify_terminal_receipts(checkpoint.parent, {})[checkpoint.name]
     request = saved["request"]
-    # Verificação local do hash antes de cada envio; arquivo alterado/corrompido
-    # não pode transformar uma tentativa de recuperação em outra publicação.
-    canonical = json.dumps({"envelope": request["envelope"], "facts": request["facts"]},
-                           sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    if request["idempotency_key"] != "castanha:v1:" + _sha(canonical):
-        raise BronzeIngestError("Pedido persistido corrompido; envio recusado")
     previous = saved.get("result") or {}
     if saved.get("status") in ("tombstoned", "superseded") and previous.get("status") == saved["status"]:
         return previous
@@ -244,7 +314,12 @@ def submit_transcript_upload(checkpoint: Path, client) -> dict:
         # Nada de payloads, transcrições ou credenciais no relatório de erro.
         result = {"status": "error", "error_type": type(exc).__name__,
                   "reason": "Ingestão não confirmada; pedido preservado para retomada"}
-    write_json(checkpoint, {**saved, "status": result["status"], "result": result})
+    saved = {**saved, "status": result["status"], "result": result}
+    if result["status"] in TERMINAL_STATES:
+        # Primeiro o bloqueio independente; um crash nunca perde o terminal.
+        _persist_terminal_evidence(checkpoint, saved)
+        saved["terminal_evidence"] = True
+    write_json(checkpoint, saved)
     return result
 
 
@@ -296,12 +371,21 @@ def current_requests(bronze: Path, slug: str, metadata: dict, *, workspace, acco
         for native_id, item_metadata, text in current_recordings(bronze, metadata)]
 
 
-def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None) -> bool:
+def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None,
+                      endpoint="https://zinom.ai/mcp", token="") -> bool:
     """Um recibo antigo não conclui uma revisão alterada em disco."""
     try:
-        _verify_terminal_receipts(bronze / ".brain-ingest", metadata)
+        directory = bronze / ".brain-ingest"
+        checkpoints = _verify_terminal_receipts(directory, metadata)
+        if json.loads((directory / "destination.json").read_bytes()) != frozen_destination(
+                endpoint=endpoint, token=token, workspace=workspace, account_id=account_id):
+            return True
         requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
         for _, _, _, request in requests:
+            if any(old.get("status") in TERMINAL_STATES and
+                   old["request"]["envelope"]["source_id"] == request["envelope"]["source_id"]
+                   for old in checkpoints.values()):
+                continue
             path = bronze / ".brain-ingest" / (revision_fingerprint(request) + ".json")
             saved = json.loads(path.read_bytes())
             old = saved["request"]
@@ -339,39 +423,39 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
     directory.mkdir(exist_ok=True)
     with meeting_lock(directory):
         try:
-            _verify_terminal_receipts(directory, metadata)
+            checkpoints = _verify_terminal_receipts(directory, metadata)
             requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
-            destination = {"endpoint": client.endpoint, "workspace": workspace, "account_id": account_id,
-                           "credential_sha256": _sha(client.token)}
+            destination = frozen_destination(endpoint=client.endpoint, token=client.token,
+                                             workspace=workspace, account_id=account_id)
             destination_path = directory / "destination.json"
             if destination_path.exists():
                 if json.loads(destination_path.read_bytes()) != destination:
                     raise BronzeIngestError("Destino mudou; retome com a configuração original")
             else:
+                if checkpoints or (directory / TERMINAL_EVIDENCE).exists():
+                    raise BronzeIngestError("Destino congelado perdido; recuperação explícita necessária")
                 write_json(destination_path, destination)
+            # Compatibilidade: só materializar evidência legada após validar tudo.
+            for name, saved in checkpoints.items():
+                if saved.get("status") in TERMINAL_STATES:
+                    _persist_terminal_evidence(directory / name, saved)
             results = []
             for native_id, item_metadata, text, request in requests:
                 # Mesmo job copiado/movido para outra reunião não corre em paralelo.
                 origin_lock = bronze.parent / ".brain-ingest-locks" / _sha(native_id)
                 origin_lock.mkdir(parents=True, exist_ok=True)
                 with meeting_lock(origin_lock):
+                    terminal = next(((name, old) for name, old in checkpoints.items()
+                        if old.get("status") in TERMINAL_STATES and
+                        old["request"]["envelope"]["source_id"] == request["envelope"]["source_id"]), None)
+                    if terminal:
+                        name, old = terminal
+                        results.append({"checkpoint": name, **old["result"]})
+                        continue
                     path = prepare_transcript_upload(directory, slug, item_metadata, text,
                         captured_at=request["envelope"]["proveniencia"]["capturado_em"],
                         workspace=workspace, account_id=account_id, recording_id=native_id)
-                    # Exclusão é da origem, inclusive quando o texto local mudou.
-                    terminal = None
-                    for old_path in directory.glob("*.json"):
-                        old = json.loads(old_path.read_bytes())
-                        if (old.get("request", {}).get("envelope", {}).get("source_id") ==
-                                request["envelope"]["source_id"] and old.get("status") == "tombstoned"):
-                            terminal = old.get("result")
-                            if not isinstance(terminal, dict) or terminal.get("status") != "tombstoned":
-                                raise BronzeIngestError("Recibo terminal corrompido")
-                            break
-                    result = terminal or submit_transcript_upload(path, client)
-                    if terminal:
-                        saved = json.loads(path.read_bytes())
-                        write_json(path, {**saved, "status": "tombstoned", "result": terminal})
+                    result = submit_transcript_upload(path, client)
                     results.append({"checkpoint": path.name, **result})
             states = {r["status"] for r in results}
             status = ("error" if "error" in states else "pending" if "pending" in states else

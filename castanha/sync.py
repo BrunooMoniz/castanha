@@ -144,7 +144,8 @@ def pending_candidates(storage: MeetingStorage):
                 isinstance(source, dict) and source.get("transport") == "bronze"):
             from castanha.bronze_ingest import bronze_needs_sync
             bronze_pending = bronze_needs_sync(bronze, bronze.name, metadata,
-                workspace=z_cfg.get("workspace"), account_id=z_cfg.get("account_id"))
+                workspace=z_cfg.get("workspace"), account_id=z_cfg.get("account_id"),
+                endpoint=z_cfg.get("endpoint", "https://zinom.ai/mcp"), token=z_cfg.get("token", ""))
         if meeting_needs_sync(metadata) or unfinished or bronze_pending:
             synced_at = delivery.get("synced_at")
             candidates.append((synced_at if isinstance(synced_at, str) else "", path.parent.name))
