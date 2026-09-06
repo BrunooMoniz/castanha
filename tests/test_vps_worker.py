@@ -90,14 +90,17 @@ class VpsWorkerTests(unittest.TestCase):
         self.assertEqual(calls["flags"]["task"], "transcribe")
         self.assertFalse(calls["flags"]["condition_on_previous_text"])
 
-    def test_empty_result_is_failure_not_mock(self):
+    def test_empty_result_is_explicit_no_speech_not_mock_text(self):
         class Model:
             def __init__(self, *args, **kwargs):
                 pass
             def transcribe(self, *args, **kwargs):
                 return iter([]), None
-        with self.assertRaises(ValueError):
-            worker.transcribe(self.request, self.audio, Model, self.root / "global.lock")
+        result = worker.transcribe(self.request, self.audio, Model, self.root / "global.lock")
+        self.assertEqual(result["text"], "")
+        self.assertEqual(result["segments"], [])
+        self.assertIs(result["no_speech"], True)
+        self.assertEqual(result["request_sha256"], self.request["request_sha256"])
 
     def test_describe_without_model_dependency(self):
         result = subprocess.run(["python3", str(Path(worker.__file__)), "--describe-contract"],

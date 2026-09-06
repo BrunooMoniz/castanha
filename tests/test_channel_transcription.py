@@ -261,6 +261,26 @@ class ChannelTranscriptionTests(unittest.TestCase):
         # Provedor real do canal com áudio, sem virar "mixed" por causa do silêncio.
         self.assertEqual(result.provider, "fixture")
 
+    def test_channel_with_sound_but_no_recognized_speech_does_not_block_the_meeting(self):
+        """Ruído de sala no microfone e fala no sistema: a reunião conclui com a fala que existe."""
+        def provider(channel):
+            if channel == 0:
+                return TranscriptionResult("", [], "vps_whisper_large_v3", {"no_speech": True})
+            return self.result(1)
+        result = self.run_transcription(self.por_canal(provider))
+        self.assertEqual([s.speaker for s in result.utterances], ["Áudio do sistema"])
+        canais = {c["channel"]: c for c in result.raw_response["channels"]}
+        self.assertTrue(canais[0]["silent"])
+        self.assertEqual(canais[0]["provider"], "nenhum (sem fala reconhecida)")
+        self.assertEqual(canais[0]["utterance_count"], 0)
+        self.assertFalse(canais[1]["silent"])
+        self.assertEqual(result.provider, "fixture")
+        # Replay usa os checkpoints e não chama o provedor de novo.
+        chamadas = []
+        again = self.run_transcription(lambda path, duration: chamadas.append(path) or self.result(0))
+        self.assertEqual(chamadas, [])
+        self.assertEqual(again.text, result.text)
+
     def test_channel_with_audio_and_empty_answer_fails_instead_of_losing_speech(self):
         with self.assertRaises(ValueError):
             self.run_transcription(

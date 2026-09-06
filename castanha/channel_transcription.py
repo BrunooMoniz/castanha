@@ -24,6 +24,8 @@ ORIGINS = ("microfone_local", "audio_sistema")
 MONO_LABEL = "Áudio da gravação"
 MONO_ORIGIN = "gravacao_mono"
 SILENT_PROVIDER = "nenhum (canal em silêncio)"
+# Canal com som acima do piso de silêncio, mas em que o ASR não reconheceu fala.
+NO_SPEECH_PROVIDER = "nenhum (sem fala reconhecida)"
 # v3 identifica o canal pelo PCM decodificado, não pelos bytes do FLAC.
 CHECKPOINT_VERSION = 4
 FINGERPRINT_VERSION = 1
@@ -190,7 +192,7 @@ def validate_channel_result(saved, identity, entry):
             or type(count) is not int or count != len(values)):
         raise ValueError("Resultado de canal inválido: tipos ou contagens")
     if silent:
-        if provider != SILENT_PROVIDER or text != "" or values:
+        if provider not in (SILENT_PROVIDER, NO_SPEECH_PROVIDER) or text != "" or values:
             raise ValueError("Silêncio incompatível com provedor ou fala")
         return []
     _require_real_provider(provider)
@@ -268,17 +270,20 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
                     # Only pending transport/ASR is deferred, not invalid data.
                     pending = pending or exc
                     continue
-                provider, silent, provider_text = result.provider, False, result.text
-                # Provedor não prova identidade pessoal. Apenas a origem de captura.
-                values = [asdict(ChannelUtterance(entry["label"], s.text, s.start, s.end,
-                                                  channel, entry["origin"], digest, pcm))
-                          for s in result.utterances]
+                if (result.raw_response or {}).get("no_speech") is True and not result.text.strip():
+                    provider, silent, values, provider_text = NO_SPEECH_PROVIDER, True, [], ""
+                else:
+                    provider, silent, provider_text = result.provider, False, result.text
+                    # Provedor não prova identidade pessoal. Apenas a origem de captura.
+                    values = [asdict(ChannelUtterance(entry["label"], s.text, s.start, s.end,
+                                                      channel, entry["origin"], digest, pcm))
+                              for s in result.utterances]
             saved = {"identity": identity, "provider": provider, "silent": silent,
                      "provider_text": provider_text, "utterances": values,
                      "utterance_count": len(values)}
         segments = validate_channel_result(saved, identity, entry)
         provider, silent = saved["provider"], saved["silent"]
-        if silent != measured_silent:
+        if silent != measured_silent and provider != NO_SPEECH_PROVIDER:
             raise ValueError("Checkpoint discorda da medição de silêncio; preservado")
         if not checkpoint.exists():
             write_json(checkpoint, saved)

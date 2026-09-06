@@ -137,6 +137,25 @@ class VpsChannelTransportTests(unittest.TestCase):
         self.assertEqual(audio_mime(uploaded), 'audio/flac')
         self.assertEqual(self.source.read_bytes(), self.original)
 
+    def test_no_speech_result_completes_the_channel_instead_of_relaunching(self):
+        self.submit()
+        job = next(self.remote.root.rglob('request.json')).parent
+        manifest = json.loads((job / 'request.json').read_text())
+        reply = json.dumps({'request_sha256': manifest['request_sha256'], 'contract': TEST_CONTRACT,
+                            'text': '', 'segments': [], 'no_speech': True})
+        (job / 'result.json').write_text(reply)
+        calls_before = len(self.remote.calls)
+        result = VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, mode='mic_only')
+        self.assertEqual(result.text, '')
+        self.assertEqual(result.utterances, [])
+        self.assertIs(result.raw_response['no_speech'], True)
+        self.assertEqual(len(self.remote.calls), calls_before + 1)
+        # Sem a marca explícita, texto vazio continua sendo resultado inválido.
+        (job / 'result.json').write_text(json.dumps({'request_sha256': manifest['request_sha256'],
+                                                     'contract': TEST_CONTRACT, 'text': '', 'segments': []}))
+        with self.assertRaises(TranscriptionPending):
+            VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, mode='mic_only')
+
     def test_ogg_keeps_exact_legacy_job_identity_bytes_and_completed_replay(self):
         path = self.root / 'legacy.ogg'
         subprocess.run(['ffmpeg', '-v', 'error', '-i', str(self.source), '-c:a', 'libopus', str(path)],

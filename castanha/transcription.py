@@ -534,10 +534,12 @@ class VpsSshTranscriber(BaseTranscriber):
             raise TranscriptionPending("Transcrição remota em andamento; execute castanha sync --all para retomar")
         try:
             data = _vps_json(output)
+            no_speech = isinstance(data, dict) and data.get("no_speech") is True
             if (not isinstance(data, dict) or data.get("request_sha256") != request_id
                     or json.dumps(data.get("contract"), sort_keys=True, allow_nan=False) != json.dumps(contract, sort_keys=True)
-                    or not isinstance(data.get("text"), str) or not data["text"].strip()
-                    or not isinstance(data.get("segments"), list)):
+                    or not isinstance(data.get("text"), str) or not isinstance(data.get("segments"), list)
+                    or (no_speech and (data["text"] != "" or data["segments"] != []))
+                    or (not no_speech and not data["text"].strip())):
                 raise ValueError("Resultado sem vínculo com o contrato/pedido")
             segments = [Utterance("Falante", segment.get("text"), segment.get("start"), segment.get("end"))
                         for segment in data["segments"]]

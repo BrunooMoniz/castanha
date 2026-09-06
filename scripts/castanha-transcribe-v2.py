@@ -125,7 +125,11 @@ def transcribe(request, audio_path, model_factory=None, lock_path=None):
             if text.strip():
                 result.append({"start": start, "end": end, "text": text.strip()})
         if not result:
-            raise ValueError("Nenhuma fala reconhecida; original deve ser preservado")
+            # Canal com som mas sem fala reconhecível (ruído de sala, respiração,
+            # teclado). Falhar aqui deixava o cliente relançando o job para sempre
+            # e a reunião inteira presa. A resposta é explícita: nada inventado.
+            return {"request_sha256": request["request_sha256"], "contract": CONTRACT,
+                    "text": "", "segments": [], "no_speech": True}
         return {"request_sha256": request["request_sha256"], "contract": CONTRACT,
                 "text": " ".join(segment["text"] for segment in result), "segments": result}
 
