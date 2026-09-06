@@ -1,0 +1,188 @@
+{
+  "schema": "castanha.f13.synthetic-real-recovery.v1",
+  "fixture_source_commit": "19f72c7442ee093bdb20e8c5b688f631ae61d457",
+  "client_base_commit": "011b30aa5e8d3fba7d484a88a213ddbc835b81cf",
+  "limits": [
+    "XPS remained powered on; only the canary SSH connection was terminated",
+    "ASR timestamps and literal quality are not perfect; this is a recovery test",
+    "Silver/Gold and messaging channels are not exercised"
+  ],
+  "submit": {
+    "phase": "submit",
+    "status": "pending_after_connection_loss",
+    "job_id": "c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951",
+    "original_sha256": "6800c9c62e64f37a160058528616600b1a624c1fb045724f8c7488a894d63fd8",
+    "calls": [
+      {
+        "transport": "ssh",
+        "launch": false,
+        "timeout": 15
+      },
+      {
+        "transport": "ssh",
+        "launch": false,
+        "timeout": 15
+      },
+      {
+        "transport": "scp",
+        "launch": false,
+        "timeout": 30
+      },
+      {
+        "transport": "ssh",
+        "launch": false,
+        "timeout": 15
+      },
+      {
+        "transport": "ssh",
+        "launch": false,
+        "timeout": 15
+      },
+      {
+        "transport": "ssh",
+        "launch": true,
+        "timeout": 15
+      }
+    ]
+  },
+  "observer": {
+    "job_id": "c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951",
+    "status": "completed",
+    "observer_pid": 2777999,
+    "worker_processes_observed": [
+      2777157
+    ],
+    "result_sha256": "d76af95cc2becf6a935e3e4f6a90be3306a729285202c8fcb99ff6c3b87a8236",
+    "result_mtime_ns": "1788668852544687836",
+    "request": {
+      "audio": {
+        "channels": 1,
+        "mime_type": "audio/flac",
+        "path": ".local/state/castanha/jobs/c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951/audio.flac",
+        "sample_rate": 16000
+      },
+      "contract": {
+        "chunk_length": 30,
+        "compute_type": "int8",
+        "condition_on_previous_text": false,
+        "contract": "faster-whisper-json-v2",
+        "cpu_threads": 8,
+        "model": "large-v3",
+        "multilingual": true,
+        "segmentation_strategy": "whisper-vad-v1"
+      },
+      "mode": "mic_only",
+      "namespace": "flac-mono-v1",
+      "pcm_sha256": "62e2fed305deb1591a82f7e451140120d0b2a49ba7513b34f5d4c13debb9e192",
+      "request_sha256": "c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951"
+    },
+    "result": {
+      "contract": {
+        "chunk_length": 30,
+        "compute_type": "int8",
+        "condition_on_previous_text": false,
+        "contract": "faster-whisper-json-v2",
+        "cpu_threads": 8,
+        "model": "large-v3",
+        "multilingual": true,
+        "segmentation_strategy": "whisper-vad-v1"
+      },
+      "request_sha256": "c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951",
+      "segments": [
+        {
+          "end": 3.7,
+          "start": 0,
+          "text": "Bom dia. Hoje vamos discutir o planejamento da semana."
+        },
+        {
+          "end": 8.6,
+          "start": 4.18,
+          "text": "Precisamos revisar o orçamento e preparar o relatório financeiro."
+        },
+        {
+          "end": 13.18,
+          "start": 9,
+          "text": "Agora vamos mudar de idioma e preservar esta frase de transição."
+        },
+        {
+          "end": 18.96,
+          "start": 13.96,
+          "text": "Good morning. We need to review the weekly budget and prepare the financial report."
+        },
+        {
+          "end": 22.14,
+          "start": 19.4,
+          "text": "No transaction with real money will be executed."
+        },
+        {
+          "end": 26.96,
+          "start": 22.74,
+          "text": "Please keep the original recording and verify every important number."
+        },
+        {
+          "end": 29.26,
+          "start": 26.96,
+          "text": "Voltamos ao português"
+        },
+        {
+          "end": 32.14,
+          "start": 29.26,
+          "text": "A próxima reunião será na terça-feira"
+        },
+        {
+          "end": 37.08,
+          "start": 32.14,
+          "text": "Primeiro vamos validar um resultado e registrar todas as decisões"
+        },
+        {
+          "end": 40.92,
+          "start": 37.08,
+          "text": "Nenhuma operação com dinheiro real será executada"
+        }
+      ],
+      "text": "Bom dia. Hoje vamos discutir o planejamento da semana. Precisamos revisar o orçamento e preparar o relatório financeiro. Agora vamos mudar de idioma e preservar esta frase de transição. Good morning. We need to review the weekly budget and prepare the financial report. No transaction with real money will be executed. Please keep the original recording and verify every important number. Voltamos ao português A próxima reunião será na terça-feira Primeiro vamos validar um resultado e registrar todas as decisões Nenhuma operação com dinheiro real será executada"
+    }
+  },
+  "replay": {
+    "phase": "replay",
+    "status": "completed_existing_job",
+    "job_id": "c8529b69d29e265535685876474219aff4b8376a9fc2b30901bb3b1f714c3951",
+    "original_sha256": "6800c9c62e64f37a160058528616600b1a624c1fb045724f8c7488a894d63fd8",
+    "calls": [
+      {
+        "transport": "ssh",
+        "launch": false,
+        "timeout": 15
+      }
+    ]
+  },
+  "bronze_request": {
+    "idempotency_key": "castanha:v1:6464e16ea774be026d882cf6c11dd072de67320633dd2d1f50a79ddf24e13b55",
+    "envelope": {
+      "schema": "bruno.wiki.bronze.documento",
+      "versao": 1,
+      "produtor": {
+        "nome": "castanha",
+        "versao": "0.1.0"
+      },
+      "source_type": "castanha",
+      "source_id": "castanha:ef13517c418eada444442e27b08ad732389cdebd9f9df3526d1cdc14f5dbb4b9",
+      "workspace": "personal",
+      "source_url": null,
+      "titulo": "F13 synthetic PT EN recovery, no user recording",
+      "timestamp": {
+        "valor": "2026-09-06T03:30:00+00:00",
+        "origem": "fonte"
+      },
+      "fidelidade": "projecao",
+      "texto": "Bom dia. Hoje vamos discutir o planejamento da semana. Precisamos revisar o orçamento e preparar o relatório financeiro. Agora vamos mudar de idioma e preservar esta frase de transição. Good morning. We need to review the weekly budget and prepare the financial report. No transaction with real money will be executed. Please keep the original recording and verify every important number. Voltamos ao português A próxima reunião será na terça-feira Primeiro vamos validar um resultado e registrar todas as decisões Nenhuma operação com dinheiro real será executada",
+      "proveniencia": {
+        "capturado_em": "2026-09-06T04:00:00+00:00",
+        "sha256_texto": "9bf8767188e4e3f285fe9053666b3793641a6d29a6af33bf8a3ea05b53437153",
+        "referencia": "castanha",
+        "origem_id": "castanha:ef13517c418eada444442e27b08ad732389cdebd9f9df3526d1cdc14f5dbb4b9"
+      }
+    },
+    "facts": []
+  }
+}
