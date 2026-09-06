@@ -95,16 +95,17 @@ class VpsChannelCallbackTests(unittest.TestCase):
         self.remote.lose_reply = True
         self.stop_pending()
         self.assertEqual(list((self.bronze / '.channels').rglob('*.json')), [])
-        self.remote.completed()
-        result = self.resume()
-        self.assert_pending(result)
-        checkpoints = list((self.bronze / '.channels').rglob('*.json'))
-        self.assertEqual([p.name for p in checkpoints], ['channel-0.json'])
-        saved = checkpoints[0].read_bytes()
+        self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 2,
+                         'os dois canais devem subir antes de devolver pending ao computador')
+        self.assertEqual(len(list(self.remote.root.rglob('request.json'))), 2)
         self.remote.completed(2)
+        before = len(self.remote.calls)
         result = self.resume()
         self.assertEqual(self.job()['stage'], 'done')
-        self.assertEqual(checkpoints[0].read_bytes(), saved)
+        checkpoints = sorted((self.bronze / '.channels').rglob('*.json'))
+        self.assertEqual([p.name for p in checkpoints], ['channel-0.json', 'channel-1.json'])
+        self.assertFalse(any(args[0] == 'scp' or 'nohup' in args[-1]
+                             for args, _ in self.remote.calls[before:]))
         self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 2)
         self.assertEqual((self.remote.root / 'count').read_text().splitlines(), ['started', 'started'])
         text = (self.bronze / 'transcript_raw.txt').read_text()
@@ -116,12 +117,18 @@ class VpsChannelCallbackTests(unittest.TestCase):
         self.ingest.assert_called_once()
         self.assertEqual(Path(self.job()['audio_path']).read_bytes(), self.original)
         self.assertFalse(any('mock' in p.read_text() for p in checkpoints))
+        saved = {p.name: p.read_bytes() for p in checkpoints}
+        before = len(self.remote.calls)
+        self.resume()
+        self.assertEqual(len(self.remote.calls), before)
+        self.assertEqual({p.name: p.read_bytes() for p in checkpoints}, saved)
 
     def test_invalid_remote_segments_never_checkpoint_or_advance_and_can_retry(self):
         self.stop_pending()
-        self.remote.completed()
-        remote_result = next(self.remote.root.rglob('result.json'))
-        binding = {key: json.loads(remote_result.read_text())[key] for key in ('request_sha256', 'contract')}
+        self.remote.completed(2)
+        remote_results = list(self.remote.root.rglob('result.json'))
+        bindings = {path: {key: json.loads(path.read_text())[key] for key in ('request_sha256', 'contract')}
+                    for path in remote_results}
         replies = [
             {'text': 'fala', 'segments': []},
             {'text': 'fala', 'segments': [{'text': 'outra', 'start': .1, 'end': .9}]},
@@ -133,14 +140,15 @@ class VpsChannelCallbackTests(unittest.TestCase):
         ]
         for reply in replies:
             with self.subTest(reply=reply):
-                raw = json.dumps({**reply, **binding} if isinstance(reply, dict) else reply)
-                remote_result.write_text(raw)
+                raws = {path: json.dumps({**reply, **binding} if isinstance(reply, dict) else reply)
+                        for path, binding in bindings.items()}
+                for path, raw in raws.items():
+                    path.write_text(raw)
                 self.assert_pending(self.resume())
                 self.assertEqual(list((self.bronze / '.channels').rglob('*.json')), [])
-                self.assertEqual(remote_result.read_text(), raw)
-        remote_result.write_text(json.dumps({'text': 'fala', 'segments': [{'text': 'fala', 'start': .1, 'end': .9}], **binding}))
-        self.assert_pending(self.resume())
-        self.remote.completed(2)
+                self.assertEqual({path: path.read_text() for path in raws}, raws)
+        for path, binding in bindings.items():
+            path.write_text(json.dumps({'text': 'fala', 'segments': [{'text': 'fala', 'start': .1, 'end': .9}], **binding}))
         self.resume()
         self.assertEqual(self.job()['stage'], 'done')
         self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 2)
@@ -174,8 +182,6 @@ class VpsChannelCallbackTests(unittest.TestCase):
         self.assert_pending(self.resume())
         self.remote.fail_transport = None
         self.assert_pending(self.resume())
-        self.remote.completed()
-        self.assert_pending(self.resume())
         self.remote.completed(2)
         self.resume()
         self.assertEqual(self.job()['stage'], 'done')
@@ -205,10 +211,8 @@ class VpsChannelCallbackTests(unittest.TestCase):
         self.assertNotIn(b'fixture-key', saved)
         # Trocar config/orçamento não troca a seleção de uma gravação aceita.
         self.configure(provider='groq')
-        self.remote.completed()
+        self.remote.completed(2)
         with patch.object(GroqTranscriber, '_request_groq', side_effect=AssertionError('Groq automática proibida')):
-            self.assert_pending(self.resume())
-            self.remote.completed(2)
             self.resume()
         self.assertEqual(self.job()['selected_provider'], 'vps_ssh')
         self.assertEqual(selection_path.read_bytes(), saved)
@@ -216,12 +220,18 @@ class VpsChannelCallbackTests(unittest.TestCase):
 
     def test_manual_revision_restarts_all_channels_without_mixing_partial_vps(self):
         from castanha.transcription import GroqTranscriber
-        self.stop_pending()
-        self.remote.completed()
-        self.assert_pending(self.resume())
+        # Keep channel 1 offline to exercise a genuinely partial VPS revision,
+        # even though the first round now attempts both independent uploads.
+        def block_second_upload(args, **kwargs):
+            if args[0] == 'scp' and 'channel-1' in args[-2]:
+                raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+            return self.remote(args, **kwargs)
+        with patch('castanha.transcription.subprocess.run', side_effect=block_second_upload):
+            self.stop_pending()
+            self.remote.completed()
+            self.assert_pending(self.resume())
         old_checkpoint = next((self.bronze / '.channels').rglob('channel-0.json'))
         old_bytes = old_checkpoint.read_bytes()
-        self.remote.completed(2)
         self.configure(provider='groq', provider_revision=1, fallback_from='vps_ssh', groq_fallback_mode='manual')
         with patch('castanha.budget.BudgetManager.can_use_groq', return_value=True), \
              patch.object(GroqTranscriber, '_request_groq', return_value={

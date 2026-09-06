@@ -250,6 +250,26 @@ class TestBronzeCaller(unittest.TestCase):
                 self.assertTrue(all(c[1]["idempotency_key"] != key
                                     for c in self.client.calls[calls_before:]))
 
+    def test_automatic_drain_delivers_new_origin_after_terminal_origin(self):
+        from castanha.retry import drain_queue
+        self.assertEqual(sync_meeting('fixture', self.storage)['status'], 'ok')
+        key = next(iter(self.client.requests))
+        self.client.states[key] = 'tombstoned'
+        self.assertEqual(sync_meeting('fixture', self.storage)['status'], 'tombstoned')
+        before = len(self.client.calls)
+        self.save_job(self.bronze, 'independent-b', 'Gravação B independente')
+        metadata = self.metadata()
+        metadata['recordings'].append({'id':'b.ogg', 'job_id':'independent-b', 'transcription_provider':'groq'})
+        metadata['memory_recording_ids'].append('b.ogg')
+        write_json(self.bronze / 'metadata.json', metadata)
+        results = drain_queue(self.storage, now=100)
+        self.assertEqual(len(results), 1)
+        self.assertEqual([r['status'] for r in results[0]['source']['revisions']], ['tombstoned', 'ok'])
+        self.assertEqual(len(self.client.calls), before + 1)
+        self.assertNotEqual(self.client.calls[-1][1]['idempotency_key'], key)
+        self.assertEqual(drain_queue(self.storage, now=1000), [])
+        self.assertEqual(len(self.client.calls), before + 1)
+
     def test_missing_terminal_evidence_blocks_upload_without_resurrection(self):
         sync_meeting("fixture", self.storage)
         key = next(iter(self.client.requests))

@@ -156,6 +156,47 @@ class ChannelTranscriptionTests(unittest.TestCase):
         self.assertEqual(calls, [0, 1, 1])
         self.run_transcription(lambda *_: self.fail("replay não deve chamar provedor"))
 
+    def test_pending_first_channel_still_submits_second_without_partial_result(self):
+        from castanha.transcription import TranscriptionPending
+        calls = []
+        def pending(path, duration):
+            calls.append(int(path.stem[-1]))
+            raise TranscriptionPending('job remoto em andamento')
+        with self.assertRaises(TranscriptionPending):
+            self.run_transcription(pending)
+        self.assertEqual(calls, [0, 1])
+        self.assertEqual(self.checkpoints(), [])
+        self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.digest)
+
+    def test_pending_first_keeps_completed_second_checkpoint_for_retry(self):
+        from castanha.transcription import TranscriptionPending
+        def first(path, duration):
+            channel = int(path.stem[-1])
+            if channel == 0:
+                raise TranscriptionPending('job remoto em andamento')
+            return self.result(channel)
+        with self.assertRaises(TranscriptionPending):
+            self.run_transcription(first)
+        self.assertEqual(self.checkpoints(), ['channel-1.json'])
+        calls = []
+        def retry(path, duration):
+            calls.append(int(path.stem[-1]))
+            return self.result(calls[-1])
+        result = self.run_transcription(retry)
+        self.assertEqual(calls, [0])
+        self.assertEqual(len(result.utterances), 2)
+        self.run_transcription(lambda *_: self.fail('replay não chama provedor'))
+
+    def test_serious_failure_is_not_deferred_as_remote_pending(self):
+        calls = []
+        def invalid(path, duration):
+            calls.append(int(path.stem[-1]))
+            raise ValueError('identidade inválida')
+        with self.assertRaisesRegex(ValueError, 'identidade inválida'):
+            self.run_transcription(invalid)
+        self.assertEqual(calls, [0])
+        self.assertEqual(self.checkpoints(), [])
+
     def test_replay_repeats_the_same_content_without_calling_the_provider(self):
         self.source = self.gerar("longa.wav", "0.1*sin(2*PI*440*t)|0.2*sin(2*PI*880*t)", duration=3)
         self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()

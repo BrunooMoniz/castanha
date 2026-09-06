@@ -15,7 +15,7 @@ from pathlib import Path
 
 from castanha.audio import measure_channel_levels, probe_channel_count, probe_duration_seconds
 from castanha.durability import file_sha256, write_json
-from castanha.transcription import TranscriptionResult, Utterance
+from castanha.transcription import TranscriptionPending, TranscriptionResult, Utterance
 
 LABELS = ("Microfone local", "Áudio do sistema")
 ORIGINS = ("microfone_local", "audio_sistema")
@@ -238,6 +238,7 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
     utterances = []
     providers = set()
     channels = []
+    pending = None
     for entry in entradas:
         channel, path = entry["channel"], entry["path"]
         checkpoint = directory / f"channel-{channel}.json"
@@ -259,7 +260,14 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
                 provider, silent, values, provider_text = SILENT_PROVIDER, True, [], ""
             else:
                 duration = _guard_budget(entry, budget)
-                result = transcribe_mono(path, duration)
+                try:
+                    result = transcribe_mono(path, duration)
+                except TranscriptionPending as exc:
+                    # Submit every independent channel before returning control:
+                    # durable remote jobs keep running with the laptop offline.
+                    # Only pending transport/ASR is deferred, not invalid data.
+                    pending = pending or exc
+                    continue
                 provider, silent, provider_text = result.provider, False, result.text
                 # Provedor não prova identidade pessoal. Apenas a origem de captura.
                 values = [asdict(ChannelUtterance(entry["label"], s.text, s.start, s.end,
@@ -281,6 +289,10 @@ def transcribe_dual(source: Path, checkpoint_root: Path, transcribe_mono, *,
                          "utterance_count": len(segments)})
         if not silent:
             providers.add(provider)
+    if pending is not None:
+        # Completed channels remain checkpointed, but no partial transcript may
+        # advance to Silver/Gold while any channel is still outstanding.
+        raise pending
     if all(entry["silent"] for entry in channels):
         raise ValueError("Nenhum canal com áudio; nada a transcrever e nada a inventar")
     utterances.sort(key=lambda s: (s.start, s.end, s.channel))

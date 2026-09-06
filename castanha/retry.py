@@ -8,6 +8,7 @@ import sys
 import time
 
 from castanha.durability import write_json
+from castanha.bronze_ingest import has_origin_receipts
 from castanha.storage import MeetingStorage
 from castanha.sync import pending_candidates, sync_meeting
 
@@ -46,7 +47,7 @@ def drain_queue(storage=None, now=None, limit=5):
                 if delivery is not None and not isinstance(delivery, dict):
                     raise ValueError("Recibo Zinom inválido")
                 delivery = delivery or {}
-                if delivery.get("status") == "tombstoned":
+                if delivery.get("status") == "tombstoned" and not has_origin_receipts(delivery):
                     continue
                 if (delivery.get("status") == "pending"
                         and delivery.get("facts_status") == "pending_lineage" and delivery.get("remember_id")
