@@ -329,6 +329,38 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(meta["duration_seconds"], 20.0)
         self.assertFalse(engine.storage.get_meeting("r3")["can_retry"])
 
+    def test_retry_legado_com_llm_sem_cota_fica_pendente_sem_estourar(self):
+        """Reunião sem .jobs (legado): cota da LLM esgotada não derruba o `castanha retry`."""
+        import io
+        import urllib.error
+        engine = self._engine()
+        self._reuniao_no_bronze(engine, "r5", transcript="Texto bom.", transcribed=True)
+        engine.summarizer.api_key = "synthetic-fixture-only"
+        quota = urllib.error.HTTPError("https://api.groq.com", 429, "rate limit", None, io.BytesIO(b"tpm"))
+        with patch("castanha.engine.get_transcriber") as get_t, patch("castanha.engine.notify"), \
+             patch("castanha.summarizer.urllib.request.urlopen", side_effect=quota), \
+             patch("castanha.summarizer.time.sleep"), \
+             patch.object(engine.zinom, "ingest_meeting") as ing:
+            res = engine.reprocess_meeting("r5")
+        get_t.assert_not_called()
+        ing.assert_not_called()
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(res["result"]["summary_status"], "pending")
+        self.assertFalse((engine.storage.silver_dir / "r5.md").exists())
+        meta = engine.storage._read_bronze_metadata("r5")
+        self.assertEqual(meta["summary_status"], "pending")
+        self.assertEqual((engine.storage.bronze_dir / "r5" / "transcript_raw.txt").read_text(encoding="utf-8"), "Texto bom.")
+        self.assertTrue(engine.storage.get_meeting("r5")["can_retry"])
+        # Segunda tentativa com a LLM de volta: nota gerada, pendência limpa.
+        with patch("castanha.engine.get_transcriber") as get_t, patch("castanha.engine.notify"), \
+             patch.object(engine.summarizer, "_call_llm", return_value="# Resumo\n\nTexto bom."):
+            res = engine.reprocess_meeting("r5")
+        get_t.assert_not_called()
+        self.assertEqual(res["status"], "success")
+        self.assertTrue((engine.storage.silver_dir / "r5.md").exists())
+        self.assertNotIn("summary_status", engine.storage._read_bronze_metadata("r5"))
+        self.assertFalse(engine.storage.get_meeting("r5")["can_retry"])
+
     def test_retry_de_reuniao_ja_transcrita_so_refaz_as_notas(self):
         engine = self._engine()
         self._reuniao_no_bronze(engine, "r4", transcript="Texto bom.", transcribed=True)

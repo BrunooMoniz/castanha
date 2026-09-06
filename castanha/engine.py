@@ -588,7 +588,6 @@ class CastanhaEngine:
         from castanha.summarizer import LlmUnavailable
         try:
             silver_content = self.summarizer.generate_silver(metadata, transcript)
-            silver_path = self.storage.save_silver(slug, silver_content)
             gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
         except LlmUnavailable as exc:
             # Cota, rede ou provedor: a transcrição já está nos checkpoints e nada
@@ -604,6 +603,7 @@ class CastanhaEngine:
                 "summary_status": "pending", "summary_error": str(exc),
                 "zinom": metadata.get("zinom") or {"status": "pending"},
                 "problemas": errors + [f"Resumo pendente: {exc}"]}}
+        silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
         zinom_status = self.zinom.ingest_meeting(
             metadata, silver_content, gold_data,
@@ -820,9 +820,27 @@ class CastanhaEngine:
         refazer_notas = transcript.strip() and (novo_texto or not pendentes)
         if refazer_notas:
             # 4. Silver, 5. Gold, 6. Zinom (editando a nota anterior, se houver)
-            silver_content = self.summarizer.generate_silver(meta, transcript)
+            from castanha.summarizer import LlmUnavailable
+            meta.pop("summary_status", None)
+            meta.pop("summary_error", None)
+            try:
+                silver_content = self.summarizer.generate_silver(meta, transcript)
+                gold_data = self.summarizer.generate_gold(meta, silver_content, transcript)
+            except LlmUnavailable as exc:
+                # Transcrição já está no Bronze; a nota antiga (se houver) fica como está.
+                meta.update(summary_status="pending", summary_error=str(exc))
+                self.storage.write_bronze_metadata(slug, meta)
+                return {"status": "partial", "result": {
+                    "slug": slug, "title": title, "bronze_dir": str(bronze_dir),
+                    "silver_file": str(silver_path), "gold_file": str(gold_path),
+                    "audio_status": meta.get("audio_status", "ok"),
+                    "audio_diagnostico": meta.get("audio_diagnostico", ""),
+                    "transcription_provider": meta.get("transcription_provider") or "failed",
+                    "transcription_error": meta.get("transcription_error"),
+                    "summary_status": "pending", "summary_error": str(exc),
+                    "zinom": zinom_status, "problemas": [f"Resumo pendente: {exc}"]}}
+            self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
-            gold_data = self.summarizer.generate_gold(meta, silver_content, transcript)
             gold_path = self.storage.save_gold(slug, gold_data)
             anterior = (meta.get("zinom") or {}).get("remember_id")
             zinom_status = self.zinom.ingest_meeting(

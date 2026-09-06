@@ -28,11 +28,12 @@ function zinomIcon(note) {
 
 function zinomLine(result) {
   if (!result) return ""
-  if (result.summary_status === "pending") {
+  var terminal = result.zinom && (result.zinom.status === "tombstoned" || result.zinom.status === "superseded")
+  if (result.summary_status === "pending" && !terminal) {
     // Transcrição salva; o resumo volta sozinho na próxima tentativa.
-    var porque = String(result.summary_error || "").replace(/^LLM indisponível depois de \d+ tentativas/, "LLM indisponível")
+    var porque = String(result.summary_error || "")
     if (porque.length > 60) porque = porque.substring(0, 59) + "…"
-    return "Resumo pendente" + (porque ? " (" + porque + ")" : "") + "; tenta de novo sozinho"
+    return "Resumo pendente" + (porque ? ": " + porque : "")
   }
   var z = result.zinom
   if (!z) return ""

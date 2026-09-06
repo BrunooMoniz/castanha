@@ -331,10 +331,17 @@ class MeetingSummarizer:
                     limite = int(m.group(1)) if m else None
                     pedido = int(m.group(2)) if m else None
                     raise LlmTooLarge(limite, pedido, corpo[:200])
+                if e.code in (401, 403):
+                    # Chave recusada: resumo fica pendente até a chave ser corrigida.
+                    print(f"[Castanha] Chave da LLM recusada: HTTP {e.code}: {corpo[:200]}", file=sys.stderr)
+                    raise LlmUnavailable(f"chave da Groq recusada (HTTP {e.code})")
                 if e.code in (408, 429) or e.code >= 500:
                     # 429 aqui é quase sempre a janela de um minuto do plano
                     # gratuito: o Retry-After diz quanto falta para ela abrir.
-                    ultimo = f"HTTP {e.code}: {corpo[:200]}"
+                    # O corpo vai só ao stderr; no painel entra linguagem de produto.
+                    print(f"[Castanha] LLM respondeu HTTP {e.code}: {corpo[:200]}", file=sys.stderr)
+                    ultimo = ("cota da Groq esgotada (HTTP 429)" if e.code == 429
+                              else f"Groq fora do ar (HTTP {e.code})")
                     ra = e.headers.get("Retry-After") if e.headers else None
                     try:
                         espera = float(ra) if ra else espera
@@ -344,14 +351,15 @@ class MeetingSummarizer:
                     print(f"[Castanha] Erro na chamada LLM: HTTP {e.code}: {corpo[:200]}", file=sys.stderr)
                     return ""
             except OSError as e:
-                ultimo = e
+                print(f"[Castanha] Sem rede para a LLM: {e}", file=sys.stderr)
+                ultimo = "sem rede para a Groq"
             except (KeyError, IndexError, ValueError) as e:
                 print(f"[Castanha] Resposta inesperada da LLM: {e}", file=sys.stderr)
                 return ""
             if tentativa < LLM_ATTEMPTS:
                 time.sleep(min(espera, LLM_MAX_WAIT_SEC))
         print(f"[Castanha] Erro na chamada LLM depois de {LLM_ATTEMPTS} tentativas: {ultimo}", file=sys.stderr)
-        raise LlmUnavailable(f"LLM indisponível depois de {LLM_ATTEMPTS} tentativas ({str(ultimo)[:120]})")
+        raise LlmUnavailable(f"{ultimo}, {LLM_ATTEMPTS} tentativas")
 
     # ------------------------------------------------------------ partes
     def _tamanho_da_parte(self, texto: str, erro: LlmTooLarge) -> int:

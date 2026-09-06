@@ -67,6 +67,9 @@ def _pode_reprocessar(recordings: List[Dict[str, Any]], has_transcript: bool, me
         return False
     if (meta.get("audio_status") or "") == "sem_audio" and not has_transcript:
         return False
+    if meta.get("summary_status") == "pending" and has_transcript:
+        # Transcrito, mas a LLM não respondeu: "tentar de novo" refaz só o resumo.
+        return True
     if any(r.get("transcribed") is False for r in recordings):
         return True
     return not has_transcript
@@ -488,6 +491,9 @@ class MeetingStorage:
             "audio_status": meta.get("audio_status") or ("ok" if recordings else "audio_apagado"),
             "audio_diagnostico": meta.get("audio_diagnostico") or "",
             "zinom": self.delivery_projection(slug, meta.get("zinom") or {}),
+            "processing_status": meta.get("processing_status") or "",
+            "summary_status": meta.get("summary_status") or "",
+            "summary_error": meta.get("summary_error") or "",
             "silver_path": str(silver_file) if silver_file.exists() else "",
             "bronze_dir": str(bronze_dir),
             "gold_path": str(gold_file) if gold_file.exists() else "",

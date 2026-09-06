@@ -62,9 +62,10 @@ TestCase {
 
   function test_summary_pending_line_and_retry() {
     var note = {processing_status: "pending", summary_status: "pending",
-                summary_error: "LLM indisponível depois de 4 tentativas (HTTP 429)", zinom: {status: "pending"}}
-    compare(DeliveryStatus.zinomLine(note), "Resumo pendente (LLM indisponível (HTTP 429)); tenta de novo sozinho")
+                summary_error: "cota da Groq esgotada (HTTP 429), 4 tentativas", zinom: {status: "pending"}}
+    compare(DeliveryStatus.zinomLine(note), "Resumo pendente: cota da Groq esgotada (HTTP 429), 4 tentativas")
     verify(DeliveryStatus.zinomNeedsSync(note))
     compare(DeliveryStatus.zinomLine({summary_status: "", zinom: {status: "pending"}}), "Envio ao Zinom pendente")
+    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "tombstoned"}}), "Excluído no Zinom")
   }
 }

@@ -86,11 +86,12 @@ class TestCallLlm(unittest.TestCase):
         self.assertEqual([c.args[0] for c in dorme.call_args_list], [37.0])
 
     def test_erro_definitivo_devolve_vazio_e_avisa_no_stderr(self):
+        # 400 é pedido inválido: repetir não ajuda, então não vira pendência.
         err = io.StringIO()
-        with patch("castanha.summarizer.urllib.request.urlopen", side_effect=_http_error(401, "chave ruim")), \
+        with patch("castanha.summarizer.urllib.request.urlopen", side_effect=_http_error(400, "pedido ruim")), \
              patch("castanha.summarizer.sys.stderr", err):
             self.assertEqual(self.s._call_llm("sys", "user"), "")
-        self.assertIn("401", err.getvalue())
+        self.assertIn("400", err.getvalue())
 
     def test_cota_esgotada_em_todas_as_tentativas_vira_LlmUnavailable(self):
         from castanha.summarizer import LlmUnavailable
@@ -98,6 +99,15 @@ class TestCallLlm(unittest.TestCase):
              patch("castanha.summarizer.time.sleep"), patch("castanha.summarizer.sys.stderr", io.StringIO()):
             with self.assertRaises(LlmUnavailable):
                 self.s._call_llm("sys", "user")
+
+    def test_chave_recusada_fica_pendente_em_vez_de_nota_sem_resumo(self):
+        from castanha.summarizer import LlmUnavailable
+        with patch("castanha.summarizer.urllib.request.urlopen", side_effect=_http_error(401, "chave ruim")), \
+             patch("castanha.summarizer.sys.stderr", io.StringIO()):
+            with self.assertRaises(LlmUnavailable) as ctx:
+                self.s._call_llm("sys", "user")
+        self.assertIn("HTTP 401", str(ctx.exception))
+        self.assertNotIn("chave ruim", str(ctx.exception))
 
     def test_provedor_que_nao_e_groq_nunca_chama_a_groq(self):
         from castanha.summarizer import LlmUnavailable
