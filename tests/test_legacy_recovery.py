@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from castanha.bronze_ingest import BronzeIngestError
 from castanha.durability import file_sha256, write_json
@@ -32,6 +33,104 @@ class LegacyRecoveryTests(unittest.TestCase):
     def upload_path(self):
         return next(path for path in (self.bronze / ".legacy-recovery/uploads").glob("*.json")
                     if path.name != "terminal-evidence.json")
+
+    def sync(self):
+        from castanha.sync import sync_meeting
+        from castanha.storage import MeetingStorage
+        storage = MeetingStorage(self.bronze / "fixture-storage")
+        storage.bronze_dir = self.bronze.parent
+        cfg = {"zinom": {"enabled": True, "bronze_ingest_enabled": True,
+            "endpoint": self.client.endpoint, "token": self.client.token,
+            "workspace": "fixture-workspace"}}
+        with patch("castanha.sync.load_config", return_value=cfg), patch(
+                "castanha.zinom_adapter.load_config", return_value=cfg), patch(
+                "castanha.zinom_adapter.ZinomMcpClient", return_value=self.client):
+            return sync_meeting(self.bronze.name, storage)
+
+    def test_sync_resumes_only_explicitly_attempted_recovery_without_changing_metadata(self):
+        prepare_legacy_manifest(self.bronze)
+        before = (self.bronze / "metadata.json").read_bytes()
+        self.client.lose_response = True
+        self.submit()
+        self.assertEqual(self.sync()["status"], "ok")
+        self.assertEqual((self.bronze / "metadata.json").read_bytes(), before)
+        self.assertEqual(len(self.client.requests), 1)
+        self.assertEqual(list(self.client.calls[-1][1]), ["idempotency_key"])
+
+    def test_sync_does_not_auto_authorize_prepared_manifest(self):
+        prepare_legacy_manifest(self.bronze)
+        before = (self.bronze / "metadata.json").read_bytes()
+        self.assertEqual(self.sync()["status"], "pending")
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual((self.bronze / "metadata.json").read_bytes(), before)
+
+    def test_sync_does_not_replace_lost_manifest_or_destination(self):
+        prepare_legacy_manifest(self.bronze)
+        self.client.lose_response = True
+        self.submit()
+        (self.bronze / ".legacy-recovery/manifest.json").unlink()
+        before = (self.bronze / "metadata.json").read_bytes()
+        calls = len(self.client.calls)
+        self.assertEqual(self.sync()["status"], "error")
+        self.assertEqual(len(self.client.calls), calls)
+        self.assertEqual((self.bronze / "metadata.json").read_bytes(), before)
+
+    def test_retry_inventory_tracks_attempts_and_completion(self):
+        from castanha.legacy_recovery import legacy_recovery_pending
+        prepare_legacy_manifest(self.bronze)
+        self.assertFalse(legacy_recovery_pending(self.bronze))
+        self.client.lose_response = True
+        self.submit()
+        self.assertTrue(legacy_recovery_pending(self.bronze))
+        self.sync()
+        self.assertFalse(legacy_recovery_pending(self.bronze))
+
+    def test_resume_respects_disabled_gate(self):
+        from castanha.legacy_recovery import resume_legacy_recovery
+        prepare_legacy_manifest(self.bronze)
+        self.client.lose_response = True
+        self.submit()
+        calls = len(self.client.calls)
+        self.assertEqual(resume_legacy_recovery(self.bronze, {})["status"], "pending")
+        self.assertEqual(len(self.client.calls), calls)
+
+    def test_sync_destination_change_never_sends(self):
+        prepare_legacy_manifest(self.bronze)
+        self.client.lose_response = True
+        self.submit()
+        calls = len(self.client.calls)
+        self.client.token = "changed-fixture-only"
+        self.assertEqual(self.sync()["status"], "error")
+        self.assertEqual(len(self.client.calls), calls)
+
+    def test_inventory_missing_checkpoint_remains_pending_and_sync_fails_closed(self):
+        from castanha.legacy_recovery import legacy_recovery_pending
+        prepare_legacy_manifest(self.bronze)
+        self.client.lose_response = True
+        self.submit()
+        self.upload_path().unlink()
+        self.assertTrue(legacy_recovery_pending(self.bronze))
+        self.assertEqual(self.sync()["status"], "error")
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_corrupt_recovery_does_not_block_independent_queue_entries(self):
+        import shutil
+        from castanha.storage import MeetingStorage
+        from castanha.sync import pending_candidates
+        prepare_legacy_manifest(self.bronze)
+        self.client.lose_response = True
+        self.submit()
+        write_json(self.upload_path(), {})
+        with tempfile.TemporaryDirectory() as root:
+            storage = MeetingStorage(Path(root))
+            shutil.copytree(self.bronze, storage.bronze_dir / "legacy")
+            other = storage.bronze_dir / "independent"
+            other.mkdir()
+            write_json(other / "metadata.json", {"zinom": {"status": "pending"}})
+            with patch("castanha.sync.load_config", return_value={}), patch(
+                    "castanha.sync.reconcile_finished_capture", return_value=None):
+                self.assertEqual({slug for _, slug in pending_candidates(storage)},
+                                 {"legacy", "independent"})
 
     def test_manifest_keeps_originals_and_native_id_unchanged(self):
         paths = [self.bronze / p for p in ("audio.ogg", "transcript_raw.txt", "metadata.json")]

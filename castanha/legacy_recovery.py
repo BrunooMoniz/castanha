@@ -181,6 +181,45 @@ def submit_legacy_recovery(bronze, client, *, workspace, account_id=None):
         return submit_transcript_upload(checkpoint, client)
 
 
+def legacy_recovery_pending(bronze):
+    """Inventário sem autorizar migração nova ou reescrever originais."""
+    from castanha.bronze_ingest import _verify_terminal_receipts
+    directory = Path(bronze) / ".legacy-recovery"
+    try:
+        destination = directory / "destination.json"
+        if not destination.exists():
+            return (directory / "uploads").exists()
+        if json.loads(destination.read_bytes()).get("attempted") is not True:
+            return False
+        receipts = _verify_terminal_receipts(directory / "uploads", {})
+        return not receipts or any(r.get("status") not in ("ok", "tombstoned", "superseded")
+                                   for r in receipts.values())
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return True  # O executor reporta corrupção sem sobrescrever o original.
+
+
+def resume_legacy_recovery(bronze, config):
+    """Retoma destino já autorizado; submit valida hash, identidade e lock."""
+    from castanha.zinom_adapter import ZinomMcpClient
+    try:
+        directory = Path(bronze) / ".legacy-recovery"
+        if directory.is_symlink():
+            raise BronzeIngestError("Diretório de recuperação inválido")
+        destination = directory / "destination.json"
+        if not destination.exists() and not (directory / "uploads").exists():
+            return {"status": "pending", "reason": "Recuperação legada requer envio explícito inicial"}
+        if json.loads(destination.read_bytes()).get("attempted") is not True:
+            return {"status": "pending", "reason": "Recuperação legada ainda não iniciada"}
+        if config.get("enabled") is not True or config.get("bronze_ingest_enabled") is not True:
+            return {"status": "pending", "reason": "Ingestão Bronze desligada"}
+        client = ZinomMcpClient(config.get("endpoint", "https://zinom.ai/mcp"), config.get("token", ""))
+        return submit_legacy_recovery(bronze, client, workspace=config.get("workspace"),
+                                      account_id=config.get("account_id"))
+    except Exception as exc:
+        return {"status": "error", "error_type": type(exc).__name__,
+                "reason": "Recuperação não confirmada; manifesto e originais preservados"}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepara manifesto legado, sem enviar ao Zinom")
     parser.add_argument("bronze", type=Path)

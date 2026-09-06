@@ -105,6 +105,12 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
+    # Manifestos legados congelam inclusive metadata.json. Não passar pelo
+    # escritor nativo: somente retomar uma recuperação já iniciada explicitamente.
+    recovery = bronze / ".legacy-recovery"
+    if recovery.exists() or recovery.is_symlink():
+        from castanha.legacy_recovery import resume_legacy_recovery
+        return {"slug": slug, **resume_legacy_recovery(bronze, load_config().get("zinom", {}))}
     with meeting_lock(bronze):
         metadata = _read_json(bronze / "metadata.json")
         if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
@@ -190,6 +196,12 @@ def pending_candidates(storage: MeetingStorage):
     z_cfg = load_config().get("zinom", {})
     for bronze in storage.bronze_dir.iterdir():
         if not bronze.is_dir():
+            continue
+        recovery = bronze / ".legacy-recovery"
+        if recovery.exists() or recovery.is_symlink():
+            from castanha.legacy_recovery import legacy_recovery_pending
+            if legacy_recovery_pending(bronze):
+                candidates.append(("", bronze.name))
             continue
         path = bronze / "metadata.json"
         if not path.exists() and not any((bronze / ".jobs").glob("*.json")):
