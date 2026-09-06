@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -28,6 +29,10 @@ class LegacyRecoveryTests(unittest.TestCase):
     def submit(self, **kwargs):
         return submit_legacy_recovery(self.bronze, self.client, workspace="fixture-workspace", **kwargs)
 
+    def upload_path(self):
+        return next(path for path in (self.bronze / ".legacy-recovery/uploads").glob("*.json")
+                    if path.name != "terminal-evidence.json")
+
     def test_manifest_keeps_originals_and_native_id_unchanged(self):
         paths = [self.bronze / p for p in ("audio.ogg", "transcript_raw.txt", "metadata.json")]
         before = [file_sha256(p) for p in paths]
@@ -50,7 +55,8 @@ class LegacyRecoveryTests(unittest.TestCase):
         request = next(iter(self.client.requests.values()))
         e = request["envelope"]
         self.assertEqual(e["texto"].encode(), (self.bronze / "transcript_raw.txt").read_bytes())
-        self.assertEqual(e["source_id"], "castanha-legacy:" + manifest["migration_id"])
+        self.assertEqual(e["source_id"], "castanha:" + hashlib.sha256(
+            ("migration:" + manifest["migration_id"]).encode()).hexdigest())
         self.assertEqual(e["proveniencia"]["origem_id"], e["source_id"])
         self.assertIn(manifest["source"]["audio"]["sha256"], e["proveniencia"]["referencia"])
         self.assertEqual(e["fidelidade"], "projecao")
@@ -95,7 +101,7 @@ class LegacyRecoveryTests(unittest.TestCase):
         with self.assertRaises(BronzeIngestError):
             submit_legacy_recovery(self.bronze, self.client, workspace=None)
         self.assertEqual(self.client.calls, [])
-        self.assertFalse((self.bronze / ".legacy-recovery/upload.json").exists())
+        self.assertFalse((self.bronze / ".legacy-recovery/uploads").exists())
 
     def test_changed_destination_blocks_retry(self):
         prepare_legacy_manifest(self.bronze)
@@ -138,7 +144,7 @@ class LegacyRecoveryTests(unittest.TestCase):
         manifest = json.loads(path.read_bytes())
         manifest["migration_id"] = "00000000-0000-4000-8000-000000000001"
         write_json(path, manifest)
-        (self.bronze / ".legacy-recovery/upload.json").unlink()
+        self.upload_path().unlink()
         with self.assertRaises(BronzeIngestError):
             self.submit()
         self.assertEqual(len(self.client.calls), 1)
@@ -148,11 +154,38 @@ class LegacyRecoveryTests(unittest.TestCase):
         self.submit()
         self.client.states[next(iter(self.client.requests))] = "tombstoned"
         self.assertEqual(self.submit()["status"], "tombstoned")
-        (self.bronze / ".legacy-recovery/upload.json").unlink()
+        self.upload_path().unlink()
         calls = len(self.client.calls)
         for _ in range(2):
             with self.assertRaises(BronzeIngestError):
                 self.submit()
+        self.assertEqual(len(self.client.calls), calls)
+
+    def test_terminal_ledger_loss_blocks_without_republishing(self):
+        prepare_legacy_manifest(self.bronze)
+        self.submit()
+        self.client.states[next(iter(self.client.requests))] = "tombstoned"
+        self.assertEqual(self.submit()["status"], "tombstoned")
+        ledger = self.bronze / ".legacy-recovery/uploads/terminal-evidence.json"
+        self.assertTrue(ledger.exists())
+        ledger.unlink()
+        calls = len(self.client.calls)
+        with self.assertRaises(BronzeIngestError):
+            self.submit()
+        self.assertEqual(len(self.client.calls), calls)
+
+    def test_terminal_origin_corruption_blocks_before_network(self):
+        prepare_legacy_manifest(self.bronze)
+        self.submit()
+        self.client.states[next(iter(self.client.requests))] = "tombstoned"
+        self.submit()
+        path = self.upload_path()
+        saved = json.loads(path.read_bytes())
+        saved["request"]["envelope"]["source_id"] = "castanha:" + "0" * 64
+        write_json(path, saved)
+        calls = len(self.client.calls)
+        with self.assertRaises(BronzeIngestError):
+            self.submit()
         self.assertEqual(len(self.client.calls), calls)
 
     def test_mock_multiple_recordings_and_existing_delivery_rejected(self):

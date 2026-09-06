@@ -12,7 +12,8 @@ from pathlib import Path
 import subprocess
 import uuid
 
-from castanha.bronze_ingest import BronzeIngestError, build_transcript_request, submit_transcript_upload
+from castanha.bronze_ingest import (BronzeIngestError, build_transcript_request,
+                                   revision_fingerprint, submit_transcript_upload)
 from castanha.durability import file_sha256, meeting_lock, write_json
 
 
@@ -110,7 +111,7 @@ def prepare_legacy_manifest(bronze):
             manifest = json.loads(path.read_bytes())
             _validate(bronze, manifest)
             return manifest
-        if (directory / "destination.json").exists() or (directory / "upload.json").exists():
+        if any((directory / name).exists() for name in ("destination.json", "upload.json", "uploads")):
             raise BronzeIngestError("Manifesto perdido após preparação de envio; recuperar identidade original")
         source, _, _ = _source(bronze)
         manifest = {"schema": "castanha.legacy-recovery.v1", "migration_id": str(uuid.uuid4()),
@@ -126,7 +127,8 @@ def legacy_request(manifest, metadata, text, *, workspace, account_id=None):
         recording_id="migration:" + migration_id)
     envelope = request["envelope"]
     envelope["produtor"]["nome"] = "castanha-legacy-recovery"
-    envelope["source_id"] = "castanha-legacy:" + migration_id
+    # O domínio migration: é distinto dos IDs nativos. O formato externo
+    # continua o contrato Castanha validado pelo ledger, sem inventar job_id.
     envelope["proveniencia"].update(origem_id=envelope["source_id"],
         referencia="audio-sha256:" + manifest["source"]["audio"]["sha256"] + ";migration:" + migration_id)
     canonical = json.dumps({"envelope": envelope, "facts": []}, sort_keys=True,
@@ -152,8 +154,11 @@ def submit_legacy_recovery(bronze, client, *, workspace, account_id=None):
                        "manifest_sha256": hashlib.sha256(json.dumps(manifest, sort_keys=True,
                            ensure_ascii=False).encode()).hexdigest()}
         target = directory / "destination.json"
-        checkpoint = directory / "upload.json"
-        if checkpoint.exists() and not target.exists():
+        uploads = directory / "uploads"
+        if uploads.is_symlink() or (directory / "upload.json").exists():
+            raise BronzeIngestError("Layout de recuperação inválido ou anterior; reconciliação obrigatória")
+        checkpoint = uploads / (revision_fingerprint(request) + ".json")
+        if uploads.exists() and not target.exists():
             raise BronzeIngestError("Destino perdido; recuperar vínculo original antes da rede")
         if target.exists():
             saved_destination = json.loads(target.read_bytes())
@@ -164,6 +169,7 @@ def submit_legacy_recovery(bronze, client, *, workspace, account_id=None):
                 raise BronzeIngestError("Checkpoint perdido após tentativa; recuperar recibo original")
         else:
             write_json(target, {"destination": destination, "attempted": False})
+        uploads.mkdir(exist_ok=True)
         if checkpoint.exists():
             if json.loads(checkpoint.read_bytes()).get("request") != request:
                 raise BronzeIngestError("Pedido congelado diverge do original")

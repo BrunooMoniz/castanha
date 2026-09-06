@@ -28,7 +28,7 @@ manifesto existente e destino autorizado explícito. Sua chamada operacional fic
 condicionada ao F4H, backup, revisão e canário. O endpoint autenticado resolve a
 conta. Não há destino deduzido por título, calendário ou nome do arquivo.
 
-O envelope usa identidade `castanha-legacy:<migration_id>` e referência ao SHA-256
+O envelope usa identidade `castanha:<sha256(migration:UUID)>` e referência ao SHA-256
 do áudio, sem caminho privado nem nomes de convidados. O áudio não é enviado;
 o texto integral é enviado como projeção, com fatos vazios. A referência preserva
 vínculo ao original local, não afirma que o áudio está armazenado no servidor.
@@ -47,6 +47,7 @@ reais, gravação pessoal ou exclusão em produção.
 
 Antes de operação real, fazer backup dos originais e do diretório de recuperação.
 Para interromper, parar de chamar a ferramenta e preservar manifesto, destino e
-upload. Não apagar esses arquivos, não gerar UUID substituto e não usar remember
+diretório `uploads` (checkpoints e ledger terminal independente). Não apagar esses
+arquivos, não gerar UUID substituto e não usar remember
 como fallback. Recuperar evidências do backup antes de qualquer nova tentativa.
 Nenhuma instalação, migração de dados real ou publicação faz parte deste commit.
