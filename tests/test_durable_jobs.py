@@ -627,6 +627,40 @@ class TestDurableJobs(unittest.TestCase):
         self.assertTrue((self.engine.storage.gold_dir / f'{slug}.json').exists())
         self.assertEqual((bronze / 'transcript_raw.txt').read_text(), 'Decisão preservada')
 
+    def test_quota_on_appended_recording_never_reports_the_old_delivery_as_saved(self):
+        """Reunião já entregue + segunda gravação + cota: resultado é pendente, não o recibo antigo,
+        e a fila mantém o backoff em vez de zerá-lo."""
+        from castanha.retry import drain_queue
+        from castanha.summarizer import LlmUnavailable
+        delivered = {'status': 'ok', 'remember_id': 'r-1', 'note_status': 'ok', 'facts_status': 'none'}
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.zinom, 'ingest_meeting', return_value=delivered):
+            provider.return_value.transcribe.return_value = self.transcription()
+            slug = self.engine.stop_recording()['result']['slug']
+        receipt_before = self.engine.storage._read_bronze_metadata(slug)['zinom']
+        self.assertEqual(receipt_before['status'], 'ok')
+        self.engine.state_mgr.write({'status': 'recording', 'audio_path': str(self.source),
+                                     'target_meeting_slug': slug, 'current_meeting': {'title': 'Fixture'}})
+        self.engine.summarizer.api_key = 'synthetic-fixture-only'
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.summarizer, 'generate_silver', side_effect=LlmUnavailable('cota')), \
+             patch.object(self.engine.zinom, 'ingest_meeting') as ingest:
+            provider.return_value.transcribe.return_value = self.transcription('Segunda parte')
+            result = self.engine.stop_recording()
+            ingest.assert_not_called()
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['result']['zinom']['status'], 'pending')
+        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['zinom'], receipt_before)
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch('castanha.summarizer.MeetingSummarizer.generate_silver', side_effect=LlmUnavailable('cota')):
+            first = drain_queue(self.engine.storage, now=1000.0)
+            self.assertEqual([r['status'] for r in first], ['pending'])
+            provider.assert_not_called()
+            receipt = json.loads((self.engine.storage.bronze_dir / slug / '.sync-retry.json').read_text())
+            self.assertEqual(receipt['attempts'], 1)
+            self.assertGreater(receipt['next_attempt_at'], 1000.0)
+            self.assertEqual(drain_queue(self.engine.storage, now=1001.0), [])
+
     def test_summary_pending_meeting_is_a_retry_candidate(self):
         from castanha.sync import pending_candidates
         self.engine.summarizer.api_key = 'synthetic-fixture-only'

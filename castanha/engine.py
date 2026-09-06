@@ -601,7 +601,9 @@ class CastanhaEngine:
                 "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
                 "transcription_provider": provider, "transcription_error": transcription_error,
                 "summary_status": "pending", "summary_error": str(exc),
-                "zinom": metadata.get("zinom") or {"status": "pending"},
+                # O recibo antigo (se houver) fica no metadata; o resultado desta
+                # rodada é pendente, senão a fila zera o backoff e o CLI diz "salvo".
+                "zinom": {"status": "pending", "reason": f"Resumo pendente: {exc}"},
                 "problemas": errors + [f"Resumo pendente: {exc}"]}}
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
@@ -838,7 +840,8 @@ class CastanhaEngine:
                     "transcription_provider": meta.get("transcription_provider") or "failed",
                     "transcription_error": meta.get("transcription_error"),
                     "summary_status": "pending", "summary_error": str(exc),
-                    "zinom": zinom_status, "problemas": [f"Resumo pendente: {exc}"]}}
+                    "zinom": {"status": "pending", "reason": f"Resumo pendente: {exc}"},
+                    "problemas": [f"Resumo pendente: {exc}"]}}
             self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
             gold_path = self.storage.save_gold(slug, gold_data)
