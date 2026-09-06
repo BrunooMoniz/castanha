@@ -25,6 +25,7 @@ import hashlib
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 from castanha.config import load_config
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -180,7 +181,7 @@ class ZinomMcpClient:
         try:
             result = self._rpc("tools/call", {"name": name, "arguments": arguments})
         except ZinomSessionError:
-            if not _retry:
+            if not _retry or name == "brain_ingest":
                 raise
             self.connect()
             return self.call_tool(name, arguments, _retry=False)
@@ -282,6 +283,10 @@ class ZinomAdapter:
         self.enabled = z_cfg.get("enabled", False)
         self.endpoint = z_cfg.get("endpoint", "https://zinom.ai/mcp")
         self.token = z_cfg.get("token", "")
+        self.bronze_enabled = z_cfg.get("bronze_ingest_enabled", False) is True
+        self.workspace = z_cfg.get("workspace")
+        self.account_id = z_cfg.get("account_id")
+        self.bronze_dir = Path(cfg.get("storage", {}).get("bronze_dir", "~/Notes/Meetings/bronze")).expanduser()
 
     def ingest_meeting(
         self,
@@ -290,13 +295,34 @@ class ZinomAdapter:
         gold_data: Dict[str, Any],
         previous_remember_id: Optional[str] = None,
         on_remember=None,
+        bronze_directory=None,
     ) -> Dict[str, Any]:
         """Envia fatos e notas da reunião para a memória durável do Zinom."""
         # Nada de alimentar o segundo cérebro com gravação muda ou transcrição
         # falha: o que entra no Zinom é durável, e vale mais calar do que gravar lixo.
         previous = metadata.get("zinom") or {}
-        if previous.get("status") == "tombstoned":
-            return {"status": "tombstoned", "reason": "Nota removida no Zinom; exclusão preservada"}
+        if not isinstance(previous, dict):
+            return {"status": "error", "reason": "Recibo Zinom inválido"}
+        if previous.get("status") in ("tombstoned", "superseded"):
+            return {"status": previous["status"], "reason": "Estado terminal preservado"}
+        source = previous.get("source") or {}
+        slug = metadata.get("slug")
+        safe_slug = isinstance(slug, str) and slug not in ("", ".", "..") and "/" not in slug and "\\" not in slug
+        bronze = (Path(bronze_directory) if bronze_directory is not None else
+                  self.bronze_dir / slug if safe_slug else None)
+        has_bronze_history = bronze is not None and (bronze / ".brain-ingest" / "destination.json").exists()
+        if self.bronze_enabled or has_bronze_history or (isinstance(source, dict) and source.get("transport") == "bronze"):
+            if not self.bronze_enabled or not self.enabled or not self.token:
+                return {"status": "pending", "source": {"transport": "bronze"},
+                        "reason": "Ponte Bronze desligada ou sem token; sem fallback legado"}
+            if metadata.get("processing_status") == "pending":
+                return {"status": "pending", "source": {"transport": "bronze"},
+                        "reason": "Processamento da gravação pendente"}
+            from castanha.bronze_ingest import ingest_current_recordings
+            if not safe_slug:
+                return {"status": "error", "reason": "Identidade da reunião inválida"}
+            return ingest_current_recordings(bronze, slug, metadata,
+                ZinomMcpClient(self.endpoint, self.token), workspace=self.workspace, account_id=self.account_id)
         previous_remember_id = previous_remember_id or previous.get("remember_id")
         memory_ids = metadata.get("memory_recording_ids")
         providers = [metadata.get("transcription_provider")] + [

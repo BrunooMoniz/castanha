@@ -4,13 +4,13 @@ Transcrição é projeção do áudio, nunca original sonoro nem prova de presen
 O chamador persiste o pedido antes da rede e reutiliza exatamente o mesmo pedido
 ao recuperar uma resposta perdida. A fronteira MCP resolve a conta autenticada.
 """
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-from castanha.durability import write_json
+from castanha.durability import meeting_lock, write_json
 from castanha.zinom_adapter import ZinomError, tool_json
 
 
@@ -49,13 +49,13 @@ def _source_timestamp(value: Any) -> dict:
 
 def build_transcript_request(slug: str, metadata: dict, transcript: str, *,
                              captured_at: str, account_id: str | None = None,
-                             workspace: str | None = None) -> dict:
+                             workspace: str | None = None, recording_id: str | None = None) -> dict:
     """Envelope integral + chave determinística. Sem fatos sem passagem citada."""
     if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
         raise BronzeIngestError("Identidade da reunião inválida")
     if not isinstance(metadata, dict):
         raise BronzeIngestError("Metadados inválidos")
-    if not isinstance(workspace, str) or not workspace.strip() or workspace != workspace.strip():
+    if not isinstance(workspace, str) or not workspace.strip() or workspace != workspace.strip() or len(workspace) > 256 or "\x00" in workspace:
         raise BronzeIngestError("Workspace de destino explícito obrigatório")
     delivery = metadata.get("zinom")
     if delivery is not None and not isinstance(delivery, dict):
@@ -76,15 +76,17 @@ def build_transcript_request(slug: str, metadata: dict, transcript: str, *,
             continue
         if recording.get("transcription_provider") in ("mock", "failed"):
             raise BronzeIngestError("Gravação simulada ou falha incluída na transcrição")
-    if not isinstance(transcript, str) or not transcript.strip():
+    if not isinstance(transcript, str) or not transcript.strip() or "\x00" in transcript:
         raise BronzeIngestError("Transcrição vazia")
     # Limite conservador em bytes, compatível com o teto do servidor.
     if len(transcript.encode("utf-8")) > 8 * 1024 * 1024:
         raise BronzeIngestError("Transcrição excede limite; original preservado, sem truncamento")
     title = metadata.get("title") or "Reunião"
-    if not isinstance(title, str) or len(title) > 1000:
+    if not isinstance(title, str) or len(title) > 1000 or "\x00" in title:
         raise BronzeIngestError("Título inválido")
-    origin = "castanha:" + _sha(slug)
+    if not isinstance(recording_id, str) or not recording_id.strip() or len(recording_id) > 256 or "\x00" in recording_id:
+        raise BronzeIngestError("Identidade nativa da gravação obrigatória")
+    origin = "castanha:" + _sha(recording_id)
     envelope = {
         "schema": "bruno.wiki.bronze.documento", "versao": 1,
         "produtor": {"nome": "castanha", "versao": "0.1.0"},
@@ -97,7 +99,7 @@ def build_transcript_request(slug: str, metadata: dict, transcript: str, *,
                           "origem_id": origin},
     }
     if account_id is not None:
-        if not isinstance(account_id, str) or not account_id.strip() or len(account_id) > 256:
+        if not isinstance(account_id, str) or not account_id.strip() or len(account_id) > 256 or "\x00" in account_id:
             raise BronzeIngestError("Conta explícita inválida")
         envelope["account_id"] = account_id
     # Mudanças de conteúdo ou metadados são revisões novas; retry do mesmo
@@ -107,28 +109,32 @@ def build_transcript_request(slug: str, metadata: dict, transcript: str, *,
     return {"idempotency_key": "castanha:v1:" + _sha(canonical), **payload}
 
 
+def revision_fingerprint(request: dict) -> str:
+    identity = {**request["envelope"], "proveniencia": {
+        key: value for key, value in request["envelope"]["proveniencia"].items()
+        if key != "capturado_em"
+    }}
+    fingerprint = _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False))
+    return fingerprint
+
+
 def prepare_transcript_upload(directory: Path, slug: str, metadata: dict, transcript: str, *,
                               captured_at: str, account_id: str | None = None,
-                              workspace: str | None = None) -> Path:
+                              workspace: str | None = None, recording_id: str | None = None) -> Path:
     """Publica checkpoint antes da rede. O chamador mantém meeting_lock.
 
     O relógio da tentativa não muda a identidade de uma revisão já preparada.
     Cada revisão tem arquivo próprio; uma falha não apaga recibos anteriores.
     """
     request = build_transcript_request(slug, metadata, transcript,
-                                       captured_at=captured_at, account_id=account_id, workspace=workspace)
-    identity = {**request["envelope"], "proveniencia": {
-        key: value for key, value in request["envelope"]["proveniencia"].items()
-        if key != "capturado_em"
-    }}
-    fingerprint = _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False))
-    checkpoint = Path(directory) / (fingerprint + ".json")
+                                       captured_at=captured_at, account_id=account_id, workspace=workspace, recording_id=recording_id)
+    checkpoint = Path(directory) / (revision_fingerprint(request) + ".json")
     if checkpoint.exists():
         try:
             saved = json.loads(checkpoint.read_text(encoding="utf-8"))
             instant = saved["request"]["envelope"]["proveniencia"]["capturado_em"]
             expected = build_transcript_request(slug, metadata, transcript,
-                                                captured_at=instant, account_id=account_id, workspace=workspace)
+                                                captured_at=instant, account_id=account_id, workspace=workspace, recording_id=recording_id)
             if saved["request"] != expected:
                 raise BronzeIngestError("Checkpoint diverge do original")
         except (ValueError, KeyError, TypeError) as exc:
@@ -173,6 +179,9 @@ def submit_transcript_upload(checkpoint: Path, client) -> dict:
             # para contornar uma chave invisível ou uma autorização revogada.
             lookup = False
             payload = tool_json(client.call_tool("brain_ingest", request))
+        if (("sourceId" in payload and payload["sourceId"] != request["envelope"]["source_id"]) or
+                ("sourceType" in payload and payload["sourceType"] != "castanha")):
+            raise BronzeIngestError("Recibo remoto não corresponde à origem")
         if lookup and (payload.get("sourceId") != request["envelope"]["source_id"] or
                        payload.get("sourceType") != request["envelope"]["source_type"] or
                        payload.get("replay") is not True or
@@ -182,9 +191,10 @@ def submit_transcript_upload(checkpoint: Path, client) -> dict:
             raise BronzeIngestError("Recibo remoto não corresponde à origem")
         state = payload.get("status")
         if (payload.get("ok") is not True or
-                type(payload.get("jobId")) is not int or payload["jobId"] <= 0 or
-                type(payload.get("revisionId")) is not int or payload["revisionId"] <= 0 or
-                type(payload.get("checkpoint")) is not int or payload["checkpoint"] < 0 or
+                type(payload.get("jobId")) is not int or not 0 < payload["jobId"] <= 9007199254740991 or
+                type(payload.get("revisionId")) is not int or not 0 < payload["revisionId"] <= 9007199254740991 or
+                type(payload.get("checkpoint")) is not int or not 0 <= payload["checkpoint"] <= 2 or
+                (state == "completed" and payload["checkpoint"] != 2) or
                 type(payload.get("replay")) is not bool or
                 state not in ("pending", "processing", "retry", "completed", "failed", "tombstoned", "superseded")):
             raise BronzeIngestError("Recibo remoto inválido; entrega não confirmada")
@@ -211,3 +221,131 @@ def submit_transcript_upload(checkpoint: Path, client) -> dict:
                   "reason": "Ingestão não confirmada; pedido preservado para retomada"}
     write_json(checkpoint, {**saved, "status": result["status"], "result": result})
     return result
+
+
+def current_recordings(bronze: Path, metadata: dict):
+    """Somente texto integral dos jobs nativos; legado sem identidade falha fechado."""
+    records = metadata.get("recordings")
+    if not isinstance(records, list) or not records:
+        raise BronzeIngestError("Gravações nativas ausentes; original preservado")
+    memory_ids = metadata.get("memory_recording_ids")
+    if memory_ids is not None and (not isinstance(memory_ids, list) or
+                                   any(not isinstance(i, str) for i in memory_ids)):
+        raise BronzeIngestError("Seleção de gravações inválida")
+    selected = []
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise BronzeIngestError("Gravação inválida")
+        if memory_ids is not None and record.get("id") not in memory_ids:
+            continue
+        native_id = record.get("job_id")
+        if (not isinstance(native_id, str) or not native_id or native_id in (".", "..")
+                or "/" in native_id or "\\" in native_id or native_id in seen):
+            raise BronzeIngestError("Identidade nativa ausente ou ambígua; original preservado")
+        seen.add(native_id)
+        job = json.loads((bronze / ".jobs" / (native_id + ".json")).read_bytes())
+        if (job.get("id") != native_id or job.get("stage") not in ("done", "transcribed")
+                or job.get("provider") in (None, "mock", "failed", "pending")
+                or job.get("provider") != record.get("transcription_provider")):
+            raise BronzeIngestError("Job não comprova transcrição atual da gravação")
+        item_metadata = {**metadata, "recordings": [record],
+                         "recorded_at": job.get("recorded_at"),
+                         "transcription_provider": job["provider"]}
+        selected.append((native_id, item_metadata, job.get("transcript")))
+    if not selected or (memory_ids is not None and
+                        set(memory_ids) != {r.get("id") for r in records if r.get("id") in memory_ids}):
+        raise BronzeIngestError("Transcrição sem gravações de origem verificáveis")
+    return selected
+
+
+def current_requests(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None):
+    instant = datetime.now(timezone.utc).isoformat()
+    return [(native_id, item_metadata, text, build_transcript_request(
+        slug, item_metadata, text, captured_at=instant, recording_id=native_id,
+        workspace=workspace, account_id=account_id))
+        for native_id, item_metadata, text in current_recordings(bronze, metadata)]
+
+
+def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None) -> bool:
+    """Um recibo antigo não conclui uma revisão alterada em disco."""
+    try:
+        requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
+        for _, _, _, request in requests:
+            path = bronze / ".brain-ingest" / (revision_fingerprint(request) + ".json")
+            saved = json.loads(path.read_bytes())
+            old = saved["request"]
+            canonical = json.dumps({"envelope": old["envelope"], "facts": old["facts"]},
+                                   sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            if old["idempotency_key"] != "castanha:v1:" + _sha(canonical):
+                return True
+            if revision_fingerprint(old) != revision_fingerprint(request):
+                return True
+            if saved.get("status") not in ("ok", "tombstoned", "superseded"):
+                return True
+            result = saved.get("result", {})
+            if result.get("status") != saved["status"]:
+                return True
+            if saved["status"] == "ok":
+                ingestion = result.get("ingestion", {})
+                if (ingestion.get("state") != "completed" or
+                        ingestion.get("source_id") != request["envelope"]["source_id"] or
+                        saved.get("remote_identity") != {"job_id": ingestion.get("job_id"),
+                                                        "revision_id": ingestion.get("revision_id")}):
+                    return True
+        return False
+    except (ValueError, TypeError, KeyError, OSError, AttributeError):
+        return True
+
+
+def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *,
+                              workspace, account_id=None) -> dict:
+    """Chamador mantém meeting_lock; lock adicional serializa a entrega e origem.
+
+    O resultado usa `source`, campo preservado pelo storage e pelo fluxo durável.
+    Destino é congelado antes da rede para não redirecionar uma resposta perdida.
+    """
+    directory = bronze / ".brain-ingest"
+    directory.mkdir(exist_ok=True)
+    with meeting_lock(directory):
+        try:
+            requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
+            destination = {"endpoint": client.endpoint, "workspace": workspace, "account_id": account_id,
+                           "credential_sha256": _sha(client.token)}
+            destination_path = directory / "destination.json"
+            if destination_path.exists():
+                if json.loads(destination_path.read_bytes()) != destination:
+                    raise BronzeIngestError("Destino mudou; retome com a configuração original")
+            else:
+                write_json(destination_path, destination)
+            results = []
+            for native_id, item_metadata, text, request in requests:
+                # Mesmo job copiado/movido para outra reunião não corre em paralelo.
+                origin_lock = bronze.parent / ".brain-ingest-locks" / _sha(native_id)
+                origin_lock.mkdir(parents=True, exist_ok=True)
+                with meeting_lock(origin_lock):
+                    path = prepare_transcript_upload(directory, slug, item_metadata, text,
+                        captured_at=request["envelope"]["proveniencia"]["capturado_em"],
+                        workspace=workspace, account_id=account_id, recording_id=native_id)
+                    # Exclusão é da origem, inclusive quando o texto local mudou.
+                    terminal = None
+                    for old_path in directory.glob("*.json"):
+                        old = json.loads(old_path.read_bytes())
+                        if (old.get("request", {}).get("envelope", {}).get("source_id") ==
+                                request["envelope"]["source_id"] and old.get("status") == "tombstoned"):
+                            terminal = old.get("result")
+                            if not isinstance(terminal, dict) or terminal.get("status") != "tombstoned":
+                                raise BronzeIngestError("Recibo terminal corrompido")
+                            break
+                    result = terminal or submit_transcript_upload(path, client)
+                    results.append({"checkpoint": path.name, **result})
+            states = {r["status"] for r in results}
+            status = ("error" if "error" in states else "pending" if "pending" in states else
+                      "tombstoned" if "tombstoned" in states else
+                      "superseded" if "superseded" in states else "ok")
+            return {"status": status, "source": {"transport": "bronze", "revisions": results},
+                    "facts_status": "none", "facts_pending": [], "facts_ingested": 0}
+        except Exception as exc:
+            return {"status": "error", "source": {"transport": "bronze"},
+                    "reason": "Ingestão não confirmada; originais preservados para retomada",
+                    "errors": [f"Ponte Bronze: {type(exc).__name__}"]}

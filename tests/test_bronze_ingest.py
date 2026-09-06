@@ -18,7 +18,7 @@ class TestBronzeEnvelope(unittest.TestCase):
         return build_transcript_request("fixture-meeting", {
             "title": "Reunião sintética", "recorded_at": "2026-09-05T10:30:11",
             "transcription_provider": "groq", "audio_status": "ok", **metadata,
-        }, text, captured_at="2026-09-05T17:00:00-03:00", workspace="fixture-workspace")
+        }, text, captured_at="2026-09-05T17:00:00-03:00", workspace="fixture-workspace", recording_id="native-fixture")
 
     def test_integral_unicode_content_and_exact_hash(self):
         text = "Decisão com ação e emoji 🌰\r\n" * 4000
@@ -45,6 +45,15 @@ class TestBronzeEnvelope(unittest.TestCase):
             with self.subTest(workspace=workspace), self.assertRaises(BronzeIngestError):
                 build_transcript_request("fixture", {}, "texto", workspace=workspace,
                                          captured_at="2026-09-05T10:00:00-03:00")
+
+    def test_native_id_is_required_and_independent_of_slug(self):
+        with self.assertRaises(BronzeIngestError):
+            build_transcript_request("fixture", {}, "texto", workspace="fixture-workspace",
+                                     captured_at="2026-09-05T10:00:00-03:00")
+        first = self.build()
+        renamed = build_transcript_request("renamed", {}, "outro texto", workspace="fixture-workspace",
+            recording_id="native-fixture", captured_at="2026-09-05T10:00:00-03:00")
+        self.assertEqual(first["envelope"]["source_id"], renamed["envelope"]["source_id"])
 
     def test_does_not_invent_account_presence_or_facts(self):
         request = self.build(calendar_event={"attendees": [{"name": "Convidado"}]})
@@ -73,7 +82,7 @@ class TestBronzeEnvelope(unittest.TestCase):
 
     def test_capture_requires_explicit_timezone(self):
         with self.assertRaises(BronzeIngestError):
-            build_transcript_request("fixture", {}, "texto", workspace="fixture-workspace",
+            build_transcript_request("fixture", {}, "texto", workspace="fixture-workspace", recording_id="native-fixture",
                                      captured_at="2026-09-05T10:00:00")
 
     def test_missing_source_date_is_explicit(self):
@@ -91,12 +100,12 @@ class TestBronzeUpload(unittest.TestCase):
 
     def prepare(self, instant="2026-09-05T17:00:00-03:00", text="transcrição"):
         return prepare_transcript_upload(self.directory, "fixture", self.metadata, text,
-                                         captured_at=instant, workspace="fixture-workspace")
+                                         captured_at=instant, workspace="fixture-workspace", recording_id="native-fixture")
 
     def response(self, state="pending", **extra):
         return {"content": [{"type": "text", "text": json.dumps({
             "ok": True, "jobId": 12, "revisionId": 34, "status": state,
-            "checkpoint": 0, "replay": True, "attempts": 1, "lastError": None,
+            "checkpoint": 2 if state == "completed" else 0, "replay": True, "attempts": 1, "lastError": None,
             "sourceId": json.loads(self.path.read_text())["request"]["envelope"]["source_id"],
             "sourceType": "castanha", **extra})}]}
 
@@ -136,6 +145,16 @@ class TestBronzeUpload(unittest.TestCase):
         client = Mock()
         client.call_tool.return_value = self.response("completed", jobId=True)
         self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
+
+    def test_receipt_rejects_unsafe_ids_incomplete_ack_and_wrong_initial_origin(self):
+        for extra in ({"jobId": 9007199254740992}, {"revisionId": 9007199254740992},
+                      {"checkpoint": 0}, {"checkpoint": 3}, {"sourceId": "wrong"},
+                      {"sourceType": "wrong"}):
+            with self.subTest(extra=extra):
+                self.path = self.prepare(text=json.dumps(extra))
+                client = Mock()
+                client.call_tool.return_value = self.response("completed", **extra)
+                self.assertEqual(submit_transcript_upload(self.path, client)["status"], "error")
 
     def test_initial_enqueue_accepts_only_server_enqueue_fields(self):
         client = Mock()
@@ -241,7 +260,7 @@ class TestBronzeUpload(unittest.TestCase):
                         return
                     result = {"content": [{"type": "text", "text": json.dumps({
                         "ok": True, "jobId": 12, "revisionId": 34,
-                        "checkpoint": 0, "replay": True, "attempts": 1, "lastError": None,
+                        "checkpoint": 2, "replay": True, "attempts": 1, "lastError": None,
                         "sourceId": accepted[key]["envelope"]["source_id"], "sourceType": "castanha",
                         "idempotent": True, "status": "completed"})}]}
                 encoded = json.dumps({"jsonrpc": "2.0", "id": body["id"],

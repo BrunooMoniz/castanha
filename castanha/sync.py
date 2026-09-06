@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from castanha.storage import MeetingStorage
+from castanha.config import load_config
 from castanha.durability import meeting_lock, write_json
 from castanha.zinom_adapter import ZinomAdapter
 
@@ -31,7 +32,7 @@ def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
     z = metadata.get("zinom") or {}
     if not isinstance(z, dict):
         return True
-    if z.get("status") == "tombstoned":
+    if z.get("status") in ("tombstoned", "superseded"):
         return False
     if metadata.get("processing_status") == "pending":
         return True
@@ -44,6 +45,8 @@ def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
 
 def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[str, Any]:
     storage = storage or MeetingStorage()
+    if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+        return {"slug": slug, "status": "error", "errors": ["Identidade da reunião inválida"]}
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
@@ -107,7 +110,7 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
     anterior = (metadata.get("zinom") or {}).get("remember_id")
     write_json(metadata_file, metadata)
     resultado = ZinomAdapter().ingest_meeting(
-        metadata, silver, gold, previous_remember_id=anterior,
+        metadata, silver, gold, previous_remember_id=anterior, bronze_directory=bronze,
         on_remember=lambda receipt: storage.record_zinom_result(slug, receipt),
     )
     storage.record_zinom_result(slug, resultado)
@@ -117,6 +120,7 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
 def pending_candidates(storage: MeetingStorage):
     """Inventário comum ao comando manual e à retomada automática."""
     candidates = []
+    z_cfg = load_config().get("zinom", {})
     for bronze in storage.bronze_dir.iterdir():
         if not bronze.is_dir():
             continue
@@ -130,10 +134,17 @@ def pending_candidates(storage: MeetingStorage):
             candidates.append(("", bronze.name))
             continue
         delivery = delivery or {}
-        if delivery.get("status") == "tombstoned":
+        if delivery.get("status") in ("tombstoned", "superseded"):
             continue
         unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
-        if meeting_needs_sync(metadata) or unfinished:
+        bronze_pending = False
+        source = delivery.get("source") or {}
+        if z_cfg.get("bronze_ingest_enabled", False) is True or (bronze / ".brain-ingest").exists() or (
+                isinstance(source, dict) and source.get("transport") == "bronze"):
+            from castanha.bronze_ingest import bronze_needs_sync
+            bronze_pending = bronze_needs_sync(bronze, bronze.name, metadata,
+                workspace=z_cfg.get("workspace"), account_id=z_cfg.get("account_id"))
+        if meeting_needs_sync(metadata) or unfinished or bronze_pending:
             synced_at = delivery.get("synced_at")
             candidates.append((synced_at if isinstance(synced_at, str) else "", path.parent.name))
     candidates.sort()
