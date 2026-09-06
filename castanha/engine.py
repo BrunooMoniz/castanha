@@ -59,7 +59,7 @@ class CastanhaEngine:
         self.zinom = ZinomAdapter()
 
     def get_status(self) -> Dict[str, Any]:
-        return self.state_mgr.read()
+        return self.storage.status_projection(self.state_mgr.read())
 
     def _transcribe_with_fallback(self, audio_path: Path, mode: str, estimated_sec: float):
         """Transcreve com o provedor escolhido e, se ele cair, UMA vez pela VPS.

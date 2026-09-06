@@ -198,6 +198,78 @@ def legacy_recovery_pending(bronze):
         return True  # O executor reporta corrupção sem sobrescrever o original.
 
 
+def legacy_delivery_projection(bronze):
+    """Lê evidência de entrega sem alterar metadata, estado, originais ou recibos.
+
+    Projeta o recibo da transcrição congelada; não revalida nem relê o áudio a
+    cada atualização da UI. A validação sonora continua no executor de envio.
+    """
+    from castanha.bronze_ingest import _verify_terminal_receipts
+    bronze = Path(bronze)
+    directory = bronze / ".legacy-recovery"
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    try:
+        paths = [bronze, directory, directory / "manifest.json", directory / "destination.json",
+                 directory / "uploads"]
+        if any(path.is_symlink() for path in paths):
+            raise BronzeIngestError("Recuperação inválida")
+        manifest = json.loads((directory / "manifest.json").read_bytes())
+        if (manifest.get("schema") != "castanha.legacy-recovery.v1" or
+                str(uuid.UUID(manifest["migration_id"])) != manifest["migration_id"]):
+            raise BronzeIngestError("Manifesto inválido")
+        target = directory / "destination.json"
+        if not target.exists() and not (directory / "uploads").exists():
+            return {"status": "pending", "receipt_source": "legacy-recovery"}
+        destination = json.loads(target.read_bytes())
+        frozen = destination["destination"]
+        if (type(destination.get("attempted")) is not bool or
+                frozen["manifest_sha256"] != hashlib.sha256(json.dumps(manifest, sort_keys=True,
+                    ensure_ascii=False).encode()).hexdigest()):
+            raise BronzeIngestError("Destino ou manifesto divergente")
+        # Somente os pequenos originais textuais. Nunca executar ffprobe ou
+        # reler dezenas de MB de áudio no polling de status.
+        contents = {}
+        for kind, name in (("metadata", "metadata.json"), ("transcript", "transcript_raw.txt")):
+            path = bronze / name
+            if path.is_symlink() or path.stat().st_size > 8 * 1024 * 1024:
+                raise BronzeIngestError("Original textual inválido")
+            raw = path.read_bytes()
+            if {"file": name, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)} != manifest["source"][kind]:
+                raise BronzeIngestError("Original textual diverge")
+            contents[kind] = raw
+        metadata = json.loads(contents["metadata"])
+        request = legacy_request(manifest, metadata, contents["transcript"].decode("utf-8"),
+                                 workspace=frozen["workspace"], account_id=frozen["account_id"])
+        uploads = directory / "uploads"
+        if any(path.is_symlink() for path in uploads.iterdir()):
+            raise BronzeIngestError("Recibo inválido")
+        receipts = _verify_terminal_receipts(uploads, {})
+        name = revision_fingerprint(request) + ".json"
+        if set(receipts) != {name} or receipts[name]["request"] != request:
+            raise BronzeIngestError("Recibo ausente ou pedido divergente")
+        saved = receipts[name]
+        if destination["attempted"] is not True:
+            raise BronzeIngestError("Tentativa não comprovada")
+        result = saved.get("result") or {}
+        status = saved.get("status")
+        if status == "ok":
+            ingestion = result.get("ingestion") or {}
+            if (saved.get("attempted") is not True or ingestion.get("state") != "completed" or
+                    any(type(ingestion.get(key)) is not int or not 0 < ingestion[key] <= 9007199254740991
+                        for key in ("job_id", "revision_id"))):
+                raise BronzeIngestError("Conclusão remota não comprovada")
+            return {"status": "ok", "ingestion": ingestion, "receipt_source": "legacy-recovery"}
+        if status in ("tombstoned", "superseded"):
+            return {"status": status, "receipt_source": "legacy-recovery"}
+        if status in ("prepared", "pending"):
+            return {"status": "pending", "receipt_source": "legacy-recovery"}
+        raise BronzeIngestError("Entrega não confirmada")
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return {"status": "error", "receipt_source": "legacy-recovery",
+                "reason": "Recibo legado não confirma a entrega; originais preservados"}
+
+
 def resume_legacy_recovery(bronze, config):
     """Retoma destino já autorizado; submit valida hash, identidade e lock."""
     from castanha.zinom_adapter import ZinomMcpClient

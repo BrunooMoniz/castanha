@@ -42,7 +42,7 @@ Panel {
 
   readonly property var currentMeeting: stateData ? stateData.current_meeting : null
   readonly property var nextMeeting: stateData ? stateData.next_meeting : null
-  readonly property var lastResult: stateData ? stateData.last_result : null
+  readonly property var lastResult: DeliveryStatus.projectedLastResult(stateData ? stateData.last_result : null, recentNotes)
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
 
   // A agenda vem do daemon, que a busca nas contas Google conectadas no Zinom.

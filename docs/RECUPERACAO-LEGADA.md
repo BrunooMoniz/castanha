@@ -51,3 +51,19 @@ diretório `uploads` (checkpoints e ledger terminal independente). Não apagar e
 arquivos, não gerar UUID substituto e não usar remember
 como fallback. Recuperar evidências do backup antes de qualquer nova tentativa.
 Nenhuma instalação, migração de dados real ou publicação faz parte deste commit.
+
+## Exibição da entrega recuperada
+
+Risco AMARELO, projeção somente leitura. `castanha status --json`, `notes --json`,
+detalhe da reunião e painel consultam o recibo em `.legacy-recovery/uploads`.
+Um `completed` validado substitui na apresentação o erro HTTP histórico congelado
+em metadata/state; esses arquivos não são regravados. Tombstone não vira sucesso.
+
+Pedido, identidade remota, manifesto, destino e originais textuais precisam casar.
+Recibo ausente/corrompido ou tentativa sem conclusão fica não confirmado, nunca salvo.
+Status não usa rede, não dispara retry nem executa ffprobe/releitura do áudio grande:
+a prova de integridade sonora continua pertencendo ao executor da recuperação.
+O painel usa o recibo da nota com o mesmo slug, preservando o restante do resultado.
+
+Reversão: voltar a versão anterior do código/UI pelo instalador reversível.
+Não editar os originais para corrigir o rótulo e não apagar os recibos.

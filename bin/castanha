@@ -103,7 +103,7 @@ def cmd_toggle(args):
 
 def cmd_status(args):
     state_mgr = StateManager()
-    state = state_mgr.read()
+    state = MeetingStorage().status_projection(state_mgr.read())
     if args.json:
         print(json.dumps(state, indent=2, ensure_ascii=False))
         return

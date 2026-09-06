@@ -361,6 +361,21 @@ class MeetingStorage:
         write_json(target_file, gold_data)
         return target_file
 
+    def delivery_projection(self, slug: str, previous: Dict[str, Any]) -> Dict[str, Any]:
+        """Estado para apresentação, nunca persistido nos originais congelados."""
+        from castanha.legacy_recovery import legacy_delivery_projection
+        if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+            return previous
+        receipt = legacy_delivery_projection(self.bronze_dir / slug)
+        return receipt if receipt is not None else previous
+
+    def status_projection(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        last = state.get("last_result")
+        if not isinstance(last, dict):
+            return state
+        return {**state, "last_result": {**last, "zinom": self.delivery_projection(
+            last.get("slug"), last.get("zinom") or {})}}
+
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
         """As últimas reuniões, com metadados detalhados, participantes, transcrição e gravações."""
         results = []
@@ -417,7 +432,7 @@ class MeetingStorage:
                 "mode": meta.get("mode") or "dual",
                 "audio_status": meta.get("audio_status") or ("ok" if recordings else "audio_apagado"),
                 "audio_diagnostico": meta.get("audio_diagnostico") or "",
-                "zinom": meta.get("zinom") or {},
+                "zinom": self.delivery_projection(slug, meta.get("zinom") or {}),
                 "silver_path": str(silver_file) if silver_file.exists() else "",
                 "bronze_dir": str(self.bronze_dir / slug),
                 "gold_path": str(gold_file) if gold_file.exists() else "",
@@ -469,7 +484,7 @@ class MeetingStorage:
             "mode": meta.get("mode") or "dual",
             "audio_status": meta.get("audio_status") or ("ok" if recordings else "audio_apagado"),
             "audio_diagnostico": meta.get("audio_diagnostico") or "",
-            "zinom": meta.get("zinom") or {},
+            "zinom": self.delivery_projection(slug, meta.get("zinom") or {}),
             "silver_path": str(silver_file) if silver_file.exists() else "",
             "bronze_dir": str(bronze_dir),
             "gold_path": str(gold_file) if gold_file.exists() else "",
