@@ -775,13 +775,15 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             elide: Text.ElideRight
-            width: Math.max(0, parent.width - Style.space(46) - Style.space(20))
+            // Hora + dois espaçamentos da Row + o slot do botão: antes faltava um
+            // espaçamento e o slot era menor que o botão, que saía cortado à direita.
+            width: Math.max(0, parent.width - Style.space(38) - 2 * Style.space(8) - acaoEsconder.width)
           }
 
           // Slot de largura fixa: o ícone de chamada e o botão de esconder se
           // revezam DENTRO dele, então entrar com o mouse não reflui a linha.
           Item {
-            width: Style.space(20)
+            width: acaoEsconder.width
             height: acaoEsconder.height
             anchors.verticalCenter: parent.verticalCenter
 
@@ -1087,7 +1089,7 @@ Panel {
             font.pixelSize: Style.font.body
             font.bold: noteRow.aberta
             elide: Text.ElideRight
-            width: Math.max(0, parent.width - Style.space(24) - Style.space(8)
+            width: Math.max(0, parent.width - Style.space(24) - 2 * Style.space(8)
                             - Math.max(quando.implicitWidth, Style.space(20)))
           }
 

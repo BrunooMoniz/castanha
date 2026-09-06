@@ -388,7 +388,7 @@ class MeetingStorage:
                 slugs.add(f.stem)
         if self.bronze_dir.exists():
             for d in self.bronze_dir.iterdir():
-                if d.is_dir():
+                if d.is_dir() and not d.name.startswith("."):
                     slugs.add(d.name)
 
         if not slugs:
