@@ -22,6 +22,7 @@ from castanha.audio import (
 )
 from castanha.calendar import MeetingEvent
 from castanha.channel_transcription import transcribe_dual
+from castanha.capture_gate import capture_start
 from castanha.config import load_config
 from castanha.durability import atomic_write, write_json, meeting_lock, sync_directory, file_sha256
 from castanha.state import StateManager
@@ -94,6 +95,7 @@ class CastanhaEngine:
                 # LLM e virava um "resumo" fabricado em cima de um traceback.
                 return "", "failed", str(err2)
 
+    @capture_start
     def start_recording(
         self,
         mode: Optional[str] = None,
@@ -302,7 +304,8 @@ class CastanhaEngine:
         """Flag DESLIGADA por padrão: ligar exige contrato F4, QA no XPS e rollback."""
         return self.config.get("transcription", {}).get("por_canal") is True
 
-    def _transcrever_por_canal(self, source: Path, bronze: Path, capture_mode: str = "dual"):
+    def _transcrever_por_canal(self, source: Path, bronze: Path, capture_mode: str = "dual",
+                              job_file: Path = None, job: dict = None):
         """Um envio por canal, cada um com orçamento, teto e checkpoint próprios.
 
         O canal já transcrito fica no checkpoint dentro do Bronze: falhar no
@@ -310,18 +313,65 @@ class CastanhaEngine:
         genérica em vez de alegar microfone e sistema onde só existe um canal.
         """
         from castanha.budget import BudgetManager
-        from castanha.transcription import TranscriptionPending, VpsSshTranscriber
+        from castanha.transcription import (VpsSshTranscriber, TranscriptionPending,
+                                            provider_selection, restore_provider)
 
+        cfg = load_config().get("transcription", {})
+        revision = cfg.get("provider_revision", 0)
+        if type(revision) is not int or revision < 0:
+            raise TranscriptionPending("Revisão de provedor inválida")
+        selection_path = bronze / ".providers" / (file_sha256(source) + ".json")
+        saved_selection = json.loads(selection_path.read_text()) if selection_path.exists() else None
+        recording_transcriber, selection = None, None
+        if saved_selection is not None:
+            # Validar antes de ler revision; corrupção nunca libera nova seleção.
+            restore_provider(saved_selection, require_credentials=False)
+            if revision <= saved_selection["revision"]:
+                selection = saved_selection
+                recording_transcriber = restore_provider(saved_selection)
+                revision = selection["revision"]
+        checkpoint_root = bronze / ".channels"
+        if revision:
+            checkpoint_root = checkpoint_root / f"revision-{revision}"
         selected = {}
+
+        class ChannelBudget:
+            transcriber = None
+
+            def can_use_groq(self, duration):
+                # O teto de duração continua comum; orçamento Groq não veta VPS.
+                return isinstance(self.transcriber, VpsSshTranscriber) or budget.can_use_groq(duration)
+
+        budget = BudgetManager()
+        channel_budget = ChannelBudget()
 
         def configuration(entry):
             # Resolver antes do replay: mudar o provedor efetivo também invalida
             # o checkpoint. A seleção não envia áudio e não registra consumo.
-            transcriber = get_transcriber(estimated_duration_sec=entry["duration_seconds"])
+            nonlocal recording_transcriber, selection
+            if recording_transcriber is None:
+                recording_transcriber = get_transcriber(estimated_duration_sec=entry["duration_seconds"])
+                selection = provider_selection(recording_transcriber, cfg)
+                if selection is not None:
+                    if saved_selection is not None:
+                        if (selection["selected_provider"] != saved_selection["selected_provider"]
+                                and selection.get("fallback_from") != saved_selection["selected_provider"]):
+                            raise TranscriptionPending("Troca de provedor exige fallback_from explícito")
+                        archive = selection_path.parent / "history" / f"{selection_path.stem}-r{saved_selection['revision']}.json"
+                        if not archive.exists():
+                            write_json(archive, saved_selection)
+                    # Publicar seleção antes de qualquer chamada do provedor.
+                    write_json(selection_path, selection)
+            transcriber = recording_transcriber
+            if selection is not None and job is not None and job_file is not None:
+                job.update(selected_provider=selection["selected_provider"],
+                           provider_selection=selection, provider_revision=selection["revision"],
+                           fallback_from=selection.get("fallback_from"))
+                write_json(job_file, job)
             selected[str(entry["path"])] = transcriber
-            cfg = load_config().get("transcription", {})
+            channel_budget.transcriber = transcriber
             model = getattr(transcriber, "model", None)
-            return {"effective_provider": type(transcriber).__name__,
+            configuration = {"effective_provider": type(transcriber).__name__,
                     "result_provider": {"GroqTranscriber": "groq", "DeepgramTranscriber": "deepgram",
                                         "VpsSshTranscriber": "vps_whisper_large_v3",
                                         "MockTranscriber": "mock"}.get(type(transcriber).__name__),
@@ -332,21 +382,22 @@ class CastanhaEngine:
                     "deepgram_model": cfg.get("deepgram_model", "nova-2"),
                     "transcribe_mode": "mic_only",
                     "origin_policy": "capture-mode-v2"}
+            if selection is not None:
+                configuration = {"effective_provider": type(transcriber).__name__,
+                                 "result_provider": configuration["result_provider"],
+                                 "selection": selection, "transcribe_mode": "mic_only",
+                                 "transport_contract": "flac-mono-v1", "sample_rate": 16000,
+                                 "origin_policy": "capture-mode-v2"}
+            return configuration
 
         def transcrever(path: Path, duration_seconds: float):
             # A duração é a DO CANAL: o orçamento é consultado por envio, e o
             # segundo canal já enxerga o que o primeiro consumiu.
             transcriber = selected[str(path)]
-            # O job remoto guarda o áudio como .ogg e retoma por esse nome. Mandar
-            # FLAC por ali quebraria a retomada de jobs já aceitos, então até a
-            # ponte F4 cobrir a VPS o canal fica pendente em vez de subir errado.
-            if isinstance(transcriber, VpsSshTranscriber):
-                raise TranscriptionPending(
-                    "Transcrição por canal ainda não cobre a VPS; áudio preservado")
             return transcriber.transcribe(path, mode="mic_only")
 
-        return transcribe_dual(source, bronze / ".channels", transcrever,
-                               pipeline_id="canal-v2", budget=BudgetManager(),
+        return transcribe_dual(source, checkpoint_root, transcrever,
+                               pipeline_id="canal-v2", budget=channel_budget,
                                capture_mode=capture_mode, configuration_for_channel=configuration)
 
     def process_pending(self, slug: str) -> Dict[str, Any]:
@@ -377,6 +428,14 @@ class CastanhaEngine:
                         "recorded_at": first["recorded_at"], "calendar_event": state.get("current_meeting") or {},
                         "mode": state.get("mode", "dual"), "recordings": []}
         for job_file, job in jobs:
+            revision = self.config.get("transcription", {}).get("provider_revision", 0)
+            if (self._por_canal() and type(revision) is int
+                    and revision > job.get("provider_revision", 0) and job["stage"] != "pending"):
+                archive = jobs_dir / "history" / f"{job['id']}-r{job.get('provider_revision', 0)}.json"
+                if not archive.exists():
+                    write_json(archive, job)
+                job.update(stage="pending", transcript="", utterances=[], channels=[])
+                write_json(job_file, job)
             if job["stage"] != "pending":
                 continue
             source = Path(job["audio_path"])
@@ -392,7 +451,8 @@ class CastanhaEngine:
                 if audio_status == "sem_audio":
                     job.update(transcript="", provider="nenhum (áudio em silêncio)")
                 elif self._por_canal():
-                    transcription = self._transcrever_por_canal(source, bronze, capture_mode=mode)
+                    transcription = self._transcrever_por_canal(source, bronze, capture_mode=mode,
+                                                               job_file=job_file, job=job)
                     if not transcription.text.strip():
                         raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
                     job.update(transcript=transcription.text, provider=transcription.provider,
@@ -400,7 +460,16 @@ class CastanhaEngine:
                                channel_provenance=True, capture_mode=mode,
                                channels=transcription.raw_response.get("channels") or [])
                 else:
-                    transcriber = get_transcriber(estimated_duration_sec=duration or state.get("elapsed_seconds") or 60)
+                    from castanha.transcription import provider_selection, restore_provider
+                    if job.get("provider_selection"):
+                        transcriber = restore_provider(job["provider_selection"])
+                    else:
+                        transcriber = get_transcriber(estimated_duration_sec=duration or state.get("elapsed_seconds") or 60)
+                        selection = provider_selection(transcriber, self.config.get("transcription", {}))
+                        if selection is not None:
+                            job.update(selected_provider=selection["selected_provider"], provider_selection=selection,
+                                       provider_revision=selection["revision"], fallback_from=selection.get("fallback_from"))
+                            write_json(job_file, job)
                     try:
                         transcription = transcriber.transcribe(source, mode=mode)
                     except Exception as exc:
@@ -600,10 +669,40 @@ class CastanhaEngine:
             return {"status": "error", "message": f"Nenhum arquivo de áudio encontrado para a reunião '{slug}'."}
 
         texto_antes = self.storage.read_transcript(slug)
+        # Fixar a origem ANTES de promover o provider agregado. O legado não
+        # separava trechos por gravação: havendo mock, isolar o agregado inteiro
+        # é a única opção que não atribui texto simulado a uma fonte real.
+        for rec in meta.get("recordings", []):
+            rec.setdefault("transcription_provider", "pending" if rec.get("transcribed") is False
+                           else meta.get("transcription_provider"))
+        has_mock = (meta.get("transcription_provider") == "mock" or any(
+            r.get("transcription_provider") == "mock" for r in meta.get("recordings", [])))
+        isolated = has_mock and not meta.get("legacy_mock_isolated")
+        if isolated:
+            archive = bronze_dir / ".mock-history"
+            archive.mkdir(exist_ok=True)
+            # Cada publicação é atômica. Se morrer no meio, o retry conserva
+            # o primeiro snapshot e repete a limpeza antes de transcrever.
+            originals = [(bronze_dir / "metadata.json", archive / "metadata.json"),
+                         (bronze_dir / "transcript_raw.txt", archive / "transcript_raw.txt"),
+                         (self.storage.silver_dir / f"{slug}.md", archive / "silver.md"),
+                         (self.storage.gold_dir / f"{slug}.json", archive / "gold.json")]
+            for source, target in originals:
+                if source.exists() and not target.exists():
+                    atomic_write(target, source)
+            atomic_write(bronze_dir / "transcript_raw.txt", "")
+            # Sync não pode ler notas simuladas se houver morte depois de
+            # promover o provider, antes da geração das notas reais.
+            atomic_write(self.storage.silver_dir / f"{slug}.md", "")
+            write_json(self.storage.gold_dir / f"{slug}.json", {})
+        meta["legacy_mock_isolated"] = True
+        self.storage.write_bronze_metadata(slug, meta)
+        origins = {r.get("filename"): r.get("transcription_provider") for r in meta.get("recordings", [])}
         # Sem marca (reunião antiga): se já há texto, ela já foi transcrita.
         pendentes = [
             r for r in recordings
-            if r.get("transcribed") is False or (r.get("transcribed") is None and not texto_antes.strip())
+            if origins.get(r["filename"]) != "mock" and (
+                r.get("transcribed") is False or (r.get("transcribed") is None and not texto_antes.strip()))
         ]
 
         notify("Reprocessando Reunião ⏳", f"{title}\nEnviando para transcrição e gerando notas...")
@@ -639,6 +738,7 @@ class CastanhaEngine:
                 # Repetir não inventa fala: marca como resolvida.
                 self.storage.update_recording(slug, rec["filename"], transcribed=True,
                                               transcription_error=None, audio_status=audio_status,
+                                              transcription_provider="nenhum (áudio em silêncio)",
                                               duration_seconds=dur)
                 provider_final = provider_final or "nenhum (áudio em silêncio)"
                 continue
@@ -655,16 +755,26 @@ class CastanhaEngine:
             else:
                 texto, provider, erro = self._transcribe_with_fallback(audio_path, mode, dur or 60.0)
             if texto.strip():
-                self.storage.append_transcript(slug, rec["filename"], texto)
+                if provider == "mock":
+                    # O checkpoint conserva o texto e sua gravação, fora do
+                    # agregado que alimenta Silver/Gold e memória.
+                    write_json(bronze_dir / ".mock-history" / f"{rec['filename']}.json",
+                               {"recording": rec, "provider": provider, "transcript": texto})
+                    erros.append("Transcrição simulada preservada separadamente, não enviada à memória")
+                else:
+                    self.storage.append_transcript(slug, rec["filename"], texto)
                 self.storage.update_recording(slug, rec["filename"], transcribed=True,
                                               transcription_error=None, audio_status=audio_status,
+                                              transcription_provider=provider,
                                               duration_seconds=dur)
-                provider_final = provider
-                novo_texto = True
+                if provider != "mock":
+                    provider_final = provider
+                    novo_texto = True
             else:
                 motivo = erro or "transcrição vazia"
                 self.storage.update_recording(slug, rec["filename"], transcribed=False,
                                               transcription_error=motivo, audio_status=audio_status,
+                                              transcription_provider=provider,
                                               duration_seconds=dur)
                 erros.append(f"{rec['filename']}: {motivo}")
 
@@ -678,6 +788,9 @@ class CastanhaEngine:
             meta["transcription_provider"] = "failed"
         elif provider_final:
             meta["transcription_provider"] = provider_final
+        meta["memory_recording_ids"] = [r.get("id") or r["filename"] for r in meta.get("recordings", [])
+                                        if r.get("transcription_provider") not in ("mock", "failed", "pending")
+                                        and r.get("audio_status") != "sem_audio"]
         meta["transcription_error"] = "; ".join(erros) if erros else None
         self.storage.write_bronze_metadata(slug, meta)
 

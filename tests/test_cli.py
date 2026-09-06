@@ -41,8 +41,37 @@ class TestCLI(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _run_cli(self, *args):
+    def _run_cli(self, *args, real_fake=False):
         cmd = [sys.executable, str(self.cli_bin)] + list(args)
+        if real_fake:
+            # Atestado explícito e exclusivo do teste: representa um provider
+            # real com resposta controlada, não promove MockTranscriber.
+            # Executa o parser/CLI, engine e armazenamento reais no subprocesso.
+            bootstrap = """
+import runpy
+import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, str(Path(sys.argv[1]).resolve().parent.parent))
+from castanha.transcription import TranscriptionResult
+
+def transcribe(audio_path, mode="dual"):
+    assert Path(audio_path).read_bytes().startswith(b"OggS")
+    assert mode == "dual"
+    return TranscriptionResult(
+        text="Resposta controlada do provider real-fake.", utterances=[],
+        provider="real-fake", raw_response={"attested_test_fixture": True},
+    )
+
+sys.argv = sys.argv[1:]
+with patch("castanha.engine.get_transcriber") as provider:
+    provider.return_value.transcribe.side_effect = transcribe
+    try:
+        runpy.run_path(sys.argv[0], run_name="__main__")
+    finally:
+        provider.return_value.transcribe.assert_called_once()
+"""
+            cmd = [sys.executable, "-c", bootstrap, str(self.cli_bin)] + list(args)
         import os
         full_env = dict(os.environ)
         full_env.update(self.env)
@@ -133,58 +162,81 @@ class TestCLI(unittest.TestCase):
         data_alias = json.loads(res_alias.stdout)
         self.assertEqual(data_alias["status"], "ok")
 
+    def test_cli_retry_mock_quarantined_not_completed(self):
+        slug = "2026-09-05_1300_mock-isolado"
+        m_bronze = self._bronze_falho(slug)
+        audio_before = (m_bronze / "audio.ogg").read_bytes()
+
+        res = self._run_cli("retry", slug, "--json")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(len(data["results"]), 1)
+        result = data["results"][0]
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["result"]["transcription_provider"], "failed")
+        self.assertIn("simulada", result["result"]["transcription_error"])
+        self.assertEqual((m_bronze / "transcript_raw.txt").read_text(), "")
+        self.assertFalse((self.silver / f"{slug}.md").exists())
+        self.assertFalse((self.gold / f"{slug}.json").exists())
+
+        quarantine = json.loads((m_bronze / ".mock-history" / "audio.ogg.json").read_text())
+        self.assertEqual(quarantine["provider"], "mock")
+        self.assertIn("Transcrição Simulada", quarantine["transcript"])
+        self.assertEqual(quarantine["recording"]["filename"], "audio.ogg")
+        meta = json.loads((m_bronze / "metadata.json").read_text())
+        self.assertEqual(meta["recordings"][0]["transcription_provider"], "mock")
+        self.assertEqual(meta["memory_recording_ids"], [])
+        self.assertFalse(meta.get("zinom"))
+        self.assertEqual((m_bronze / "audio.ogg").read_bytes(), audio_before)
+        notes = self._run_cli("notes", slug, "--json")
+        self.assertEqual(notes.returncode, 0, notes.stderr)
+        self.assertTrue(json.loads(notes.stdout)["can_retry"])
+
     def test_cli_retry_reprocess(self):
         slug = "2026-09-05_1300_falha-teste"
-        m_bronze = self.bronze / slug
-        m_bronze.mkdir(parents=True, exist_ok=True)
-        # Gera áudio de teste com ffmpeg para passar na verificação de canais
-        audio_file = m_bronze / "audio.ogg"
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1", "-c:a", "libopus", "-b:a", "64k", str(audio_file)],
-            capture_output=True, check=True
-        )
-        (m_bronze / "transcript_raw.txt").write_text("", encoding="utf-8")
-        (m_bronze / "metadata.json").write_text(json.dumps({
-            "title": "Reunião Falha Inicial",
-            "slug": slug,
-            "recorded_at": "2026-09-05T13:00:00",
-            "duration_seconds": 1.0,
-            "transcription_provider": "failed",
-            "transcription_error": "Connection timed out",
-            "recordings": [{
-                "id": "audio.ogg",
-                "filename": "audio.ogg",
-                "path": str(audio_file),
-                "size_bytes": audio_file.stat().st_size,
-                "size_human": "10 KB",
-                "duration_seconds": 1.0,
-            }],
-        }), encoding="utf-8")
+        m_bronze = self._bronze_falho(slug)
+        audio_before = (m_bronze / "audio.ogg").read_bytes()
+        self._sem_transcritor()
 
-        # 1. notes --json mostra can_retry = True
-        res_notes = self._run_cli("notes", "--json")
-        notes_data = json.loads(res_notes.stdout)
-        matching = [n for n in notes_data["notes"] if n["slug"] == slug]
-        self.assertTrue(len(matching) == 1)
-        self.assertTrue(matching[0]["can_retry"])
+        # Falha real da tentativa mantém o áudio e a segunda chance.
+        failed = self._run_cli("retry", slug, "--json")
+        self.assertEqual(failed.returncode, 2, failed.stderr)
+        self.assertEqual(json.loads(failed.stdout)["results"][0]["result"]["transcription_provider"], "failed")
+        notes = self._run_cli("notes", slug, "--json")
+        self.assertEqual(notes.returncode, 0, notes.stderr)
+        self.assertTrue(json.loads(notes.stdout)["can_retry"])
 
-        # 2. Executa retry
-        res_retry = self._run_cli("retry", slug, "--json")
-        self.assertEqual(res_retry.returncode, 0)
-        retry_data = json.loads(res_retry.stdout)
-        self.assertTrue(len(retry_data["results"]) > 0)
-        self.assertIn(retry_data["results"][0]["status"], ("success", "partial"))
+        # Sem slug, seleciona a pendência e só substitui o provider externo.
+        res = self._run_cli("retry", "--json", real_fake=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        results = json.loads(res.stdout)["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["slug"], slug)
+        self.assertIn(results[0]["status"], ("success", "partial"))
+        self.assertEqual(results[0]["result"]["transcription_provider"], "real-fake")
+        self.assertIsNone(results[0]["result"]["transcription_error"])
+        raw_text = (m_bronze / "transcript_raw.txt").read_text()
+        self.assertEqual(raw_text.count("Resposta controlada do provider real-fake."), 1)
+        self.assertNotIn("Simulada", raw_text)
+        self.assertTrue((self.silver / f"{slug}.md").read_text().strip())
+        self.assertIsInstance(json.loads((self.gold / f"{slug}.json").read_text()), dict)
+        meta = json.loads((m_bronze / "metadata.json").read_text())
+        self.assertEqual(meta["recordings"][0]["transcription_provider"], "real-fake")
+        self.assertTrue(meta["recordings"][0]["transcribed"])
+        self.assertEqual(meta["memory_recording_ids"], ["audio.ogg"])
+        self.assertEqual((m_bronze / "audio.ogg").read_bytes(), audio_before)
+        notes = self._run_cli("notes", slug, "--json")
+        self.assertEqual(notes.returncode, 0, notes.stderr)
+        self.assertFalse(json.loads(notes.stdout)["can_retry"])
 
-        # 3. Transcrição e notas foram geradas
-        self.assertTrue((self.silver / f"{slug}.md").exists())
-        raw_text = (m_bronze / "transcript_raw.txt").read_text(encoding="utf-8")
-        self.assertTrue(len(raw_text) > 0)
-
-        # 4. can_retry agora é False
-        res_notes2 = self._run_cli("notes", "--json")
-        notes_data2 = json.loads(res_notes2.stdout)
-        matching2 = [n for n in notes_data2["notes"] if n["slug"] == slug]
-        self.assertFalse(matching2[0]["can_retry"])
+        # Outra chamada sem slug não refaz uma reunião já resolvida.
+        paths = [m_bronze / "metadata.json", m_bronze / "transcript_raw.txt",
+                 self.silver / f"{slug}.md", self.gold / f"{slug}.json"]
+        before = {path: path.read_bytes() for path in paths}
+        repeated = self._run_cli("retry", "--json")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(json.loads(repeated.stdout)["results"], [])
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
     def _bronze_falho(self, slug, transcript=""):
         m_bronze = self.bronze / slug

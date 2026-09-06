@@ -10,6 +10,7 @@ Bronze. Fatos atômicos ficam pendentes até haver suporte a linhagem no servido
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from castanha.storage import MeetingStorage
 from castanha.config import load_config
 from castanha.durability import meeting_lock, write_json
 from castanha.zinom_adapter import ZinomAdapter
+from castanha.state import StateManager
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -43,6 +45,59 @@ def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
     return z.get("status") != "ok"
 
 
+def _finalizer_status(state, slug):
+    if state.get("status") != "processing" or state.get("capture_slug") != slug:
+        return None
+    pid = state.get("processing_pid")
+    if type(pid) is not int or pid <= 0:
+        return "protected"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except (OSError, OverflowError):
+        return "protected"
+    return "protected"
+
+
+def _reconcile_finished_capture_locked(slug, storage, state_mgr=None):
+    """Chamador mantém meeting_lock; só ESRCH permite publicar idle."""
+    state_mgr = state_mgr or StateManager()
+    state = state_mgr.read()
+    if _finalizer_status(state, slug) != "dead":
+        return False
+    bronze = storage.bronze_dir / slug
+    jobs = [_read_json(p) for p in (bronze / ".jobs").glob("*.json")]
+    if not jobs or any(job.get("stage") != "done" for job in jobs):
+        return False
+    metadata = _read_json(bronze / "metadata.json")
+    state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
+                     "capture_slug": None, "capture_job_id": None, "current_meeting": None,
+                     "elapsed_seconds": 0,
+                     "last_result": {"slug": slug, "title": metadata.get("title", slug),
+                                     "zinom": metadata.get("zinom") or {},
+                                     "bronze_dir": str(bronze),
+                                     "silver_file": str(storage.silver_dir / f"{slug}.md"),
+                                     "gold_file": str(storage.gold_dir / f"{slug}.json")}})
+    return True
+
+
+def reconcile_finished_capture(storage):
+    """Também alcança entrega concluída/tombstone, fora do inventário de retry."""
+    state_mgr = StateManager()
+    state = state_mgr.read()
+    slug = state.get("capture_slug")
+    if not isinstance(slug, str) or not slug or slug in (".", "..") or Path(slug).name != slug:
+        return
+    if _finalizer_status(state, slug) != "dead":
+        return
+    bronze = storage.bronze_dir / slug
+    if bronze.is_dir():
+        with meeting_lock(bronze):
+            if _reconcile_finished_capture_locked(slug, storage, state_mgr):
+                return slug
+
+
 def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[str, Any]:
     storage = storage or MeetingStorage()
     if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
@@ -50,22 +105,33 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
-    metadata = _read_json(bronze / "metadata.json")
-    if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
-        return {"slug": slug, "status": "error", "errors": ["Recibo Zinom inválido; arquivos preservados"]}
-    jobs = [_read_json(p) for p in (bronze / ".jobs").glob("*.json")]
-    if any(job.get("stage") != "done" for job in jobs):
-        from castanha.engine import CastanhaEngine
-        engine = CastanhaEngine()
-        engine.storage = storage
-        result = engine.process_pending(slug)["result"]
-        state = engine.state_mgr.read()
-        if state.get("status") == "processing" and state.get("capture_slug") == slug:
-            engine.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
-                                    "capture_slug": None, "capture_job_id": None,
-                                    "current_meeting": None, "last_result": result})
-        return {"slug": slug, **result["zinom"]}
     with meeting_lock(bronze):
+        metadata = _read_json(bronze / "metadata.json")
+        if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
+            return {"slug": slug, "status": "error", "errors": ["Recibo Zinom inválido; arquivos preservados"]}
+        jobs = [_read_json(p) for p in (bronze / ".jobs").glob("*.json")]
+        if any(job.get("stage") != "done" for job in jobs):
+            from castanha.engine import CastanhaEngine
+            engine = CastanhaEngine()
+            engine.storage = storage
+            result = engine._process_pending_locked(slug)["result"]
+            _reconcile_finished_capture_locked(slug, storage, engine.state_mgr)
+            return {"slug": slug, **result["zinom"]}
+        if jobs:
+            if _finalizer_status(StateManager().read(), slug) == "protected":
+                return {"slug": slug, "status": "pending", "reason": "Finalizador ativo ou identidade indisponível"}
+            reconciled = _reconcile_finished_capture_locked(slug, storage)
+            delivery = metadata.get("zinom") or {}
+            delivered_current = (delivery.get("note_status") == "ok" and delivery.get("remember_id")
+                                 and delivery.get("local_content_sha256") == storage.delivery_content_sha256(slug))
+            # O recibo legado pode encerrar sua nota, não a validação por origem
+            # da ponte Bronze (revisão, destino e tombstone podem ter mudado).
+            source = delivery.get("source") or {}
+            bronze_transport = (load_config().get("zinom", {}).get("bronze_ingest_enabled") is True
+                                or (bronze / ".brain-ingest").exists()
+                                or (isinstance(source, dict) and source.get("transport") == "bronze"))
+            if not bronze_transport and (not meeting_needs_sync(metadata) or (reconciled and delivered_current)):
+                return {"slug": slug, **(metadata.get("zinom") or {})}
         return _sync_meeting_locked(slug, storage)
 
 
@@ -119,6 +185,7 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
 
 def pending_candidates(storage: MeetingStorage):
     """Inventário comum ao comando manual e à retomada automática."""
+    reconciled_slug = reconcile_finished_capture(storage)
     candidates = []
     z_cfg = load_config().get("zinom", {})
     for bronze in storage.bronze_dir.iterdir():
@@ -136,6 +203,10 @@ def pending_candidates(storage: MeetingStorage):
         delivery = delivery or {}
         from castanha.bronze_ingest import has_origin_receipts
         if delivery.get("status") in ("tombstoned", "superseded") and not has_origin_receipts(delivery):
+            continue
+        if (bronze.name == reconciled_slug and delivery.get("note_status") == "ok"
+                and delivery.get("remember_id")
+                and delivery.get("local_content_sha256") == storage.delivery_content_sha256(bronze.name)):
             continue
         unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
         bronze_pending = False

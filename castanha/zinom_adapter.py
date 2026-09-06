@@ -186,7 +186,11 @@ class ZinomMcpClient:
             self.connect()
             return self.call_tool(name, arguments, _retry=False)
 
+        if not isinstance(result, dict):
+            result = {}
         payload = tool_json(result)
+        if name in ("remember", "brain_update") and not payload:
+            raise ZinomError("Resposta sem identificador durável da nota")
         if result.get("isError"):
             raise ZinomError(f"{name} devolveu erro: {tool_text(result)[:300]}",
                              code=payload.get("error"), tool=name)
@@ -367,6 +371,7 @@ class ZinomAdapter:
 
         results: Dict[str, Any] = {
             "status": "ok",
+            "note_status": "pending",
             "remember": None,
             "facts_ingested": 0,
             "facts_descartados": [f for f in gold_data.get("facts", []) if not is_fato_util(f)],
@@ -398,11 +403,12 @@ class ZinomAdapter:
                 res = client.call_tool("remember", nota)
             payload = tool_json(res)
             # O hub devolve as duas chaves; `source_id` é a documentada.
-            if not (payload.get("source_id") or payload.get("id") or previous_remember_id):
+            receipt_id = payload.get("source_id") or payload.get("id")
+            if not isinstance(receipt_id, str) or not receipt_id.strip():
                 raise ZinomError("Resposta sem identificador durável da nota")
             results["remember"] = {
                 "ok": True,
-                "id": payload.get("source_id") or payload.get("id") or previous_remember_id,
+                "id": receipt_id,
                 "updated": bool(previous_remember_id),
             }
             results["source"]["remember_id"] = results["remember"]["id"]

@@ -301,25 +301,24 @@ class TestVpsTimeout(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.audio = Path(self.temp.name) / "fixture.ogg"
-        self.audio.write_bytes(b"synthetic original")
+        from tests.test_vps_channel_transport import LocalVps, TEST_CONTRACT
+        self.audio = Path(self.temp.name) / "fixture.flac"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=1", "-ar", "16000", "-ac", "1", str(self.audio)],
+                       check=True, capture_output=True)
+        self.original = self.audio.read_bytes()
+        self.contract = TEST_CONTRACT
+        self.remote = LocalVps(Path(self.temp.name) / "remote")
 
     def test_scp_travado_tem_teto_e_preserva_original(self):
         from castanha.transcription import VpsSshTranscriber
-        commands = []
-
-        def fake_run(cmd, **kw):
-            commands.append(cmd)
-            if cmd[0] == "scp":
-                self.assertEqual(kw["timeout"], 30)
-                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
-            self.assertEqual(kw["timeout"], 15)
-            return subprocess.CompletedProcess(cmd, 0, "UPLOAD", "")
-
-        with patch("castanha.transcription.subprocess.run", side_effect=fake_run):
+        self.remote.fail_transport = "scp"
+        with patch("castanha.transcription.subprocess.run", side_effect=self.remote):
             with self.assertRaisesRegex(RuntimeError, "SCP indisponível"):
-                VpsSshTranscriber("host-teste").transcribe(self.audio)
-        self.assertEqual(self.audio.read_bytes(), b"synthetic original")
+                VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
+        commands = [cmd for cmd, _ in self.remote.calls]
+        self.assertEqual([kw["timeout"] for _, kw in self.remote.calls], [15, 15, 30])
+        self.assertEqual(self.audio.read_bytes(), self.original)
         self.assertFalse(any("pkill" in " ".join(cmd) or "rm -f" in " ".join(cmd) for cmd in commands))
 
     def test_erro_remoto_preserva_job_para_nova_tentativa(self):
@@ -327,56 +326,54 @@ class TestVpsTimeout(unittest.TestCase):
         commands = []
 
         def fake_run(cmd, **kw):
+            if cmd[0] not in ("ssh", "scp"):
+                return self.remote(cmd, **kw)
             commands.append(cmd)
+            self.assertEqual(kw["timeout"], 30 if cmd[0] == "scp" else 15)
             if "nohup" in cmd[-1]:
                 return subprocess.CompletedProcess(cmd, 1, "", "worker unavailable")
-            return subprocess.CompletedProcess(cmd, 0, "READY", "")
+            return self.remote(cmd, **kw)
 
         with patch("castanha.transcription.subprocess.run", side_effect=fake_run), \
              patch("castanha.audio.probe_duration_seconds", return_value=300):
             with self.assertRaisesRegex(RuntimeError, "SSH falhou"):
-                VpsSshTranscriber("host-teste").transcribe(self.audio)
-        self.assertEqual(self.audio.read_bytes(), b"synthetic original")
+                VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
+        self.assertEqual(self.audio.read_bytes(), self.original)
+        self.assertEqual(next(self.remote.root.rglob("audio.flac")).read_bytes(), self.original)
         self.assertFalse(any("pkill" in " ".join(cmd) or "rm -f" in " ".join(cmd) for cmd in commands))
 
     def test_timeout_acompanha_a_duracao_com_teto(self):
         from castanha.transcription import VPS_MAX_TIMEOUT_SEC, VpsSshTranscriber
-        commands = []
-
-        def fake_run(cmd, **kw):
-            commands.append(cmd)
-            self.assertEqual(kw["timeout"], 15)
-            return subprocess.CompletedProcess(cmd, 0, "READY", "")
-
-        with patch("castanha.transcription.subprocess.run", side_effect=fake_run), \
+        with patch("castanha.transcription.subprocess.run", side_effect=self.remote), \
              patch("castanha.audio.probe_duration_seconds", return_value=7969.75):
             with self.assertRaisesRegex(RuntimeError, "em andamento"):
-                VpsSshTranscriber("host-teste").transcribe(self.audio)
+                VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
+        self.remote.completed()
+        commands = [cmd for cmd, _ in self.remote.calls]
+        self.assertTrue(all(kw["timeout"] == (30 if cmd[0] == "scp" else 15)
+                            for cmd, kw in self.remote.calls))
         launched = next(cmd[-1] for cmd in commands if "nohup" in cmd[-1])
         self.assertIn(f"timeout --kill-after=30s {VPS_MAX_TIMEOUT_SEC}s", launched)
         self.assertIn("flock -n", launched)
 
     def test_reuniao_curta_fica_no_minimo_e_resultado_e_reutilizado(self):
         from castanha.transcription import VPS_MIN_TIMEOUT_SEC, VpsSshTranscriber
-        commands = []
-        ready_result = False
-
-        def fake_run(cmd, **kw):
-            commands.append(cmd)
-            self.assertEqual(kw["timeout"], 15)
-            output = json.dumps({"text": "ok", "segments": []}) if ready_result else "READY"
-            return subprocess.CompletedProcess(cmd, 0, output, "")
-
-        with patch("castanha.transcription.subprocess.run", side_effect=fake_run), \
+        self.remote.set_reply({"text": "ok", "segments": [{"text": "ok", "start": 0, "end": 1}]})
+        with patch("castanha.transcription.subprocess.run", side_effect=self.remote), \
              patch("castanha.audio.probe_duration_seconds", return_value=300):
             with self.assertRaisesRegex(RuntimeError, "em andamento"):
-                VpsSshTranscriber("host-teste").transcribe(self.audio)
-            ready_result = True
-            res = VpsSshTranscriber("host-teste").transcribe(self.audio)
+                VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
+            self.remote.completed()
+            res = VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
+        commands = [cmd for cmd, _ in self.remote.calls]
+        self.assertTrue(all(kw["timeout"] == (30 if cmd[0] == "scp" else 15)
+                            for cmd, kw in self.remote.calls))
         launched = [cmd[-1] for cmd in commands if "nohup" in cmd[-1]]
         self.assertEqual(len(launched), 1)
         self.assertIn(f"timeout --kill-after=30s {VPS_MIN_TIMEOUT_SEC}s", launched[0])
         self.assertEqual(res.text, "ok")
+        self.assertEqual((self.remote.root / "count").read_text().splitlines(), ["started"])
+        self.assertEqual(self.audio.read_bytes(), self.original)
 
 
 if __name__ == "__main__":

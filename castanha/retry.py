@@ -48,7 +48,13 @@ def drain_queue(storage=None, now=None, limit=5):
                 delivery = delivery or {}
                 if delivery.get("status") == "tombstoned":
                     continue
-                if (delivery.get("facts_status") == "pending_lineage" and delivery.get("remember_id")
+                if (delivery.get("status") == "pending"
+                        and delivery.get("facts_status") == "pending_lineage" and delivery.get("remember_id")
+                        and delivery.get("note_status") in (None, "ok")
+                        and not any(reason in str(delivery.get("reason") or "").lower()
+                                    for reason in ("token", "credencia", "desligada"))
+                        and (not delivery.get("local_content_sha256") or
+                             delivery["local_content_sha256"] == storage.delivery_content_sha256(slug))
                         and metadata.get("processing_status") != "pending"):
                     # Repetir remember não cria a capacidade ausente no servidor.
                     continue

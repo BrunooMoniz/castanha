@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from castanha.storage import MeetingStorage
-from castanha.sync import meeting_needs_sync, sync_meeting, sync_pending
+from castanha.sync import meeting_needs_sync, pending_candidates, sync_meeting, sync_pending
 
 
 class TestPrecisaSync(unittest.TestCase):
@@ -85,6 +85,70 @@ class TestSyncMeeting(unittest.TestCase):
         self.assertEqual(saida["status"], "error")
         self.assertTrue(meeting_needs_sync(self._metadata()))
         self.assertIn("HTTP 500", self._metadata()["zinom"]["errors"][0])
+
+    def test_update_malformado_preserva_id_sem_confirmar_entrega_e_pode_retomar(self):
+        from castanha.retry import drain_queue
+        responses = [
+            None, {}, {"content": []}, {"content": None}, {"isError": True, "content": None},
+            {"content": [{"type": "text", "text": "Bearer fixture-secret: JSON quebrado"}]},
+        ]
+        for payload in ({}, [], {"ok": True}, {"source_id": True},
+                        {"source_id": 42}, {"source_id": {"secret": "fixture-secret"}},
+                        {"id": "   "}):
+            responses.append({"content": [{"type": "text", "text": json.dumps(payload)}]})
+        for index, response in enumerate(responses):
+            with self.subTest(response=response):
+                meta = self._metadata()
+                meta["zinom"] = {"status": "ok", "note_status": "ok", "remember_id": "conversation:original"}
+                path = self.storage.bronze_dir / self.slug / "metadata.json"
+                path.write_text(json.dumps(meta), encoding="utf-8")
+                original = (self.storage.silver_dir / f"{self.slug}.md").read_bytes()
+                with patch("castanha.zinom_adapter.load_config", return_value={
+                    "zinom": {"enabled": True, "token": "fixture-token"}}), \
+                     patch("castanha.zinom_adapter.ZinomMcpClient.connect"), \
+                     patch("castanha.zinom_adapter.ZinomMcpClient._rpc", return_value=response) as rpc, \
+                     patch.object(self.storage, "record_zinom_result",
+                                  wraps=self.storage.record_zinom_result) as persist:
+                    result = sync_meeting(self.slug, self.storage)
+                    self.assertEqual(rpc.call_count, 1)
+                    self.assertEqual(persist.call_count, 1)
+                    self.assertEqual(persist.call_args.args[1]["status"], "error")
+                    self.assertIsNone(persist.call_args.args[1]["remember"])
+                    retried = drain_queue(self.storage, now=10000 * (index + 1))
+                    self.assertEqual(retried[0]["status"], "error")
+                    self.assertEqual(persist.call_count, 2)
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["remember_id"], "conversation:original")
+                self.assertNotEqual(result["note_status"], "ok")
+                self.assertNotIn("remember_id", result["source"])
+                self.assertEqual(result["errors"], ["Erro no remember: Resposta sem identificador durável da nota"])
+                self.assertIn(self.slug, [slug for _, slug in pending_candidates(self.storage)])
+                self.assertEqual(rpc.call_args.args[1]["name"], "brain_update")
+                self.assertEqual(rpc.call_count, 2)
+                self.assertEqual((self.storage.silver_dir / f"{self.slug}.md").read_bytes(), original)
+
+        with patch("castanha.zinom_adapter.load_config", return_value={
+            "zinom": {"enabled": True, "token": "fixture-token"}}), \
+             patch("castanha.zinom_adapter.ZinomMcpClient.connect"), \
+             patch("castanha.zinom_adapter.ZinomMcpClient._rpc", return_value={
+                 "content": [{"type": "text", "text": '{"source_id":"conversation:original"}'}]}) as rpc:
+            result = sync_meeting(self.slug, self.storage)
+        self.assertEqual(result["note_status"], "ok")
+        self.assertEqual(rpc.call_args.args[1]["name"], "brain_update")
+        self.assertEqual(rpc.call_args.args[1]["arguments"]["id"], "conversation:original")
+
+    def test_skipped_legado_sem_credencial_continua_na_fila_apos_tentativa(self):
+        meta = self._metadata()
+        meta["zinom"] = {"status": "skipped", "reason": "Integração desligada ou sem token"}
+        (self.storage.bronze_dir / self.slug / "metadata.json").write_text(json.dumps(meta))
+        self.assertIn(self.slug, [slug for _, slug in pending_candidates(self.storage)])
+        with patch("castanha.zinom_adapter.load_config", return_value={"zinom": {"enabled": False}}), \
+             patch("castanha.zinom_adapter.ZinomMcpClient") as client:
+            results = sync_pending(storage=self.storage)
+        client.assert_not_called()
+        self.assertEqual(results[0]["status"], "pending")
+        self.assertEqual(self._metadata()["zinom"]["status"], "pending")
+        self.assertIn(self.slug, [slug for _, slug in pending_candidates(self.storage)])
 
     def test_reuniao_que_nao_existe(self):
         saida = sync_meeting("nao-existe", self.storage)

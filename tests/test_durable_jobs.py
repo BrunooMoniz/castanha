@@ -224,16 +224,30 @@ class TestDurableJobs(unittest.TestCase):
         self.assertIn('Áudio do sistema: fala do canal 1', texto)
 
     def test_channel_path_keeps_the_audio_pending_when_only_the_vps_answers(self):
+        from tests.test_vps_channel_transport import TEST_CONTRACT
         engine = self.engine_por_canal()
+        real_run = subprocess.run
+
+        def offline(args, **kwargs):
+            if args[0] in ('ssh', 'scp'):
+                raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+            return real_run(args, **kwargs)
+
         with patch('castanha.engine.get_transcriber',
-                   side_effect=lambda estimated_duration_sec=60: VpsSshTranscriber('host-de-teste')):
+                   side_effect=lambda estimated_duration_sec=60: VpsSshTranscriber('host-de-teste', TEST_CONTRACT)), \
+             patch('castanha.transcription.subprocess.run', side_effect=offline):
             resultado = engine.stop_recording()
+            slug = resultado['result']['slug']
+            retry = engine.reprocess_meeting(slug)
         self.assertEqual(resultado['status'], 'partial')
-        slug = resultado['result']['slug']
+        self.assertEqual(retry['status'], 'partial')
         bronze = engine.storage.bronze_dir / slug
-        # Nada de mandar FLAC com nome de .ogg para o job remoto: fica pendente.
+        # Transporte indisponível mantém original e job recuperáveis, sem checkpoint falso.
         self.assertFalse(list((bronze / '.channels').rglob('*.json')))
-        self.assertIn('VPS', resultado['result']['transcription_error'] or '')
+        job = json.loads(next((bronze / '.jobs').glob('*.json')).read_text())
+        self.assertEqual(job['stage'], 'pending')
+        self.assertTrue(Path(job['audio_path']).exists())
+        self.assertIn('SSH', resultado['result']['transcription_error'] or '')
 
     def test_all_summary_stages_receive_channel_identity_guardrail(self):
         from castanha import summarizer
@@ -568,63 +582,67 @@ class TestDurableJobs(unittest.TestCase):
 
 class TestRemoteJob(unittest.TestCase):
     def setUp(self):
+        from tests.test_vps_channel_transport import LocalVps, TEST_CONTRACT
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.audio = self.root / 'audio.ogg'
-        self.audio.write_bytes(b'original')
+        self.audio = self.root / 'audio.flac'
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                        'sine=frequency=440:duration=1', '-ar', '16000', '-ac', '1', str(self.audio)],
+                       check=True, capture_output=True)
+        self.original = self.audio.read_bytes()
+        self.contract = TEST_CONTRACT
+        self.remote = LocalVps(self.root / 'remote')
 
     def test_ssh_timeout_is_bounded_and_pending(self):
-        with patch('castanha.transcription.subprocess.run', side_effect=subprocess.TimeoutExpired('ssh', 15)) as run:
+        self.remote.fail_transport = 'ssh'
+        with patch('castanha.transcription.subprocess.run', side_effect=self.remote):
             with self.assertRaises(TranscriptionPending):
-                VpsSshTranscriber('fixture').transcribe(self.audio)
-        self.assertLessEqual(run.call_args.kwargs['timeout'], 30)
-        self.assertIn('BatchMode=yes', run.call_args.args[0])
+                VpsSshTranscriber('fixture', self.contract).transcribe(self.audio, 'mic_only')
+        args, kwargs = self.remote.calls[-1]
+        self.assertEqual(args[0], 'ssh')
+        self.assertEqual(kwargs['timeout'], 15)
+        self.assertIn('BatchMode=yes', args)
+        self.assertEqual(self.audio.read_bytes(), self.original)
 
     def test_scp_timeout_is_bounded_and_pending(self):
-        with patch('castanha.transcription.subprocess.run', side_effect=[
-            subprocess.CompletedProcess([], 0, 'UPLOAD', ''), subprocess.TimeoutExpired('scp', 30),
-        ]) as run:
+        self.remote.fail_transport = 'scp'
+        with patch('castanha.transcription.subprocess.run', side_effect=self.remote):
             with self.assertRaises(TranscriptionPending):
-                VpsSshTranscriber('fixture').transcribe(self.audio)
-        self.assertEqual(run.call_args.args[0][0], 'scp')
-        self.assertLessEqual(run.call_args.kwargs['timeout'], 30)
-        self.assertIn('BatchMode=yes', run.call_args.args[0])
+                VpsSshTranscriber('fixture', self.contract).transcribe(self.audio, 'mic_only')
+        args, kwargs = self.remote.calls[-1]
+        self.assertEqual(args[0], 'scp')
+        self.assertEqual(kwargs['timeout'], 30)
+        self.assertIn('BatchMode=yes', args)
+        self.assertEqual(self.audio.read_bytes(), self.original)
 
     def test_real_detached_job_survives_retry_without_second_transcription(self):
         # Executa os comandos remotos de verdade num diretório temporário local.
-        script = self.root / 'transcribe.sh'
-        script.write_text('#!/bin/sh\necho started >> count\nsleep 0.3\necho \'{"text":"Conteúdo completo","segments":[]}\'\n')
-        script.chmod(0o700)
-        real_run = subprocess.run
-        commands = []
-
-        def transport(args, **kwargs):
-            commands.append((args, kwargs))
-            if args[0] == 'scp':
-                target = self.root / args[-1].split(':', 1)[1]
-                shutil.copyfile(args[-2], target)
-                return subprocess.CompletedProcess(args, 0, '', '')
-            command = args[-1].replace('/root/castanha-transcribe.py', str(script))
-            return real_run(['sh', '-c', command], cwd=self.root, **kwargs)
-
-        with patch('castanha.transcription.subprocess.run', side_effect=transport):
+        self.remote.settings.write_text(json.dumps({'delay': 2, 'exit_code': 0}))
+        self.remote.set_reply({'text': 'Conteúdo completo', 'segments': [
+            {'text': 'Conteúdo completo', 'start': 0, 'end': 1}]})
+        self.remote.lose_reply = True
+        with patch('castanha.transcription.subprocess.run', side_effect=self.remote):
             for _ in range(2):
                 with self.assertRaises(TranscriptionPending):
-                    VpsSshTranscriber('fixture').transcribe(self.audio)
+                    VpsSshTranscriber('fixture', self.contract).transcribe(self.audio, 'mic_only')
             deadline = time.monotonic() + 5
             while True:
                 try:
-                    result = VpsSshTranscriber('fixture').transcribe(self.audio)
+                    result = VpsSshTranscriber('fixture', self.contract).transcribe(self.audio, 'mic_only')
                     break
                 except TranscriptionPending:
                     if time.monotonic() > deadline:
                         self.fail('Job local não terminou')
                     time.sleep(0.1)
         self.assertEqual(result.text, 'Conteúdo completo')
-        self.assertEqual((self.root / 'count').read_text().splitlines(), ['started'])
+        commands = self.remote.calls
+        self.assertEqual((self.remote.root / 'count').read_text().splitlines(), ['started'])
         self.assertEqual(sum(args[0] == 'scp' for args, _ in commands), 1)
-        self.assertTrue(all(0 < kwargs['timeout'] <= 30 for _, kwargs in commands))
+        self.assertTrue(all(kwargs['timeout'] == (30 if args[0] == 'scp' else 15)
+                            for args, kwargs in commands))
+        self.assertTrue(any('nohup flock -n' in args[-1] for args, _ in commands))
+        self.assertEqual(self.audio.read_bytes(), self.original)
 
     def test_missing_configuration_never_selects_mock(self):
         with patch('castanha.transcription.load_config', return_value={'transcription': {'vps_ssh_host': ''}}), \

@@ -40,7 +40,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "transcription": {
-        "provider": "groq",  # "groq", "deepgram", "local_whisper", "vps_webhook", "none"
+        "provider": "vps_ssh",  # Groq somente por revisão manual explícita.
+        "provider_revision": 0,
+        "fallback_from": None,
+        "groq_fallback_mode": "manual",
+        "vps_model": "large-v3",
+        "vps_compute_type": "int8",
+        "vps_cpu_threads": 8,
+        "vps_multilingual": True,
+        "vps_worker_contract": "faster-whisper-json-v2",
+        "vps_condition_on_previous_text": False,
+        # Sem estratégia aprovada: contrato incompleto mantém o envio pendente.
+        "vps_segmentation_strategy": "whisper-vad-v1",
+        "vps_chunk_length": 30,
         "language": "auto",  # "auto" (detecta PT/EN/misto), "pt", "en", etc.
         "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
         "groq_model": "whisper-large-v3-turbo",

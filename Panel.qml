@@ -1033,7 +1033,7 @@ Panel {
     readonly property var zinomInfo: note && note.zinom ? note.zinom : null
     readonly property bool precisaRetry: !!note && !!note.can_retry
     readonly property bool reprocessando: !!note && root.retryingSlug === note.slug
-    readonly property bool precisaSync: !!zinomInfo && zinomInfo.status !== "ok" && zinomInfo.status !== "skipped" && !precisaRetry
+    readonly property bool precisaSync: DeliveryStatus.zinomNeedsSync(note) && !precisaRetry
     readonly property bool sincronizando: !!note && root.syncingSlug === note.slug
 
     readonly property var participantes: (note && note.attendees) ? note.attendees : []
@@ -1190,7 +1190,7 @@ Panel {
             if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
             var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
             if (linha === "") return ""
-            return (noteRow.precisaSync ? "󰀦  " : "󰄬  ") + linha
+            return DeliveryStatus.zinomIcon(noteRow.note) + linha
           }
           color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
           font.family: root.fontFamily
@@ -1251,7 +1251,7 @@ Panel {
           if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
           var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
           if (linha === "") return ""
-          return (noteRow.precisaSync ? "󰀦  " : "󰄬  ") + linha
+          return DeliveryStatus.zinomIcon(noteRow.note) + linha
         }
         color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
         font.family: root.fontFamily

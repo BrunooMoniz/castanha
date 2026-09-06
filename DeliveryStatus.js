@@ -1,11 +1,30 @@
 .pragma library
 
+function zinomNeedsSync(note) {
+  if (!note) return false
+  var z = note.zinom || {}
+  if (z.status === "tombstoned") return false
+  if (note.processing_status === "pending") return true
+  if (z.status === "skipped") {
+    var reason = String(z.reason || "").toLowerCase()
+    return reason.indexOf("token") >= 0 || reason.indexOf("credencia") >= 0 || reason.indexOf("desligada") >= 0
+  }
+  return z.status !== "ok"
+}
+
+function zinomIcon(note) {
+  return zinomNeedsSync(note) ? "󰀦  " : "󰄬  "
+}
+
 function zinomLine(result) {
   if (!result) return ""
   var z = result.zinom
   if (!z) return ""
   if (z.status === "tombstoned") return "Excluído no Zinom"
-  if (z.status === "skipped") return "Não enviado ao Zinom: " + (z.reason || "sem motivo declarado")
+  if (z.status === "skipped") {
+    if (zinomNeedsSync(result)) return "Envio ao Zinom pendente"
+    return "Não enviado ao Zinom: " + (z.reason || "sem motivo declarado")
+  }
   if (z.errors && z.errors.length > 0) {
     // "Erro no remember: HTTP 406..." é linguagem de log, não de produto.
     var motivo = String(z.errors[0]).replace(/^Erro no \w+( para .+?)?: /, "")

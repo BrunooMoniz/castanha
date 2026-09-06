@@ -1,6 +1,7 @@
 """Gerenciamento de armazenamento nas camadas Bronze, Silver e Gold."""
 
 import json
+import hashlib
 import re
 import shutil
 import sys
@@ -485,6 +486,15 @@ class MeetingStorage:
             "modified": silver_file.stat().st_mtime if silver_file.exists() else (bronze_dir.stat().st_mtime if bronze_dir.exists() else 0.0),
         }
 
+    def delivery_content_sha256(self, slug: str) -> str:
+        """Identidade local do conteúdo, sem incluir o próprio recibo de envio."""
+        metadata = self._read_bronze_metadata(slug)
+        metadata.pop("zinom", None)
+        parts = [json.dumps(metadata, sort_keys=True, ensure_ascii=False)]
+        for path in (self.silver_dir / f"{slug}.md", self.gold_dir / f"{slug}.json"):
+            parts.append(path.read_text(encoding="utf-8") if path.exists() else None)
+        return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
     def record_zinom_result(self, slug: str, resultado: Dict[str, Any]) -> None:
         """Anota no Bronze o que o Zinom fez com esta reunião."""
         arquivo = self.bronze_dir / slug / "metadata.json"
@@ -493,6 +503,9 @@ class MeetingStorage:
         metadata = self._read_bronze_metadata(slug)
         remember = (resultado or {}).get("remember") or {}
         previous = metadata.get("zinom") or {}
+        content_sha256 = previous.get("local_content_sha256")
+        if resultado.get("note_status") == "ok" and remember.get("id"):
+            content_sha256 = self.delivery_content_sha256(slug)
         metadata["zinom"] = {
             "status": (resultado or {}).get("status", "error"),
             "remember_id": remember.get("id") or (metadata.get("zinom") or {}).get("remember_id"),
@@ -500,7 +513,9 @@ class MeetingStorage:
             "facts_status": resultado.get("facts_status", previous.get("facts_status", "none")),
             "facts_pending": resultado.get("facts_pending", previous.get("facts_pending", [])),
             "source": resultado.get("source", previous.get("source")),
-            "note_status": resultado.get("note_status", previous.get("note_status")),
+            "note_status": resultado.get("note_status", "pending" if resultado.get("status") in ("pending", "error")
+                                         else previous.get("note_status")),
+            "local_content_sha256": content_sha256,
             "errors": (resultado or {}).get("errors", []),
             "reason": (resultado or {}).get("reason"),
             "synced_at": datetime.now().isoformat(timespec="seconds"),
