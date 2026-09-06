@@ -18,6 +18,31 @@ class BronzeIngestError(ValueError):
     pass
 
 
+def has_origin_receipts(delivery: dict) -> bool:
+    """Recibos por job não representam exclusão da reunião inteira."""
+    source = delivery.get("source") or {}
+    return (isinstance(source, dict) and source.get("transport") == "bronze"
+            and isinstance(source.get("revisions"), list) and bool(source["revisions"]))
+
+
+def _verify_terminal_receipts(directory: Path, metadata: dict):
+    delivery = metadata.get("zinom") or {}
+    if not has_origin_receipts(delivery):
+        return
+    for receipt in delivery["source"]["revisions"]:
+        if not isinstance(receipt, dict):
+            raise BronzeIngestError("Recibo de origem inválido")
+        if receipt.get("status") not in ("tombstoned", "superseded"):
+            continue
+        name = receipt.get("checkpoint")
+        if not isinstance(name, str) or Path(name).name != name or not name.endswith(".json"):
+            raise BronzeIngestError("Checkpoint terminal inválido")
+        saved = json.loads((directory / name).read_bytes())
+        if (saved.get("status") != receipt["status"] or
+                saved.get("result") != {k: v for k, v in receipt.items() if k != "checkpoint"}):
+            raise BronzeIngestError("Evidência terminal ausente ou divergente")
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -252,6 +277,10 @@ def current_recordings(bronze: Path, metadata: dict):
         item_metadata = {**metadata, "recordings": [record],
                          "recorded_at": job.get("recorded_at"),
                          "transcription_provider": job["provider"]}
+        if has_origin_receipts(metadata.get("zinom") or {}):
+            # A exclusão de cada origem é verificada nos checkpoints, não no
+            # estado agregado da reunião que pode conter outros jobs novos.
+            item_metadata.pop("zinom", None)
         selected.append((native_id, item_metadata, job.get("transcript")))
     if not selected or (memory_ids is not None and
                         set(memory_ids) != {r.get("id") for r in records if r.get("id") in memory_ids}):
@@ -270,6 +299,7 @@ def current_requests(bronze: Path, slug: str, metadata: dict, *, workspace, acco
 def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None) -> bool:
     """Um recibo antigo não conclui uma revisão alterada em disco."""
     try:
+        _verify_terminal_receipts(bronze / ".brain-ingest", metadata)
         requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
         for _, _, _, request in requests:
             path = bronze / ".brain-ingest" / (revision_fingerprint(request) + ".json")
@@ -309,6 +339,7 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
     directory.mkdir(exist_ok=True)
     with meeting_lock(directory):
         try:
+            _verify_terminal_receipts(directory, metadata)
             requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
             destination = {"endpoint": client.endpoint, "workspace": workspace, "account_id": account_id,
                            "credential_sha256": _sha(client.token)}
@@ -338,6 +369,9 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
                                 raise BronzeIngestError("Recibo terminal corrompido")
                             break
                     result = terminal or submit_transcript_upload(path, client)
+                    if terminal:
+                        saved = json.loads(path.read_bytes())
+                        write_json(path, {**saved, "status": "tombstoned", "result": terminal})
                     results.append({"checkpoint": path.name, **result})
             states = {r["status"] for r in results}
             status = ("error" if "error" in states else "pending" if "pending" in states else
@@ -346,6 +380,7 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
             return {"status": status, "source": {"transport": "bronze", "revisions": results},
                     "facts_status": "none", "facts_pending": [], "facts_ingested": 0}
         except Exception as exc:
-            return {"status": "error", "source": {"transport": "bronze"},
+            previous_source = (metadata.get("zinom") or {}).get("source") or {}
+            return {"status": "error", "source": {**previous_source, "transport": "bronze"},
                     "reason": "Ingestão não confirmada; originais preservados para retomada",
                     "errors": [f"Ponte Bronze: {type(exc).__name__}"]}

@@ -223,6 +223,56 @@ class TestBronzeCaller(unittest.TestCase):
                 self.assertEqual(sync_meeting(state, self.storage)["status"], state)
         self.assertEqual(self.client.calls, [])
 
+    def test_terminal_origin_does_not_block_new_independent_recording(self):
+        for state in ("tombstoned", "superseded"):
+            with self.subTest(state=state):
+                bronze = self.meeting("origin-" + state)
+                slug = bronze.name
+                self.assertEqual(sync_meeting(slug, self.storage)["status"], "ok")
+                key = list(self.client.requests)[-1]
+                self.client.states[key] = state
+                self.assertEqual(sync_meeting(slug, self.storage)["status"], state)
+                calls_before = len(self.client.calls)
+                meta = json.loads((bronze / "metadata.json").read_bytes())
+                native_id = "new-" + state
+                self.save_job(bronze, native_id, "Nova gravação independente")
+                meta["recordings"].append({"id": "new.ogg", "job_id": native_id,
+                                            "transcription_provider": "groq"})
+                meta["memory_recording_ids"].append("new.ogg")
+                write_json(bronze / "metadata.json", meta)
+                self.assertIn(slug, [s for _, s in pending_candidates(self.storage)])
+                result = sync_meeting(slug, self.storage)
+                self.assertEqual([r["status"] for r in result["source"]["revisions"]], [state, "ok"])
+                self.assertEqual(len(self.client.calls), calls_before + 1)
+                self.assertNotIn(slug, [s for _, s in pending_candidates(self.storage)])
+                # Recriar o chamador não reenvia a origem terminal.
+                sync_meeting(slug, MeetingStorage(base_dir=Path(self.temp.name)))
+                self.assertTrue(all(c[1]["idempotency_key"] != key
+                                    for c in self.client.calls[calls_before:]))
+
+    def test_missing_terminal_evidence_blocks_upload_without_resurrection(self):
+        sync_meeting("fixture", self.storage)
+        key = next(iter(self.client.requests))
+        self.client.states[key] = "tombstoned"
+        sync_meeting("fixture", self.storage)
+        receipt = self.metadata()["zinom"]["source"]["revisions"][0]
+        (self.bronze / ".brain-ingest" / receipt["checkpoint"]).unlink()
+        calls = len(self.client.calls)
+        self.assertEqual(sync_meeting("fixture", self.storage)["status"], "error")
+        self.assertEqual(sync_meeting("fixture", self.storage)["status"], "error")
+        self.assertEqual(len(self.client.calls), calls)
+
+    def test_changed_deleted_text_settles_without_uploading_again(self):
+        sync_meeting("fixture", self.storage)
+        key = next(iter(self.client.requests))
+        self.client.states[key] = "tombstoned"
+        sync_meeting("fixture", self.storage)
+        self.save_job(self.bronze, "native-fixture", "Texto alterado depois da exclusão")
+        calls = len(self.client.calls)
+        self.assertEqual(sync_meeting("fixture", self.storage)["status"], "tombstoned")
+        self.assertEqual(len(self.client.calls), calls)
+        self.assertEqual(pending_candidates(self.storage), [])
+
     def test_concurrent_sync_freezes_one_request(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: sync_meeting("fixture", self.storage), range(2)))

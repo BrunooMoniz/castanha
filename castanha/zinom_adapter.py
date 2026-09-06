@@ -303,7 +303,8 @@ class ZinomAdapter:
         previous = metadata.get("zinom") or {}
         if not isinstance(previous, dict):
             return {"status": "error", "reason": "Recibo Zinom inválido"}
-        if previous.get("status") in ("tombstoned", "superseded"):
+        from castanha.bronze_ingest import has_origin_receipts
+        if previous.get("status") in ("tombstoned", "superseded") and not has_origin_receipts(previous):
             return {"status": previous["status"], "reason": "Estado terminal preservado"}
         source = previous.get("source") or {}
         slug = metadata.get("slug")
@@ -312,11 +313,12 @@ class ZinomAdapter:
                   self.bronze_dir / slug if safe_slug else None)
         has_bronze_history = bronze is not None and (bronze / ".brain-ingest" / "destination.json").exists()
         if self.bronze_enabled or has_bronze_history or (isinstance(source, dict) and source.get("transport") == "bronze"):
+            pending_source = {**source, "transport": "bronze"} if isinstance(source, dict) else {"transport": "bronze"}
             if not self.bronze_enabled or not self.enabled or not self.token:
-                return {"status": "pending", "source": {"transport": "bronze"},
+                return {"status": "pending", "source": pending_source,
                         "reason": "Ponte Bronze desligada ou sem token; sem fallback legado"}
             if metadata.get("processing_status") == "pending":
-                return {"status": "pending", "source": {"transport": "bronze"},
+                return {"status": "pending", "source": pending_source,
                         "reason": "Processamento da gravação pendente"}
             from castanha.bronze_ingest import ingest_current_recordings
             if not safe_slug:

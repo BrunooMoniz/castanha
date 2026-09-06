@@ -134,7 +134,8 @@ def pending_candidates(storage: MeetingStorage):
             candidates.append(("", bronze.name))
             continue
         delivery = delivery or {}
-        if delivery.get("status") in ("tombstoned", "superseded"):
+        from castanha.bronze_ingest import has_origin_receipts
+        if delivery.get("status") in ("tombstoned", "superseded") and not has_origin_receipts(delivery):
             continue
         unfinished = any(_read_json(p).get("stage") != "done" for p in (path.parent / ".jobs").glob("*.json"))
         bronze_pending = False
