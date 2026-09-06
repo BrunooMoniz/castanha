@@ -599,6 +599,16 @@ with patch.object(deployment, "capture_processes", return_value=[]), \
         with patch.object(Path, "iterdir", denied), self.assertRaises(deployment.DeploymentError):
             self.fence.assert_no_readers(proc=proc)
 
+    def test_native_session_manager_does_not_require_ptrace_permission(self):
+        self.activate()
+        proc = self.proc_for()
+        pid = proc / "12345678"
+        pid.mkdir()
+        (pid / "cmdline").write_bytes(b"/usr/lib/systemd/systemd\0--user\0")
+        # cwd/fds não são acessíveis ao usuário nesse processo protegido.
+        # O teste anterior conserva a recusa para Python com fd ilegível.
+        self.fence.assert_no_readers(proc=proc)
+
     def test_open_descriptor_alone_identifies_pre_fence_reader(self):
         ready_read, ready_write = os.pipe()
         go_read, go_write = os.pipe()

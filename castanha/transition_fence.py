@@ -10,6 +10,7 @@ import importlib.util
 import marshal
 import types
 import os
+import re
 from pathlib import Path
 import stat
 import sys
@@ -345,6 +346,15 @@ class TransitionFence:
             if any(argv[i] == "-m" and argv[i + 1].startswith("castanha.")
                    for i in range(len(argv) - 1)):
                 return True
+            # A cerca administra os entrypoints Python/shell do Castanha.
+            # Serviços nativos (p.ex. systemd --user) não conservam esse runtime
+            # Python: um filho que o execute passa novamente pela cerca. Tentar
+            # ler cwd/fds protegidos de todo o desktop tornava a instalação
+            # impossível mesmo sem nenhum leitor do Castanha.
+            executable = os.path.basename(argv[0]) if argv else ""
+            if not (re.fullmatch(r"(?:python|pypy)[0-9.]*", executable)
+                    or executable in {"sh", "bash", "dash", "zsh", "fish", "ksh"}):
+                return False
             cwd = (entry / "cwd").resolve(strict=True)
             if any(cwd == root or root in cwd.parents for root in roots):
                 return True

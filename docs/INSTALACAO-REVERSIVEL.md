@@ -85,6 +85,14 @@ outro cwd, processos dentro do checkout/backup e descritores abertos nessas
 árvores. Um shell ainda dentro do checkout também recusa conservadoramente.
 Nenhum CLI em voo ou captura é sinalizado para forçar quiescência.
 
+A inspeção de cwd/descritores abrange intérpretes Python/PyPy e shells, além
+dos entrypoints explícitos reconhecidos pelo argv. Serviços nativos do desktop,
+como systemd --user, não exigem acesso ptrace: filhos que executem o Castanha
+passam por exec e pela cerca. Importadores próprios, Python embarcado em outro
+executável e argv deliberadamente disfarçado continuam fora da fronteira,
+como as cópias arbitrárias de código. Um intérprete relevante ilegível continua
+recusando a instalação; não se altera a segurança de /proc para instalar.
+
 A justificativa depende dos bytes auditados de b97131e: eles não fazem fork de
 runtime Python carregado. Filhos do CLI/daemon passam por exec e reimportam a
 cerca, ou são processos externos. No nascimento da captura, `Popen` só retorna

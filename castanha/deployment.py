@@ -562,7 +562,7 @@ def deploy(candidate, sha, *, cli_link, plugin_link, state_dir, platform=None, a
             # Conservar a fase e a razão controlada antes que a reversão as
             # substitua. Não registrar saída de subprocesso ou configuração.
             plan.update(failed_phase=plan["phase"], phase="rollback", error_type=type(exc).__name__,
-                        error_reason=str(exc) if isinstance(exc, DeploymentError) else None)
+                        error_reason=str(exc) if type(exc).__name__ in {"DeploymentError", "FenceError"} else None)
             write_json(journal, plan)
             try:
                 # Sem exigir ocioso: com captura nascida, deixar os dois links
