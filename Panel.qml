@@ -1031,6 +1031,10 @@ Panel {
     // O destino do Zinom vem do metadata da própria reunião, e não do estado
     // da sessão: assim toda linha sabe o seu, não só a mais recente.
     readonly property var zinomInfo: note && note.zinom ? note.zinom : null
+    // Resumo pendente (cota da LLM) vem do metadata, fora do bloco zinom.
+    readonly property var statusInfo: ({ zinom: zinomInfo,
+                                         summary_status: note && note.summary_status ? note.summary_status : "",
+                                         summary_error: note && note.summary_error ? note.summary_error : "" })
     readonly property bool precisaRetry: !!note && !!note.can_retry
     readonly property bool reprocessando: !!note && root.retryingSlug === note.slug
     readonly property bool precisaSync: DeliveryStatus.zinomNeedsSync(note) && !precisaRetry
@@ -1188,7 +1192,7 @@ Panel {
           visible: text !== "" && !noteRow.aberta
           text: {
             if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
-            var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
+            var linha = root.zinomLine(noteRow.statusInfo)
             if (linha === "") return ""
             return DeliveryStatus.zinomIcon(noteRow.note) + linha
           }
@@ -1249,7 +1253,7 @@ Panel {
         visible: text !== ""
         text: {
           if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
-          var linha = root.zinomLine({ zinom: noteRow.zinomInfo })
+          var linha = root.zinomLine(noteRow.statusInfo)
           if (linha === "") return ""
           return DeliveryStatus.zinomIcon(noteRow.note) + linha
         }
