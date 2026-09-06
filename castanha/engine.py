@@ -565,6 +565,8 @@ class CastanhaEngine:
                         else "sem_audio" if all(r.get("audio_status") == "sem_audio" for r in records)
                         else "desconhecido")
         transcription_error = "; ".join(errors) or None
+        metadata.pop("summary_status", None)
+        metadata.pop("summary_error", None)
         metadata.update(recordings=records, recordings_count=len(records),
                         duration_seconds=sum(r.get("duration_seconds", 0) for r in records),
                         bronze_audio_file=last_job["audio_path"], transcription_provider=provider,
@@ -583,9 +585,25 @@ class CastanhaEngine:
                 "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
                 "transcription_provider": provider, "transcription_error": transcription_error,
                 "zinom": metadata.get("zinom") or {"status": "pending"}, "problemas": errors}}
-        silver_content = self.summarizer.generate_silver(metadata, transcript)
-        silver_path = self.storage.save_silver(slug, silver_content)
-        gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
+        from castanha.summarizer import LlmUnavailable
+        try:
+            silver_content = self.summarizer.generate_silver(metadata, transcript)
+            silver_path = self.storage.save_silver(slug, silver_content)
+            gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
+        except LlmUnavailable as exc:
+            # Cota, rede ou provedor: a transcrição já está nos checkpoints e nada
+            # vai ao Zinom. O resumo fica pendente e a retomada refaz só ele.
+            metadata.update(processing_status="pending", summary_status="pending", summary_error=str(exc))
+            write_json(bronze / "metadata.json", metadata)
+            return {"status": "partial", "result": {
+                "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
+                "silver_file": str(self.storage.silver_dir / f"{slug}.md"),
+                "gold_file": str(self.storage.gold_dir / f"{slug}.json"),
+                "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
+                "transcription_provider": provider, "transcription_error": transcription_error,
+                "summary_status": "pending", "summary_error": str(exc),
+                "zinom": metadata.get("zinom") or {"status": "pending"},
+                "problemas": errors + [f"Resumo pendente: {exc}"]}}
         gold_path = self.storage.save_gold(slug, gold_data)
         zinom_status = self.zinom.ingest_meeting(
             metadata, silver_content, gold_data,

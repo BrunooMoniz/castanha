@@ -580,6 +580,64 @@ class TestDurableJobs(unittest.TestCase):
 
 
 
+    def test_llm_quota_keeps_summary_pending_and_resumes_without_retranscribing(self):
+        """Cota da LLM esgotada: transcrição preservada, nada vai ao Zinom, job não vira 'done'.
+        A retomada refaz só o resumo, sem chamar o transcritor de novo."""
+        import io
+        import urllib.error
+        from castanha.summarizer import MeetingSummarizer
+        self.engine.summarizer.api_key = 'synthetic-fixture-only'
+        quota = urllib.error.HTTPError('https://api.groq.com', 429, 'rate limit', None, io.BytesIO(b'{"error":"tpm"}'))
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch('castanha.summarizer.urllib.request.urlopen', side_effect=quota), \
+             patch('castanha.summarizer.time.sleep'), \
+             patch.object(self.engine.zinom, 'ingest_meeting') as ingest:
+            provider.return_value.transcribe.return_value = self.transcription()
+            result = self.engine.stop_recording()
+            ingest.assert_not_called()
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['result']['summary_status'], 'pending')
+        self.assertTrue(any('Resumo pendente' in p for p in result['result']['problemas']))
+        slug = result['result']['slug']
+        bronze = self.engine.storage.bronze_dir / slug
+        meta = self.engine.storage._read_bronze_metadata(slug)
+        self.assertEqual(meta['processing_status'], 'pending')
+        self.assertEqual(meta['summary_status'], 'pending')
+        self.assertEqual((bronze / 'transcript_raw.txt').read_text(), 'Decisão preservada')
+        jobs = [json.loads(p.read_text()) for p in (bronze / '.jobs').glob('*.json')]
+        self.assertEqual({job['stage'] for job in jobs}, {'transcribed'})
+        self.assertFalse((self.engine.storage.gold_dir / f'{slug}.json').exists())
+        note = next(n for n in self.engine.storage.list_recent_meetings() if n['slug'] == slug)
+        self.assertEqual(note['summary_status'], 'pending')
+        self.assertEqual(note['processing_status'], 'pending')
+        # Retomada: LLM voltou. Nenhuma nova transcrição; resumo, Gold e entrega acontecem.
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(MeetingSummarizer, '_call_llm', return_value='# Resumo\n\nDecisão preservada.'):
+            sync_meeting(slug, self.engine.storage)
+            provider.assert_not_called()
+        meta = self.engine.storage._read_bronze_metadata(slug)
+        self.assertEqual(meta['processing_status'], 'complete')
+        self.assertNotIn('summary_status', meta)
+        self.assertNotIn('summary_error', meta)
+        jobs = [json.loads(p.read_text()) for p in (bronze / '.jobs').glob('*.json')]
+        self.assertEqual({job['stage'] for job in jobs}, {'done'})
+        silver = (self.engine.storage.silver_dir / f'{slug}.md').read_text()
+        self.assertIn('Decisão preservada.', silver)
+        self.assertNotIn('Sem resumo', silver)
+        self.assertTrue((self.engine.storage.gold_dir / f'{slug}.json').exists())
+        self.assertEqual((bronze / 'transcript_raw.txt').read_text(), 'Decisão preservada')
+
+    def test_summary_pending_meeting_is_a_retry_candidate(self):
+        from castanha.sync import pending_candidates
+        self.engine.summarizer.api_key = 'synthetic-fixture-only'
+        from castanha.summarizer import LlmUnavailable
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.summarizer, 'generate_silver', side_effect=LlmUnavailable('cota')):
+            provider.return_value.transcribe.return_value = self.transcription()
+            slug = self.engine.stop_recording()['result']['slug']
+        self.assertIn(slug, [s for _, s in pending_candidates(self.engine.storage)])
+
+
 class TestRemoteJob(unittest.TestCase):
     def setUp(self):
         from tests.test_vps_channel_transport import LocalVps, TEST_CONTRACT

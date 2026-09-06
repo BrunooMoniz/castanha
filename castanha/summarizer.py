@@ -26,6 +26,15 @@ LLM_MAX_WAIT_SEC = 180.0
 _LIMITE_RE = re.compile(r"Limit\s+(\d+).*?Requested\s+(\d+)", re.S)
 
 
+class LlmUnavailable(Exception):
+    """LLM configurada, mas indisponível agora (cota, rede, servidor, provedor não suportado).
+
+    Não é "sem resumo": a transcrição já está salva e o resumo fica PENDENTE,
+    para a retomada refazer sem transcrever de novo. Antes disso, uma cota
+    esgotada virava nota "Sem resumo" e reunião marcada como pronta.
+    """
+
+
 class LlmTooLarge(Exception):
     """A Groq recusou a mensagem por tamanho (413). Traz o limite e o pedido, se ela disse."""
 
@@ -274,6 +283,9 @@ class MeetingSummarizer:
         self.model = llm_cfg.get("model", "openai/gpt-oss-120b")
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
+        if self.provider != "groq":
+            # Outro provedor configurado nunca vai parar na Groq por engano.
+            raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; só 'groq' por enquanto")
         if not self.api_key:
             return ""
 
@@ -339,7 +351,7 @@ class MeetingSummarizer:
             if tentativa < LLM_ATTEMPTS:
                 time.sleep(min(espera, LLM_MAX_WAIT_SEC))
         print(f"[Castanha] Erro na chamada LLM depois de {LLM_ATTEMPTS} tentativas: {ultimo}", file=sys.stderr)
-        return ""
+        raise LlmUnavailable(f"LLM indisponível depois de {LLM_ATTEMPTS} tentativas ({str(ultimo)[:120]})")
 
     # ------------------------------------------------------------ partes
     def _tamanho_da_parte(self, texto: str, erro: LlmTooLarge) -> int:

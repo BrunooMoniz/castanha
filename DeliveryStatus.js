@@ -28,6 +28,12 @@ function zinomIcon(note) {
 
 function zinomLine(result) {
   if (!result) return ""
+  if (result.summary_status === "pending") {
+    // Transcrição salva; o resumo volta sozinho na próxima tentativa.
+    var porque = String(result.summary_error || "").replace(/^LLM indisponível depois de \d+ tentativas/, "LLM indisponível")
+    if (porque.length > 60) porque = porque.substring(0, 59) + "…"
+    return "Resumo pendente" + (porque ? " (" + porque + ")" : "") + "; tenta de novo sozinho"
+  }
   var z = result.zinom
   if (!z) return ""
   if (z.status === "tombstoned") return "Excluído no Zinom"

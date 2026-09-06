@@ -207,6 +207,23 @@ class TestBronzeCaller(unittest.TestCase):
         self.assertEqual(sync_meeting("fixture", self.storage)["status"], "pending")
         self.assertEqual(len(self.client.calls), 1)
 
+    def test_bridge_refusal_reason_reaches_the_panel_in_product_language(self):
+        """O painel mostrava só "BronzeIngestError"; o motivo real da ponte é o que ajuda."""
+        meta = self.metadata()
+        meta["recordings"] = [{"id": "legado.ogg", "filename": "legado.ogg", "path": str(self.bronze / "legado.ogg"),
+                               "recorded_at": "2026-09-05T10:00:00", "transcribed": True,
+                               "transcription_provider": "groq", "audio_status": "ok"}]
+        for p in (self.bronze / ".jobs").glob("*.json"):
+            p.unlink()
+        write_json(self.bronze / "metadata.json", meta)
+        result = sync_meeting("fixture", self.storage)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertTrue(result["errors"][0].startswith("Ponte Bronze: "))
+        self.assertNotIn("BronzeIngestError", result["errors"][0])
+        self.assertNotIn(str(self.bronze), result["errors"][0])
+        self.assertEqual(self.client.calls, [])
+
     def test_failed_item_does_not_block_queue(self):
         (self.bronze / ".jobs/native-fixture.json").write_text("corrupt")
         self.meeting("next")

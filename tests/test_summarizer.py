@@ -92,6 +92,21 @@ class TestCallLlm(unittest.TestCase):
             self.assertEqual(self.s._call_llm("sys", "user"), "")
         self.assertIn("401", err.getvalue())
 
+    def test_cota_esgotada_em_todas_as_tentativas_vira_LlmUnavailable(self):
+        from castanha.summarizer import LlmUnavailable
+        with patch("castanha.summarizer.urllib.request.urlopen", side_effect=_http_error(429, "tpm")), \
+             patch("castanha.summarizer.time.sleep"), patch("castanha.summarizer.sys.stderr", io.StringIO()):
+            with self.assertRaises(LlmUnavailable):
+                self.s._call_llm("sys", "user")
+
+    def test_provedor_que_nao_e_groq_nunca_chama_a_groq(self):
+        from castanha.summarizer import LlmUnavailable
+        self.s.provider = "openai"
+        with patch("castanha.summarizer.urllib.request.urlopen") as u:
+            with self.assertRaises(LlmUnavailable):
+                self.s._call_llm("sys", "user")
+        u.assert_not_called()
+
     def test_sem_chave_nao_chama(self):
         self.s.api_key = ""
         with patch("castanha.summarizer.urllib.request.urlopen") as u:

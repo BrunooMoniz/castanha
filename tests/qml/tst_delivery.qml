@@ -59,4 +59,12 @@ TestCase {
     compare(DeliveryStatus.zinomNeedsSync(data.note), data.pending)
     compare(DeliveryStatus.zinomIcon(data.note), data.pending ? "󰀦  " : "󰄬  ")
   }
+
+  function test_summary_pending_line_and_retry() {
+    var note = {processing_status: "pending", summary_status: "pending",
+                summary_error: "LLM indisponível depois de 4 tentativas (HTTP 429)", zinom: {status: "pending"}}
+    compare(DeliveryStatus.zinomLine(note), "Resumo pendente (LLM indisponível (HTTP 429)); tenta de novo sozinho")
+    verify(DeliveryStatus.zinomNeedsSync(note))
+    compare(DeliveryStatus.zinomLine({summary_status: "", zinom: {status: "pending"}}), "Envio ao Zinom pendente")
+  }
 }

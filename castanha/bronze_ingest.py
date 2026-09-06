@@ -467,4 +467,7 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
             previous_source = (metadata.get("zinom") or {}).get("source") or {}
             return {"status": "error", "source": {**previous_source, "transport": "bronze"},
                     "reason": "Ingestão não confirmada; originais preservados para retomada",
-                    "errors": [f"Ponte Bronze: {type(exc).__name__}"]}
+                    # O motivo já é linguagem de produto quando é da própria ponte;
+                    # exceção de rede ou de código fica só com o tipo, sem caminho nem token.
+                    "errors": [f"Ponte Bronze: {exc}" if isinstance(exc, BronzeIngestError)
+                               else f"Ponte Bronze: {type(exc).__name__}"]}
