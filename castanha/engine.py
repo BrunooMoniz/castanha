@@ -604,6 +604,9 @@ class CastanhaEngine:
                 # rodada é pendente, senão a fila zera o backoff e o CLI diz "salvo".
                 "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                 "problemas": errors + [t("engine.problem_summary_pending", exc=exc)]}}
+        # Quem resumiu fica no Bronze antes do recibo: record_zinom_result relê o disco.
+        metadata["summary_provider"] = self.summarizer.last_provider
+        write_json(bronze / "metadata.json", metadata)
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
         zinom_status = self.zinom.ingest_meeting(
@@ -841,6 +844,7 @@ class CastanhaEngine:
                     "summary_status": "pending", "summary_error": str(exc),
                     "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                     "problemas": [t("engine.problem_summary_pending", exc=exc)]}}
+            meta["summary_provider"] = self.summarizer.last_provider
             self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
             gold_path = self.storage.save_gold(slug, gold_data)

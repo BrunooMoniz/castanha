@@ -27,7 +27,7 @@ class VpsChannelCallbackTests(unittest.TestCase):
                               'groq_api_key': 'fixture-key', 'vps_ssh_host': 'fixture',
                               **{('vps_worker_contract' if k == 'contract' else 'vps_' + k): v
                                  for k, v in TEST_CONTRACT.items()}},
-            'llm': {'api_key': ''}, 'zinom': {'enabled': False, 'token': ''}}
+            'llm': {'provider': 'groq', 'api_key': ''}, 'zinom': {'enabled': False, 'token': ''}}
         (cfg / 'config.json').write_text(json.dumps(self.config))
         self.remote = LocalVps(self.root / 'remote')
         for patcher in (

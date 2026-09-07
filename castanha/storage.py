@@ -535,6 +535,7 @@ class MeetingStorage:
             "status": (resultado or {}).get("status", "error"),
             "remember_id": remember.get("id") or (metadata.get("zinom") or {}).get("remember_id"),
             "facts_ingested": (resultado or {}).get("facts_ingested", 0),
+            "facts_descartados": (resultado or {}).get("facts_descartados", previous.get("facts_descartados", 0)),
             "facts_status": resultado.get("facts_status", previous.get("facts_status", "none")),
             "facts_pending": resultado.get("facts_pending", previous.get("facts_pending", [])),
             "source": resultado.get("source", previous.get("source")),

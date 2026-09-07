@@ -7,11 +7,12 @@ ao recuperar uma resposta perdida. A fronteira MCP resolve a conta autenticada.
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from castanha.durability import meeting_lock, write_json
-from castanha.zinom_adapter import ZinomError, tool_json
+from castanha.zinom_adapter import ZinomError, fato_normalizado, is_fato_util, tool_json
 
 
 class BronzeIngestError(ValueError):
@@ -215,8 +216,129 @@ def revision_fingerprint(request: dict) -> str:
         key: value for key, value in request["envelope"]["proveniencia"].items()
         if key != "capturado_em"
     }}
+    # Fatos entram na identidade só quando existem: os checkpoints antigos das
+    # transcrições (facts vazio) continuam com o mesmo nome de arquivo.
+    if request.get("facts"):
+        identity = {"envelope": identity, "facts": request["facts"]}
     fingerprint = _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False))
     return fingerprint
+
+
+# ------------------------------------------------ síntese: Silver + fatos citados
+# O Bronze (transcrição) já está no Zinom; o que responde "o que foi decidido"
+# é o Silver. Ele vai como documento de síntese, e cada fato Gold cita a
+# passagem literal do Silver por deslocamento de bytes e hash, que o servidor
+# confere antes de gravar o fato.
+_FRONTMATTER = re.compile(r"\A---\n.*?\n---\n+", re.S)
+_TRANSCRIPT_SECTION = re.compile(r"(?:\A|\n)## 📝 Transcrição[^\n]*(?:\n.*)?\Z", re.S)
+SYNTHESIS_REFERENCE = "castanha-silver"
+MIN_QUOTE_CHARS = 20
+MAX_FACTS = 500
+
+
+def synthesis_text(silver_markdown: str) -> str:
+    """Título e notas: sem o frontmatter e sem a transcrição anexada."""
+    text = _FRONTMATTER.sub("", silver_markdown or "", count=1)
+    text = _TRANSCRIPT_SECTION.sub("", text, count=1).strip()
+    return text + "\n" if text else ""
+
+
+def cite_facts(texto: str, facts) -> tuple:
+    """Fatos cuja passagem existe byte a byte no texto; o resto é descartado.
+
+    Devolve (fatos_citados, descartados). Deslocamentos são em bytes UTF-8 do
+    texto exato enviado, e o hash é dos bytes da passagem: é o que o servidor
+    valida. Busca byte-exata nunca parte um caractere.
+    """
+    data = texto.encode("utf-8")
+    cited, dropped = [], 0
+    for fact in facts or []:
+        quote = fact.get("evidencia") if isinstance(fact, dict) else None
+        if not is_fato_util(fact) or not isinstance(quote, str) or len(quote.strip()) < MIN_QUOTE_CHARS:
+            dropped += 1
+            continue
+        needle = quote.strip().encode("utf-8")
+        start = data.find(needle)
+        if start < 0 or len(cited) >= MAX_FACTS:
+            dropped += 1
+            continue
+        end = start + len(needle)
+        cited.append({**fato_normalizado(fact),
+                      "excerpt": {"start": start, "end": end,
+                                  "sha256": hashlib.sha256(data[start:end]).hexdigest()}})
+    return cited, dropped
+
+
+def synthesis_origin(origin_ids) -> str:
+    origins = sorted({o for o in (origin_ids or []) if isinstance(o, str) and o.strip()})
+    if not origins:
+        raise BronzeIngestError("Síntese sem origem verificável; nada enviado")
+    return "castanha:" + _sha("silver|" + "|".join(origins))
+
+
+def build_synthesis_request(slug: str, metadata: dict, silver_markdown: str, gold: dict, *,
+                            captured_at: str, workspace: str | None = None,
+                            account_id: str | None = None, origin_ids=None) -> dict:
+    """Envelope de síntese (Silver) com os fatos Gold citados. Sem rede."""
+    if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+        raise BronzeIngestError("Identidade da reunião inválida")
+    if not isinstance(metadata, dict):
+        raise BronzeIngestError("Metadados inválidos")
+    if not isinstance(workspace, str) or not workspace.strip() or workspace != workspace.strip() or len(workspace) > 256 or "\x00" in workspace:
+        raise BronzeIngestError("Workspace de destino explícito obrigatório")
+    delivery = metadata.get("zinom")
+    if delivery is not None and not isinstance(delivery, dict):
+        raise BronzeIngestError("Recibo Zinom inválido")
+    if (delivery or {}).get("status") == "tombstoned":
+        raise BronzeIngestError("Origem excluída; reingestão proibida")
+    if metadata.get("processing_status") == "pending":
+        raise BronzeIngestError("Transcrição ainda pendente")
+    origin = synthesis_origin(origin_ids)
+    texto = synthesis_text(silver_markdown if isinstance(silver_markdown, str) else "")
+    if not texto.strip() or "\x00" in texto:
+        raise BronzeIngestError("Notas Silver vazias; síntese não enviada")
+    if len(texto.encode("utf-8")) > 8 * 1024 * 1024:
+        raise BronzeIngestError("Notas excedem limite; nada truncado")
+    title = metadata.get("title") or "Reunião"
+    if not isinstance(title, str) or len(title) > 1000 or "\x00" in title:
+        raise BronzeIngestError("Título inválido")
+    facts, _ = cite_facts(texto, (gold or {}).get("facts") if isinstance(gold, dict) else [])
+    envelope = {
+        "schema": "bruno.wiki.bronze.documento", "versao": 1,
+        "produtor": {"nome": "castanha", "versao": "0.1.0"},
+        "source_type": "castanha", "source_id": origin, "workspace": workspace,
+        "source_url": None, "titulo": title,
+        "timestamp": _source_timestamp(metadata.get("recorded_at")),
+        "fidelidade": "sintese", "texto": texto,
+        "proveniencia": {"capturado_em": _capture_instant(captured_at),
+                          "sha256_texto": _sha(texto), "referencia": SYNTHESIS_REFERENCE,
+                          "origem_id": origin},
+    }
+    if account_id is not None:
+        if not isinstance(account_id, str) or not account_id.strip() or len(account_id) > 256 or "\x00" in account_id:
+            raise BronzeIngestError("Conta explícita inválida")
+        envelope["account_id"] = account_id
+    payload = {"envelope": envelope, "facts": facts}
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return {"idempotency_key": "castanha:v1:" + _sha(canonical), **payload}
+
+
+def legacy_origin_ids(bronze: Path) -> list:
+    """Origens de uma reunião legada: as transcrições já entregues pela recuperação."""
+    uploads = Path(bronze) / ".legacy-recovery" / "uploads"
+    if not uploads.is_dir():
+        return []
+    origins = []
+    for path in sorted(uploads.glob("*.json")):
+        try:
+            saved = json.loads(path.read_bytes())
+            origin = saved["request"]["envelope"]["source_id"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise BronzeIngestError("Recibo legado ilegível; síntese adiada") from exc
+        if saved.get("status") != "ok" or not isinstance(origin, str) or not origin.startswith("castanha:"):
+            raise BronzeIngestError("Transcrição legada ainda não entregue; síntese adiada")
+        origins.append(origin)
+    return origins
 
 
 def prepare_transcript_upload(directory: Path, slug: str, metadata: dict, transcript: str, *,
@@ -227,16 +349,20 @@ def prepare_transcript_upload(directory: Path, slug: str, metadata: dict, transc
     O relógio da tentativa não muda a identidade de uma revisão já preparada.
     Cada revisão tem arquivo próprio; uma falha não apaga recibos anteriores.
     """
-    request = build_transcript_request(slug, metadata, transcript,
-                                       captured_at=captured_at, account_id=account_id, workspace=workspace, recording_id=recording_id)
+    def build(instant):
+        return build_transcript_request(slug, metadata, transcript, captured_at=instant,
+                                        account_id=account_id, workspace=workspace, recording_id=recording_id)
+    return prepare_upload(directory, build(captured_at), build)
+
+
+def prepare_upload(directory: Path, request: dict, rebuild) -> Path:
+    """Checkpoint de um pedido já construído; `rebuild(instante)` reconstrói o mesmo pedido."""
     checkpoint = Path(directory) / (revision_fingerprint(request) + ".json")
     if checkpoint.exists():
         try:
             saved = json.loads(checkpoint.read_text(encoding="utf-8"))
             instant = saved["request"]["envelope"]["proveniencia"]["capturado_em"]
-            expected = build_transcript_request(slug, metadata, transcript,
-                                                captured_at=instant, account_id=account_id, workspace=workspace, recording_id=recording_id)
-            if saved["request"] != expected:
+            if saved["request"] != rebuild(instant):
                 raise BronzeIngestError("Checkpoint diverge do original")
         except (ValueError, KeyError, TypeError) as exc:
             raise BronzeIngestError("Checkpoint inválido; preservado sem reenviar") from exc
@@ -371,8 +497,21 @@ def current_requests(bronze: Path, slug: str, metadata: dict, *, workspace, acco
         for native_id, item_metadata, text in current_recordings(bronze, metadata)]
 
 
+def _synthesis_for(bronze: Path, slug: str, metadata: dict, silver_text, gold, native_ids, *,
+                   workspace, account_id=None):
+    """(construtor, pedido) da síntese, ou None quando não há notas ou origem."""
+    origins = legacy_origin_ids(bronze) or list(native_ids)
+    if not silver_text or not isinstance(gold, dict) or not origins:
+        return None
+
+    def build(instant):
+        return build_synthesis_request(slug, metadata, silver_text, gold, captured_at=instant,
+                                       workspace=workspace, account_id=account_id, origin_ids=origins)
+    return build, build(datetime.now(timezone.utc).isoformat())
+
+
 def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, account_id=None,
-                      endpoint="https://zinom.ai/mcp", token="") -> bool:
+                      endpoint="https://zinom.ai/mcp", token="", silver_text=None, gold=None) -> bool:
     """Um recibo antigo não conclui uma revisão alterada em disco."""
     try:
         directory = bronze / ".brain-ingest"
@@ -380,8 +519,15 @@ def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, acc
         if json.loads((directory / "destination.json").read_bytes()) != frozen_destination(
                 endpoint=endpoint, token=token, workspace=workspace, account_id=account_id):
             return True
-        requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
-        for _, _, _, request in requests:
+        legacy = bool(legacy_origin_ids(bronze))
+        requests = [] if legacy else current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
+        pending = [request for _, _, _, request in requests]
+        synthesis = _synthesis_for(bronze, slug, metadata, silver_text, gold,
+                                   [native_id for native_id, *_ in requests],
+                                   workspace=workspace, account_id=account_id)
+        if synthesis:
+            pending.append(synthesis[1])
+        for request in pending:
             if any(old.get("status") in TERMINAL_STATES and
                    old["request"]["envelope"]["source_id"] == request["envelope"]["source_id"]
                    for old in checkpoints.values()):
@@ -413,7 +559,7 @@ def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, acc
 
 
 def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *,
-                              workspace, account_id=None) -> dict:
+                              workspace, account_id=None, silver_text=None, gold=None) -> dict:
     """Chamador mantém meeting_lock; lock adicional serializa a entrega e origem.
 
     O resultado usa `source`, campo preservado pelo storage e pelo fluxo durável.
@@ -424,7 +570,10 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
     with meeting_lock(directory):
         try:
             checkpoints = _verify_terminal_receipts(directory, metadata)
-            requests = current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
+            # Reunião legada: a transcrição já foi entregue pela recuperação;
+            # aqui só a síntese, com aquelas entregas como origem.
+            legacy = legacy_origin_ids(bronze)
+            requests = [] if legacy else current_requests(bronze, slug, metadata, workspace=workspace, account_id=account_id)
             destination = frozen_destination(endpoint=client.endpoint, token=client.token,
                                              workspace=workspace, account_id=account_id)
             destination_path = directory / "destination.json"
@@ -457,12 +606,37 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
                         workspace=workspace, account_id=account_id, recording_id=native_id)
                     result = submit_transcript_upload(path, client)
                     results.append({"checkpoint": path.name, **result})
+            facts_sent = facts_dropped = 0
+            synthesis = _synthesis_for(bronze, slug, metadata, silver_text, gold,
+                                       [native_id for native_id, *_ in requests],
+                                       workspace=workspace, account_id=account_id)
+            if legacy and synthesis is None:
+                raise BronzeIngestError("Reunião legada sem notas para sintetizar")
+            if synthesis:
+                build, request = synthesis
+                facts_dropped = cite_facts(request["envelope"]["texto"], gold.get("facts"))[1]
+                origin_lock = bronze.parent / ".brain-ingest-locks" / _sha(request["envelope"]["source_id"])
+                origin_lock.mkdir(parents=True, exist_ok=True)
+                with meeting_lock(origin_lock):
+                    terminal = next(((name, old) for name, old in checkpoints.items()
+                        if old.get("status") in TERMINAL_STATES and
+                        old["request"]["envelope"]["source_id"] == request["envelope"]["source_id"]), None)
+                    if terminal:
+                        name, old = terminal
+                        results.append({"checkpoint": name, "synthesis": True, **old["result"]})
+                    else:
+                        path = prepare_upload(directory, request, build)
+                        result = submit_transcript_upload(path, client)
+                        results.append({"checkpoint": path.name, "synthesis": True, **result})
+                        if result["status"] in ("ok", "pending"):
+                            facts_sent = len(request["facts"])
             states = {r["status"] for r in results}
             status = ("error" if "error" in states else "pending" if "pending" in states else
                       "tombstoned" if "tombstoned" in states else
                       "superseded" if "superseded" in states else "ok")
             return {"status": status, "source": {"transport": "bronze", "revisions": results},
-                    "facts_status": "none", "facts_pending": [], "facts_ingested": 0}
+                    "facts_status": "ok" if facts_sent else "none", "facts_pending": [],
+                    "facts_ingested": facts_sent, "facts_descartados": facts_dropped}
         except Exception as exc:
             previous_source = (metadata.get("zinom") or {}).get("source") or {}
             return {"status": "error", "source": {**previous_source, "transport": "bronze"},

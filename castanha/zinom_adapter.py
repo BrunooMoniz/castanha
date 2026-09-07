@@ -328,7 +328,8 @@ class ZinomAdapter:
             if not safe_slug:
                 return {"status": "error", "reason": "Identidade da reunião inválida"}
             return ingest_current_recordings(bronze, slug, metadata,
-                ZinomMcpClient(self.endpoint, self.token), workspace=self.workspace, account_id=self.account_id)
+                ZinomMcpClient(self.endpoint, self.token), workspace=self.workspace, account_id=self.account_id,
+                silver_text=silver_markdown, gold=gold_data)
         previous_remember_id = previous_remember_id or previous.get("remember_id")
         memory_ids = metadata.get("memory_recording_ids")
         providers = [metadata.get("transcription_provider")] + [

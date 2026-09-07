@@ -25,7 +25,7 @@ class TestCLI(unittest.TestCase):
                 "silver_dir": str(self.silver),
                 "gold_dir": str(self.gold),
             },
-            "llm": {"api_key": ""},
+            "llm": {"provider": "groq", "api_key": ""},
             # Mock só por escolha explícita: sem ele, "sem transcritor" é falha declarada.
             "transcription": {"provider": "mock", "groq_api_key": "", "vps_ssh_host": "nonexistent"},
             "zinom": {"enabled": False},

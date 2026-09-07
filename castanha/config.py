@@ -66,7 +66,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "por_canal": False,
     },
     "llm": {
-        "provider": "groq",  # "groq", "openai", "openrouter", "vps"
+        # "hermes_ssh": Hermes Agent na VPS, com as assinaturas do Bruno (Claude e
+        # Codex), sem ferramentas nem memória. "groq" continua válido como primário.
+        "provider": "hermes_ssh",
+        "hermes_ssh_host": "zinom-vps-2",
+        # Cadeia ordenada: o próximo modelo só entra quando o anterior falhou de fato.
+        "hermes_models": [
+            {"provider": "anthropic", "model": "claude-opus-5"},
+            {"provider": "openai-codex", "model": "gpt-5.5"},
+        ],
+        "hermes_reasoning": "medium",
+        "hermes_timeout_sec": 900,
+        # Reserva quando a cadeia Hermes inteira falha; "" desliga a reserva.
+        "fallback_provider": "groq",
         "api_key": os.environ.get("GROQ_API_KEY", ""),
         "model": "openai/gpt-oss-120b",  # llama-3.3-70b-versatile foi descontinuado na Groq
     },

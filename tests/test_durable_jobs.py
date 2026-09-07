@@ -32,7 +32,7 @@ class TestDurableJobs(unittest.TestCase):
         (config / 'config.json').write_text(json.dumps({
             'storage': {'base_dir': str(base), 'bronze_dir': str(base / 'bronze'),
                         'silver_dir': str(base / 'silver'), 'gold_dir': str(base / 'gold')},
-            'llm': {'api_key': ''}, 'zinom': {'enabled': False, 'token': ''},
+            'llm': {'provider': 'groq', 'api_key': ''}, 'zinom': {'enabled': False, 'token': ''},
             'transcription': {'groq_api_key': '', 'vps_ssh_host': ''},
         }))
         for patcher in (
@@ -587,6 +587,7 @@ class TestDurableJobs(unittest.TestCase):
         import io
         import urllib.error
         from castanha.summarizer import MeetingSummarizer
+        self.engine.summarizer.provider = 'groq'
         self.engine.summarizer.api_key = 'synthetic-fixture-only'
         quota = urllib.error.HTTPError('https://api.groq.com', 429, 'rate limit', None, io.BytesIO(b'{"error":"tpm"}'))
         with patch('castanha.engine.get_transcriber') as provider, \

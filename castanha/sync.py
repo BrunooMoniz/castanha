@@ -228,9 +228,12 @@ def pending_candidates(storage: MeetingStorage):
         if z_cfg.get("bronze_ingest_enabled", False) is True or (bronze / ".brain-ingest").exists() or (
                 isinstance(source, dict) and source.get("transport") == "bronze"):
             from castanha.bronze_ingest import bronze_needs_sync
+            silver_file = storage.silver_dir / f"{bronze.name}.md"
             bronze_pending = bronze_needs_sync(bronze, bronze.name, metadata,
                 workspace=z_cfg.get("workspace"), account_id=z_cfg.get("account_id"),
-                endpoint=z_cfg.get("endpoint", "https://zinom.ai/mcp"), token=z_cfg.get("token", ""))
+                endpoint=z_cfg.get("endpoint", "https://zinom.ai/mcp"), token=z_cfg.get("token", ""),
+                silver_text=silver_file.read_text(encoding="utf-8") if silver_file.exists() else "",
+                gold=_read_json(storage.gold_dir / f"{bronze.name}.json"))
         if meeting_needs_sync(metadata) or unfinished or bronze_pending:
             synced_at = delivery.get("synced_at")
             candidates.append((synced_at if isinstance(synced_at, str) else "", path.parent.name))

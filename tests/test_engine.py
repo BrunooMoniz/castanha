@@ -48,7 +48,7 @@ class TestEngine(unittest.TestCase):
                 "gold_dir": str(self.meetings / "gold"),
             },
             "transcription": {"groq_api_key": "", "vps_ssh_host": ""},
-            "llm": {"api_key": ""},
+            "llm": {"provider": "groq", "api_key": ""},
             "zinom": {"enabled": False, "token": ""},
         }), encoding="utf-8")
 
@@ -336,6 +336,7 @@ class TestEngine(unittest.TestCase):
         import urllib.error
         engine = self._engine()
         self._reuniao_no_bronze(engine, "r5", transcript="Texto bom.", transcribed=True)
+        engine.summarizer.provider = "groq"
         engine.summarizer.api_key = "synthetic-fixture-only"
         quota = urllib.error.HTTPError("https://api.groq.com", 429, "rate limit", None, io.BytesIO(b"tpm"))
         with patch("castanha.engine.get_transcriber") as get_t, patch("castanha.engine.notify"), \
@@ -361,6 +362,30 @@ class TestEngine(unittest.TestCase):
         self.assertTrue((engine.storage.silver_dir / "r5.md").exists())
         self.assertNotIn("summary_status", engine.storage._read_bronze_metadata("r5"))
         self.assertFalse(engine.storage.get_meeting("r5")["can_retry"])
+
+    def test_quem_resumiu_fica_no_metadata_no_stop_e_no_retry(self):
+        engine = self._engine()
+
+        def hermes(system_prompt, user_prompt, json_mode=False):
+            engine.summarizer.last_provider = "hermes:anthropic/claude-opus-5"
+            return '{"facts": []}' if json_mode else "# Resumo\n\nTexto bom."
+
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            engine.start_recording(mode="dual", title="Reunião")
+        with patch.object(engine.summarizer, "_call_llm", side_effect=hermes):
+            res, _ = self._stop(engine, _levels(mic_silent=False, sys_silent=True))
+        self.assertEqual(res["status"], "success")
+        meta = json.loads((Path(res["result"]["bronze_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["summary_provider"], "hermes:anthropic/claude-opus-5")
+        self.assertEqual(meta["zinom"]["status"], "pending", "o recibo gravado depois preserva o campo")
+
+        self._reuniao_no_bronze(engine, "r6", transcript="Texto bom.", transcribed=True)
+        engine.summarizer.last_provider = None
+        with patch("castanha.engine.get_transcriber"), patch("castanha.engine.notify"), \
+             patch.object(engine.summarizer, "_call_llm", side_effect=hermes):
+            res = engine.reprocess_meeting("r6")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(engine.storage._read_bronze_metadata("r6")["summary_provider"], "hermes:anthropic/claude-opus-5")
 
     def test_retry_de_reuniao_ja_transcrita_so_refaz_as_notas(self):
         engine = self._engine()

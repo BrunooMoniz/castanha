@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -59,6 +60,7 @@ class TestCallLlm(unittest.TestCase):
         self.env = patch.dict("os.environ", {"XDG_CONFIG_HOME": str(self.temp), "XDG_STATE_HOME": str(self.temp)})
         self.env.start()
         self.s = MeetingSummarizer()
+        self.s.provider = "groq"  # Estes testes exercitam a Groq; o padrão agora é hermes_ssh.
         self.s.api_key = "gsk_teste"
 
     def tearDown(self):
@@ -134,6 +136,7 @@ class TestReuniaoLonga(unittest.TestCase):
         self.env = patch.dict("os.environ", {"XDG_CONFIG_HOME": str(self.temp), "XDG_STATE_HOME": str(self.temp)})
         self.env.start()
         self.s = MeetingSummarizer()
+        self.s.provider = "groq"  # Estes testes exercitam a Groq; o padrão agora é hermes_ssh.
         self.s.api_key = "gsk_teste"
         self.chamadas = []
 
@@ -259,18 +262,29 @@ class TestCalendarGrounding(unittest.TestCase):
             self.assertIn('presence: "unverified"', silver)
             self.assertIn('speech: "unverified"', silver)
 
-    def test_gold_filters_calendar_claims_in_every_collection(self):
+    def test_gold_filters_presence_claims_in_every_collection_but_keeps_calendar_names(self):
+        # Presença/fala continua barrada. Nome da agenda sozinho não barra mais:
+        # o fato é citado e apagável por origem, e "Nora" é sujeito legítimo.
         fake = {'facts': [{'subject': 'Luigi', 'predicate': 'participou', 'object': 'reunião'},
-                          {'subject': 'Projeto', 'predicate': 'custo', 'object': '10'}],
-                'decisions': ['Luigi aprovou o orçamento', 'Orçamento aprovado'],
-                'action_items': [{'task': 'Enviar documento', 'assignee': 'Rossi'},
-                                 {'task': 'Planejar', 'assignee': None}],
+                          {'subject': 'Projeto', 'predicate': 'custo', 'object': '10',
+                           'evidencia': 'o projeto custa 10 mil reais'}],
+                'decisions': [{'decision': 'Luigi aprovou o orçamento', 'evidencia': 'aprovou o orçamento de outubro'},
+                              {'decision': 'Rossi falou do orçamento', 'evidencia': 'x'}],
+                'action_items': [{'task': 'Enviar documento', 'assignee': 'Rossi', 'evidencia': 'enviar o documento até sexta'},
+                                 {'task': 'Planejar', 'assignee': None, 'evidencia': 'quem esteve presente planeja'}],
                 'people_notes': [{'name': 'Luigi Rossi', 'note': 'participou'},
                                  {'name': 'luigi@example.invalid', 'note': 'expert'}]}
         with patch.object(self.s, '_call_llm', return_value=json.dumps(fake)):
             gold = self.s.generate_gold(self.meta, 'Notas', self.transcript)
-        self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': ['Orçamento aprovado'],
-                                'action_items': [fake['action_items'][1]], 'people_notes': []})
+        self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': [fake['decisions'][0]],
+                                'action_items': [fake['action_items'][0]],
+                                'people_notes': [fake['people_notes'][1]]})
+        self.assertEqual(gold['facts'][0]['evidencia'], 'o projeto custa 10 mil reais', 'a passagem citada fica no Gold local')
+
+    def test_gold_prompt_asks_for_a_verbatim_quote_per_item(self):
+        self.assertIn('"evidencia"', S.GOLD_SYSTEM_PROMPT)
+        self.assertIn('LITERALMENTE', S.GOLD_SYSTEM_PROMPT)
+        self.assertIn('"decision": str, "evidencia": str', S.GOLD_SYSTEM_PROMPT)
 
     def test_mention_invitation_or_rsvp_never_proves_voice(self):
         for transcript in ('Convidamos Luigi.', 'Luigi aceitou o convite.',
@@ -291,12 +305,13 @@ class TestCalendarGrounding(unittest.TestCase):
         self.assertNotIn('Luigi participou', silver)
         self.assertIn(self.transcript, silver)
 
-    def test_generated_person_notes_without_calendar_voice_evidence_are_refused(self):
-        # Nome de agenda nunca recebe identidade pelo canal, mesmo citado no áudio.
+    def test_generated_person_notes_keep_context_but_never_presence(self):
+        # Contexto sobre um convidado fica; presença ou fala atribuída não.
         with patch.object(self.s, '_call_llm', return_value=json.dumps({
-                'people_notes': [{'name': 'Luigi', 'note': 'sabe sobre orçamento'}]})):
+                'people_notes': [{'name': 'Luigi', 'note': 'sabe sobre orçamento'},
+                                 {'name': 'Luigi', 'note': 'esteve presente e falou do orçamento'}]})):
             gold = self.s.generate_gold(self.meta, 'nota', 'Áudio do sistema: Luigi sabe sobre orçamento.')
-        self.assertEqual(gold['people_notes'], [])
+        self.assertEqual(gold['people_notes'], [{'name': 'Luigi', 'note': 'sabe sobre orçamento'}])
 
 
     def test_native_calendar_response_and_organizer_are_separate_from_attendance(self):
@@ -308,10 +323,266 @@ class TestCalendarGrounding(unittest.TestCase):
         self.assertIn('Resumo retido', silver)
         self.assertIn('rsvp: "accepted"', silver)
         self.assertIn('presence: "unverified"', silver)
+        # No Gold, o organizador é sujeito válido de um fato citado; só presença barra.
         with patch.object(self.s, '_call_llm', return_value=json.dumps({
-                'facts': [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'}]})):
+                'facts': [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'},
+                          {'subject': 'owner@example.invalid', 'predicate': 'compareceu', 'object': 'reunião'}]})):
             gold = self.s.generate_gold(self.meta, 'nota', self.transcript)
-        self.assertEqual(gold['facts'], [])
+        self.assertEqual(gold['facts'], [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'}])
+
+
+def _proc(returncode, stdout=""):
+    class P:
+        pass
+    proc = P()
+    proc.returncode, proc.stdout, proc.stderr = returncode, stdout, ""
+    return proc
+
+
+class FakeVps:
+    """Estado remoto do job Hermes, sem rede: UPLOAD → RUNNING → DONE ou FAILED."""
+
+    def __init__(self, outcomes, polls=1):
+        self.outcomes = outcomes  # "provider/model" -> ("done", saída) | ("fail", exit.txt + worker.log)
+        self.polls = polls
+        self.argv = []
+        self.timeouts = []
+        self.jobs = {}
+        self.uploads = {}
+
+    def __call__(self, argv, capture_output=True, text=True, timeout=None):
+        self.argv.append(list(argv))
+        self.timeouts.append((argv[0], timeout))
+        if argv[0] == "scp":
+            local, target = argv[-2], argv[-1]
+            self.uploads[target.split(":", 1)[1]] = Path(local).read_text(encoding="utf-8")
+            return _proc(0)
+        command = argv[-1]
+        remote = re.search(r"\.local/state/castanha/llm/[0-9a-f]{64}", command).group(0)
+        job = self.jobs.setdefault(remote, {"stage": "UPLOAD", "polls": 0})
+        if "echo UPLOAD" in command:
+            if job["stage"] == "RUNNING":
+                job["polls"] += 1
+                if job["polls"] >= self.polls:
+                    job["stage"] = "DONE" if job["outcome"][0] == "done" else "FAILED"
+            return _proc(0, job["stage"])
+        if command.startswith("chmod 600 ") and command.endswith("/prompt.txt"):
+            job["prompt"] = self.uploads.pop(command.split()[2])
+            return _proc(0)
+        if "nohup flock" in command:
+            m = re.search(r"--provider (\S+) -m (\S+) --reasoning (\S+)", command)
+            job["outcome"] = self.outcomes[f"{m.group(1)}/{m.group(2)}"]
+            job.update(stage="RUNNING", launch=command)
+            return _proc(0)
+        if command == f"cat {remote}/result.txt":
+            return _proc(0, job["outcome"][1])
+        if command.startswith(f"cat {remote}/exit.txt"):
+            return _proc(0, job["outcome"][1])
+        raise AssertionError(command)
+
+
+MODELOS = [{"provider": "anthropic", "model": "claude-opus-5"},
+           {"provider": "openai-codex", "model": "gpt-5.5"}]
+
+
+class TestHermesSshLlm(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.env = patch.dict("os.environ", {"XDG_CONFIG_HOME": str(self.temp), "XDG_STATE_HOME": str(self.temp)})
+        self.env.start()
+        self.sleeps = []
+        self.now = 0.0
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def clock(self):
+        self.now += 100.0
+        return self.now
+
+    def hermes(self, timeout_sec=900):
+        return S.HermesSshLlm("vps-fixture", MODELOS, timeout_sec=timeout_sec,
+                              sleep=self.sleeps.append, clock=self.clock)
+
+    def test_upload_running_done_e_prompt_so_no_arquivo(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("done", "session_id: abc-123\n\n\n# Resumo\n\nDecidido.\n")}, polls=2)
+        h = self.hermes()
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            answer = h.complete("SISTEMA sigiloso", "Transcrição privada da reunião")
+        self.assertEqual(answer, "# Resumo\n\nDecidido.")
+        self.assertEqual(h.last_model, "anthropic/claude-opus-5")
+        job = next(iter(vps.jobs.values()))
+        self.assertIn("SISTEMA sigiloso\n\nTranscrição privada da reunião", job["prompt"])
+        for argv in vps.argv:
+            self.assertNotIn("sigiloso", " ".join(argv))
+            self.assertNotIn("privada", " ".join(argv))
+        self.assertIn("hermes chat -Q --oneshot --safe-mode -t none --source tool --query-file", job["launch"])
+        self.assertIn("--provider anthropic -m claude-opus-5 --reasoning medium", job["launch"])
+        self.assertIn("timeout --kill-after=30s 900s hermes", job["launch"])
+        self.assertIn("exit.txt", job["launch"])
+        for argv in vps.argv:
+            self.assertEqual(argv[1:9], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                                         "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"])
+        self.assertEqual({t for tool, t in vps.timeouts if tool == "ssh"}, {15})
+        self.assertEqual({t for tool, t in vps.timeouts if tool == "scp"}, {30})
+        self.assertEqual(self.sleeps, [5, 5])
+        # Estados vistos: UPLOAD, RUNNING, RUNNING, DONE; nada é relançado.
+        self.assertEqual(sum("nohup flock" in a[-1] for a in vps.argv), 1)
+        self.assertEqual(list((self.temp / "castanha" / "llm").iterdir()), [], "arquivo local do prompt apagado")
+
+    def test_falha_de_um_modelo_passa_ao_proximo(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("fail", "1\nError: /root/.hermes/auth.json expirado\n"),
+                       "openai-codex/gpt-5.5": ("done", "session_id: x\n\nResposta da segunda")})
+        h = self.hermes()
+        err = io.StringIO()
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps), patch("castanha.summarizer.sys.stderr", err):
+            self.assertEqual(h.complete("s", "u"), "Resposta da segunda")
+        self.assertEqual(h.last_model, "openai-codex/gpt-5.5")
+        self.assertEqual(len(vps.jobs), 2, "job novo por modelo")
+        self.assertIn("tentando o próximo modelo", err.getvalue())
+        self.assertNotIn("/root", err.getvalue())
+
+    def test_cadeia_inteira_falha_vira_LlmUnavailable_sem_caminho(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("fail", "127\nsh: hermes: not found\n"),
+                       "openai-codex/gpt-5.5": ("fail", "1\nTraceback /root/x.py: boom\n")})
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps), patch("castanha.summarizer.sys.stderr", io.StringIO()):
+            with self.assertRaises(S.LlmUnavailable) as ctx:
+                self.hermes().complete("s", "u")
+        msg = str(ctx.exception)
+        self.assertTrue(msg.startswith("Hermes indisponível na VPS: "), msg)
+        self.assertIn("saída 127", msg)
+        self.assertIn("hermes: not found", msg)
+        self.assertNotIn("/root", msg)
+        self.assertNotIsInstance(ctx.exception, S.HermesInProgress)
+
+    def test_tempo_esgotado_com_job_rodando_fica_pendente_e_retoma_sem_reenviar(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("done", "session_id: y\n\nPronto depois")}, polls=50)
+        h = self.hermes(timeout_sec=900)
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            with self.assertRaises(S.HermesInProgress) as ctx:
+                h.complete("s", "u")
+        self.assertEqual(str(ctx.exception), "Resumo ainda em andamento na VPS; retomada automática")
+        self.assertIsInstance(ctx.exception, S.LlmUnavailable)
+        self.assertLess(len(self.sleeps), 12)
+        # Retomada: mesmo prompt, mesmo job; o resultado já está lá.
+        job = next(iter(vps.jobs.values()))
+        job["stage"] = "DONE"
+        scps = sum(a[0] == "scp" for a in vps.argv)
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            self.assertEqual(self.hermes().complete("s", "u"), "Pronto depois")
+        self.assertEqual(len(vps.jobs), 1)
+        self.assertEqual(sum(a[0] == "scp" for a in vps.argv), scps)
+        self.assertEqual(sum("nohup flock" in a[-1] for a in vps.argv), 1)
+
+    def test_ssh_fora_vira_LlmUnavailable(self):
+        for falha in (lambda *a, **k: _proc(255), OSError("sem ssh"),
+                      __import__("subprocess").TimeoutExpired("ssh", 15)):
+            with self.subTest(falha=falha), patch("castanha.summarizer.subprocess.run", side_effect=falha):
+                with self.assertRaises(S.LlmUnavailable) as ctx:
+                    self.hermes().complete("s", "u")
+            self.assertEqual(str(ctx.exception), "SSH da VPS indisponível")
+
+    def test_modo_json_pede_so_o_objeto(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("done", "session_id: z\n\n{\"facts\": []}")})
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            self.assertEqual(self.hermes().complete("s", "u", json_mode=True), '{"facts": []}')
+        job = next(iter(vps.jobs.values()))
+        self.assertTrue(job["prompt"].rstrip().endswith(S.HERMES_JSON_INSTRUCTION))
+
+    def test_sem_host_ou_sem_modelos_nao_chama_ssh(self):
+        with patch("castanha.summarizer.subprocess.run") as run:
+            with self.assertRaises(S.LlmUnavailable):
+                S.HermesSshLlm("", MODELOS).complete("s", "u")
+            with self.assertRaises(S.LlmUnavailable):
+                S.HermesSshLlm("vps-fixture", []).complete("s", "u")
+        run.assert_not_called()
+
+
+class TestHermesNoSummarizer(unittest.TestCase):
+    def summarizer(self, provider="hermes_ssh", fallback="groq", key="gsk_teste"):
+        cfg = {"llm": {"provider": provider, "fallback_provider": fallback, "api_key": key,
+                       "hermes_ssh_host": "vps-fixture", "hermes_models": MODELOS}}
+        with patch("castanha.summarizer.load_config", return_value=cfg):
+            return MeetingSummarizer()
+
+    def _meta(self):
+        return {"title": "Nora Weekly", "recorded_at": "2026-09-05T10:30:00", "duration_seconds": 10,
+                "mode": "dual", "audio_status": "ok", "calendar_event": {"attendees": [{"name": "Luigi", "email": "l@x"}]}}
+
+    def test_hermes_responde_e_registra_o_provedor(self):
+        s = self.summarizer()
+        with patch.object(s.hermes, "_run", return_value="ok") as run, \
+             patch("castanha.summarizer.urllib.request.urlopen") as groq:
+            self.assertEqual(s._call_llm("sys", "user"), "ok")
+        groq.assert_not_called()
+        self.assertEqual(run.call_args.args[:2], ("anthropic", "claude-opus-5"))
+        self.assertEqual(s.last_provider, "hermes:anthropic/claude-opus-5")
+
+    def test_reserva_groq_so_quando_configurada(self):
+        err = io.StringIO()
+        s = self.summarizer()
+        with patch.object(s.hermes, "_run", side_effect=S.LlmUnavailable("SSH da VPS indisponível")), \
+             patch("castanha.summarizer.urllib.request.urlopen", return_value=_resposta("da groq")), \
+             patch("castanha.summarizer.sys.stderr", err):
+            self.assertEqual(s._call_llm("sys", "user"), "da groq")
+        self.assertEqual(s.last_provider, "groq")
+        self.assertIn("[Castanha] Hermes indisponível (SSH da VPS indisponível); usando Groq como reserva", err.getvalue())
+        for kwargs in ({"fallback": ""}, {"fallback": "groq", "key": ""}):
+            with self.subTest(**kwargs):
+                s = self.summarizer(**kwargs)
+                with patch.object(s.hermes, "_run", side_effect=S.LlmUnavailable("SSH da VPS indisponível")), \
+                     patch("castanha.summarizer.urllib.request.urlopen") as groq:
+                    with self.assertRaises(S.LlmUnavailable):
+                        s._call_llm("sys", "user")
+                groq.assert_not_called()
+                self.assertIsNone(s.last_provider)
+
+    def test_resumo_em_andamento_nao_cai_na_groq(self):
+        s = self.summarizer()
+        with patch.object(s.hermes, "_run", side_effect=S.HermesInProgress("Resumo ainda em andamento na VPS; retomada automática")), \
+             patch("castanha.summarizer.urllib.request.urlopen") as groq:
+            with self.assertRaises(S.LlmUnavailable) as ctx:
+                s._call_llm("sys", "user")
+        groq.assert_not_called()
+        self.assertIn("em andamento", str(ctx.exception))
+
+    def test_silver_pelo_hermes_nao_pede_transcricao_estruturada_e_anexa_a_bruta(self):
+        s = self.summarizer()
+        chamadas = []
+
+        def fake(system_prompt, user_prompt, json_mode=False):
+            chamadas.append(system_prompt)
+            return "# Nora Weekly\n\n## 📌 Resumo Executivo\nCurta.\n"
+
+        with patch.object(s, "_call_llm", side_effect=fake):
+            silver = s.generate_silver(self._meta(), "Fala um. Fala dois.")
+        self.assertEqual(len(chamadas), 1)
+        self.assertIs(chamadas[0], S.SILVER_NOTES_SYSTEM_PROMPT)
+        self.assertNotIn("Transcrição Estruturada", chamadas[0])
+        self.assertIn("Não inclua a transcrição", chamadas[0])
+        self.assertIn(S.CHANNEL_GROUNDING, chamadas[0])
+        self.assertIn("## 📌 Resumo Executivo\nCurta.\n\n## 📝 Transcrição Bruta\nFala um. Fala dois.\n", silver)
+        self.assertEqual(silver.count("Transcrição Bruta"), 1)
+
+    def test_silver_pela_groq_continua_igual(self):
+        s = self.summarizer(provider="groq")
+        chamadas = []
+        with patch.object(s, "_call_llm", side_effect=lambda sp, up, json_mode=False: chamadas.append(sp) or "# Nora\n\nCurta."):
+            silver = s.generate_silver(self._meta(), "Fala um.")
+        self.assertIs(chamadas[0], S.SILVER_SYSTEM_PROMPT)
+        self.assertIn("Transcrição Estruturada", chamadas[0])
+        self.assertNotIn("Transcrição Bruta", silver)
+
+    def test_barreira_de_identidade_olha_a_narrativa_e_nao_a_transcricao_anexada(self):
+        s = self.summarizer()
+        with patch.object(s, "_call_llm", return_value="# Nora\n\n## 📌 Resumo Executivo\nOrçamento aprovado."):
+            silver = s.generate_silver(self._meta(), "Luigi participou e disse que sim.")
+        self.assertNotIn("Resumo retido", silver)
+        self.assertIn("Orçamento aprovado.", silver)
+        with patch.object(s, "_call_llm", return_value="Luigi participou da reunião."):
+            silver = s.generate_silver(self._meta(), "Fala neutra.")
+        self.assertIn("Resumo retido", silver)
 
 
 if __name__ == "__main__":
