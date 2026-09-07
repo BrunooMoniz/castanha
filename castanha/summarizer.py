@@ -179,18 +179,24 @@ REGRAS INEGOCIÁVEIS:
   se o trio só faz sentido com booleano, ele não é um fato, descarte.
 - Reunião só de teste, conversa fiada ou sem conteúdo durável devolve todas as
   listas vazias. Lista vazia é resposta certa e frequente.
+- Todo fato, decisão e tarefa traz "evidencia": um trecho copiado LITERALMENTE
+  das Notas Silver de onde ele saiu (mínimo 20 caracteres), sem parafrasear,
+  sem corrigir, sem juntar trechos. Ele é conferido byte a byte: se não bater,
+  o item é descartado. Sem trecho literal, não devolva o item.
 
 A partir do transcript e resumo da reunião, extraia:
-1. "facts": lista de trios {"subject": str, "predicate": str, "object": str}
+1. "facts": lista de {"subject": str, "predicate": str, "object": str, "evidencia": str}
    Predicado curto e reutilizável, no infinitivo ou como atributo.
    Exemplos bons:
-   - {"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance"}
-   - {"subject": "Projeto Castanha", "predicate": "usa", "object": "captura PipeWire em dois canais"}
+   - {"subject": "Bruno Moniz", "predicate": "cofundador de", "object": "Nora Finance",
+      "evidencia": "Bruno apresentou-se como cofundador da Nora Finance"}
+   - {"subject": "Projeto Castanha", "predicate": "usa", "object": "captura PipeWire em dois canais",
+      "evidencia": "o Castanha captura o áudio pelo PipeWire em dois canais"}
    Exemplos que você NÃO pode devolver:
    - {"subject": "Microfone", "predicate": "estava mutado", "object": "sim"}
    - {"subject": "Teste de gravação", "predicate": "foi bem-sucedido", "object": "true"}
-2. "decisions": lista de strings com decisões duráveis de fato tomadas
-3. "action_items": lista de {"task": str, "assignee": str | null, "deadline": str | null}
+2. "decisions": lista de {"decision": str, "evidencia": str} com decisões duráveis de fato tomadas
+3. "action_items": lista de {"task": str, "assignee": str | null, "deadline": str | null, "evidencia": str}
 4. "people_notes": lista de {"name": str, "note": str} com contexto relevante sobre os participantes
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
@@ -271,18 +277,20 @@ def _unsupported_identity(value, metadata):
             or bool(_PRESENCE.search(_grounding_text(value))))
 
 
-def _ground_gold(data, metadata):
-    """Sem vínculo de voz comprovado, pessoa da agenda não vira fato durável.
+def _ground_gold(data):
+    """Sem vínculo de voz comprovado, presença ou fala não vira fato durável.
 
-    Filtra cada item inteiro, inclusive decisões/tarefas com nomes em campos
-    alternativos. Recusar uma extração é reversível; gravar autoria inventada não.
+    Filtra cada item inteiro pelo termo de presença, inclusive decisões/tarefas
+    com nomes em campos alternativos. O filtro por nome da agenda saiu: cada
+    fato agora cita a passagem e pode ser apagado por origem no Zinom, e ele
+    descartava fatos legítimos sobre convidados e empresas ("Nora").
     """
     result = {}
     for key in ("facts", "decisions", "action_items", "people_notes"):
         values = data.get(key, [])
         result[key] = [value for value in values
                        if isinstance(value, (dict, str))
-                       and not _unsupported_identity(json.dumps(value, ensure_ascii=False), metadata)] if isinstance(values, list) else []
+                       and not _PRESENCE.search(_grounding_text(json.dumps(value, ensure_ascii=False)))] if isinstance(values, list) else []
     return result
 
 
@@ -697,7 +705,7 @@ Transcrição:
                 print(f"[Castanha] Fatos: mensagem grande demais ({e}). Fica o fallback estruturado.", file=sys.stderr)
         dados = _extrair_json(llm_output)
         if isinstance(dados, dict):
-            return _ground_gold(dados, metadata)
+            return _ground_gold(dados)
 
         # Convite não prova presença. Sem extração, não há fatos duráveis.
         return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}

@@ -262,18 +262,29 @@ class TestCalendarGrounding(unittest.TestCase):
             self.assertIn('presence: "unverified"', silver)
             self.assertIn('speech: "unverified"', silver)
 
-    def test_gold_filters_calendar_claims_in_every_collection(self):
+    def test_gold_filters_presence_claims_in_every_collection_but_keeps_calendar_names(self):
+        # Presença/fala continua barrada. Nome da agenda sozinho não barra mais:
+        # o fato é citado e apagável por origem, e "Nora" é sujeito legítimo.
         fake = {'facts': [{'subject': 'Luigi', 'predicate': 'participou', 'object': 'reunião'},
-                          {'subject': 'Projeto', 'predicate': 'custo', 'object': '10'}],
-                'decisions': ['Luigi aprovou o orçamento', 'Orçamento aprovado'],
-                'action_items': [{'task': 'Enviar documento', 'assignee': 'Rossi'},
-                                 {'task': 'Planejar', 'assignee': None}],
+                          {'subject': 'Projeto', 'predicate': 'custo', 'object': '10',
+                           'evidencia': 'o projeto custa 10 mil reais'}],
+                'decisions': [{'decision': 'Luigi aprovou o orçamento', 'evidencia': 'aprovou o orçamento de outubro'},
+                              {'decision': 'Rossi falou do orçamento', 'evidencia': 'x'}],
+                'action_items': [{'task': 'Enviar documento', 'assignee': 'Rossi', 'evidencia': 'enviar o documento até sexta'},
+                                 {'task': 'Planejar', 'assignee': None, 'evidencia': 'quem esteve presente planeja'}],
                 'people_notes': [{'name': 'Luigi Rossi', 'note': 'participou'},
                                  {'name': 'luigi@example.invalid', 'note': 'expert'}]}
         with patch.object(self.s, '_call_llm', return_value=json.dumps(fake)):
             gold = self.s.generate_gold(self.meta, 'Notas', self.transcript)
-        self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': ['Orçamento aprovado'],
-                                'action_items': [fake['action_items'][1]], 'people_notes': []})
+        self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': [fake['decisions'][0]],
+                                'action_items': [fake['action_items'][0]],
+                                'people_notes': [fake['people_notes'][1]]})
+        self.assertEqual(gold['facts'][0]['evidencia'], 'o projeto custa 10 mil reais', 'a passagem citada fica no Gold local')
+
+    def test_gold_prompt_asks_for_a_verbatim_quote_per_item(self):
+        self.assertIn('"evidencia"', S.GOLD_SYSTEM_PROMPT)
+        self.assertIn('LITERALMENTE', S.GOLD_SYSTEM_PROMPT)
+        self.assertIn('"decision": str, "evidencia": str', S.GOLD_SYSTEM_PROMPT)
 
     def test_mention_invitation_or_rsvp_never_proves_voice(self):
         for transcript in ('Convidamos Luigi.', 'Luigi aceitou o convite.',
@@ -294,12 +305,13 @@ class TestCalendarGrounding(unittest.TestCase):
         self.assertNotIn('Luigi participou', silver)
         self.assertIn(self.transcript, silver)
 
-    def test_generated_person_notes_without_calendar_voice_evidence_are_refused(self):
-        # Nome de agenda nunca recebe identidade pelo canal, mesmo citado no áudio.
+    def test_generated_person_notes_keep_context_but_never_presence(self):
+        # Contexto sobre um convidado fica; presença ou fala atribuída não.
         with patch.object(self.s, '_call_llm', return_value=json.dumps({
-                'people_notes': [{'name': 'Luigi', 'note': 'sabe sobre orçamento'}]})):
+                'people_notes': [{'name': 'Luigi', 'note': 'sabe sobre orçamento'},
+                                 {'name': 'Luigi', 'note': 'esteve presente e falou do orçamento'}]})):
             gold = self.s.generate_gold(self.meta, 'nota', 'Áudio do sistema: Luigi sabe sobre orçamento.')
-        self.assertEqual(gold['people_notes'], [])
+        self.assertEqual(gold['people_notes'], [{'name': 'Luigi', 'note': 'sabe sobre orçamento'}])
 
 
     def test_native_calendar_response_and_organizer_are_separate_from_attendance(self):
@@ -311,10 +323,12 @@ class TestCalendarGrounding(unittest.TestCase):
         self.assertIn('Resumo retido', silver)
         self.assertIn('rsvp: "accepted"', silver)
         self.assertIn('presence: "unverified"', silver)
+        # No Gold, o organizador é sujeito válido de um fato citado; só presença barra.
         with patch.object(self.s, '_call_llm', return_value=json.dumps({
-                'facts': [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'}]})):
+                'facts': [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'},
+                          {'subject': 'owner@example.invalid', 'predicate': 'compareceu', 'object': 'reunião'}]})):
             gold = self.s.generate_gold(self.meta, 'nota', self.transcript)
-        self.assertEqual(gold['facts'], [])
+        self.assertEqual(gold['facts'], [{'subject': 'owner@example.invalid', 'predicate': 'aprovou', 'object': 'orçamento'}])
 
 
 def _proc(returncode, stdout=""):
