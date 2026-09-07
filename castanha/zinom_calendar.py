@@ -64,6 +64,13 @@ def _nome_de_email(email: str) -> str:
     return email.split("@")[0].replace(".", " ").replace("_", " ").title()
 
 
+def _e_agenda_de_grupo(email: Any) -> bool:
+    """A agenda de grupo ("Eventos Nora") aparece como organizadora e convidada
+    de si mesma. Não é pessoa: fora da lista, senão vira "participante" no
+    popup, no Silver e no Zinom, e o Gold passa a descartar fato que cite "Nora"."""
+    return str(email or "").strip().lower().endswith("@group.calendar.google.com")
+
+
 class ZinomCalendar:
     """Cliente de agenda. Guarda a sessão MCP e a lista de agendas entre chamadas."""
 
@@ -220,7 +227,7 @@ class ZinomCalendar:
         conf = raw.get("conference_url") or extract_conference_url(local or "")
 
         organizador = raw.get("organizer") or {}
-        if isinstance(organizador, dict):
+        if isinstance(organizador, dict) and not _e_agenda_de_grupo(organizador.get("email")):
             organizador_email = organizador.get("email") or cal.get("email")
         else:
             organizador_email = cal.get("email")
@@ -253,7 +260,7 @@ def _parse_attendees(lista: Any) -> List[Attendee]:
             continue
         email = str(a.get("email") or "").strip()
         nome = str(a.get("name") or "").strip()
-        if not (email or nome):
+        if not (email or nome) or _e_agenda_de_grupo(email):
             continue
         pessoas.append(Attendee(
             name=nome or _nome_de_email(email),

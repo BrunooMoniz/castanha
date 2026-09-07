@@ -116,6 +116,24 @@ class TestZinomDiaInteiro(unittest.TestCase):
         self.assertEqual([c["calendar_ref"] for c in fonte.selected_calendars()],
                          ["principal", "grupo", "compartilhada"])
 
+    def test_agenda_de_grupo_nao_vira_participante_nem_organizadora(self):
+        """Evento real de 07/09: organizer e um attendee eram a própria 'Eventos Nora'."""
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {}}})
+        grupo = "c_abc123@group.calendar.google.com"
+        raw = {
+            "id": "ev1", "summary": "Contrato Primata",
+            "start": {"dateTime": "2026-09-07T16:00:00-03:00"}, "end": {"dateTime": "2026-09-07T16:45:00-03:00"},
+            "organizer": {"email": grupo, "name": "Eventos Nora", "self": True},
+            "attendees": [
+                {"email": grupo, "name": "Eventos Nora", "response": "accepted", "organizer": True},
+                {"email": "luigi@x", "name": "Luigi", "response": "needsAction"},
+            ],
+        }
+        ev = fonte._to_meeting(raw, {"calendar_ref": "grupo", "summary": "Eventos Nora", "email": "moniz@x"})
+        self.assertEqual([a.email for a in ev.attendees], ["luigi@x"])
+        self.assertEqual(ev.organizer, "moniz@x")
+
     def test_lista_explicita_continua_mandando(self):
         from castanha.zinom_calendar import ZinomCalendar
         fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {"calendars": ["Eventos Nora"]}}})
