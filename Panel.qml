@@ -14,11 +14,15 @@ import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 import "DeliveryStatus.js" as DeliveryStatus
+import "i18n.js" as I18N
 
 Panel {
   id: root
   moduleName: "io.github.brunoomoniz.castanha"
   ipcTarget: "castanha"
+
+  // Inglês é o default; pt só quando o locale do sistema é português.
+  readonly property string lang: Qt.locale().name.startsWith("pt") ? "pt" : "en"
 
   // ----------------------------------------------------------------- tema
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -67,7 +71,7 @@ Panel {
 
 
   readonly property string mode: stateData && stateData.mode ? stateData.mode : "dual"
-  readonly property string modeLabel: mode === "mic_only" ? "somente microfone" : "microfone + chamada"
+  readonly property string modeLabel: mode === "mic_only" ? I18N.t("mode.mic_only", lang) : I18N.t("mode.dual", lang)
 
   // O cronômetro vem do started_at, não do elapsed_seconds do estado: aquele
   // campo só anda quando o daemon está de pé, e a barra não pode depender disso.
@@ -138,7 +142,7 @@ Panel {
 
   readonly property string barText: {
     if (isRecording || isPaused) return glyph + "  " + formatTime(elapsedSeconds)
-    if (isProcessing) return glyph + "  salvando"
+    if (isProcessing) return glyph + "  " + I18N.t("status.saving", lang)
     // Reunião de amanhã na barra vira letreiro. Só entra o que é iminente.
     if (nextMeetingSoon) {
       var t = String(nextMeeting.title)
@@ -159,18 +163,18 @@ Panel {
     && minutosParaProxima >= -5 && minutosParaProxima <= 30
 
   readonly property string statusLabel: {
-    if (isRecording) return "gravando"
-    if (isPaused) return "pausado"
-    if (isProcessing) return "salvando"
-    return "ocioso"
+    if (isRecording) return I18N.t("status.recording", lang)
+    if (isPaused) return I18N.t("status.paused", lang)
+    if (isProcessing) return I18N.t("status.saving", lang)
+    return I18N.t("status.idle", lang)
   }
 
   readonly property string heroMeta: {
     if (isRecording || isPaused) return formatTime(elapsedSeconds) + " · " + modeLabel
-    if (isProcessing) return "transcrevendo e escrevendo as notas"
-    if (micMuted) return "microfone mudo no sistema"
-    if (nextMeetingSoon) return "próxima reunião em " + Math.max(0, minutosParaProxima) + " min"
-    return "pronto para gravar"
+    if (isProcessing) return I18N.t("hero.processing", lang)
+    if (micMuted) return I18N.t("hero.mic_muted", lang)
+    if (nextMeetingSoon) return I18N.t("hero.next_meeting", lang).replace("{n}", Math.max(0, minutosParaProxima))
+    return I18N.t("hero.ready", lang)
   }
 
   function run(cmd) { if (root.bar) root.bar.run(cmd) }
@@ -183,10 +187,10 @@ Panel {
 
   // Como o Google chama, e como se diz em português.
   function respostaLabel(resposta) {
-    if (resposta === "accepted") return "aceitou"
-    if (resposta === "declined") return "recusou"
-    if (resposta === "tentative") return "talvez"
-    if (resposta === "needsAction") return "sem resposta"
+    if (resposta === "accepted") return I18N.t("rsvp.accepted", lang)
+    if (resposta === "declined") return I18N.t("rsvp.declined", lang)
+    if (resposta === "tentative") return I18N.t("rsvp.tentative", lang)
+    if (resposta === "needsAction") return I18N.t("rsvp.needs_action", lang)
     return ""
   }
 
@@ -201,10 +205,10 @@ Panel {
 
   function intervalo(m) {
     if (!m) return ""
-    if (m.all_day) return "Dia inteiro"
+    if (m.all_day) return I18N.t("meeting.all_day", lang)
     var ini = formatClock(m.start)
     var fim = formatClock(m.end)
-    return fim && fim !== ini ? ini + " às " + fim : ini
+    return fim && fim !== ini ? I18N.t("meeting.time_range", lang).replace("{start}", ini).replace("{end}", fim) : ini
   }
 
   // "hoje 10:42", "ontem 18:03", "02/09 14:00".
@@ -218,18 +222,26 @@ Panel {
     }
     var ontem = new Date(hoje.getTime() - 86400000)
     var hora = pad(d.getHours()) + ":" + pad(d.getMinutes())
-    if (mesmoDia(d, hoje)) return "hoje " + hora
-    if (mesmoDia(d, ontem)) return "ontem " + hora
+    if (mesmoDia(d, hoje)) return I18N.t("when.today", lang).replace("{t}", hora)
+    if (mesmoDia(d, ontem)) return I18N.t("when.yesterday", lang).replace("{t}", hora)
     return pad(d.getDate()) + "/" + pad(d.getMonth() + 1) + " " + hora
   }
 
-  // O aviso do Zinom em português, e não um triângulo sem legenda.
-  function zinomLine(result) { return DeliveryStatus.zinomLine(result) }
+  // O aviso do Zinom no idioma do painel, e não um triângulo sem legenda.
+  function zinomLine(result) { return DeliveryStatus.zinomLine(result, root.lang) }
 
   function zinomFalhou(result) {
     if (!result || !result.zinom) return false
     var z = result.zinom
     return (z.errors && z.errors.length > 0) || z.status === "error"
+  }
+
+  // O diagnóstico chega persistido em português; o enum audio_status é que
+  // permite localizar. Sem enum conhecido, mostra a string que veio.
+  function audioDiag(note) {
+    var st = note && note.audio_status ? String(note.audio_status) : ""
+    if (st !== "" && I18N.STRINGS["audio_status." + st]) return I18N.t("audio_status." + st, lang)
+    return note && note.audio_diagnostico ? String(note.audio_diagnostico) : ""
   }
 
   function toggleRecording() {
@@ -398,12 +410,12 @@ Panel {
     text: root.barText
     active: root.isRecording
     tooltipText: {
-      if (root.isRecording) return "Gravando há " + root.formatTime(root.elapsedSeconds) + " · clique para o painel, direito para finalizar"
-      if (root.isPaused) return "Gravação pausada em " + root.formatTime(root.elapsedSeconds)
-      if (root.isProcessing) return "Processando as notas da reunião"
-      if (root.micMuted) return "Castanha · o microfone está mudo"
-      if (root.nextMeetingSoon) return root.nextMeeting.title + " em " + Math.max(0, root.minutosParaProxima) + " min"
-      return "Castanha · clique para o painel, direito para gravar"
+      if (root.isRecording) return I18N.t("bar.tooltip_recording", root.lang).replace("{t}", root.formatTime(root.elapsedSeconds))
+      if (root.isPaused) return I18N.t("bar.tooltip_paused", root.lang).replace("{t}", root.formatTime(root.elapsedSeconds))
+      if (root.isProcessing) return I18N.t("bar.tooltip_processing", root.lang)
+      if (root.micMuted) return I18N.t("bar.tooltip_mic_muted", root.lang)
+      if (root.nextMeetingSoon) return I18N.t("bar.tooltip_next_meeting", root.lang).replace("{title}", root.nextMeeting.title).replace("{n}", Math.max(0, root.minutosParaProxima))
+      return I18N.t("bar.tooltip_idle", root.lang)
     }
 
     onPressed: function(btn) {
@@ -512,7 +524,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: micWarn.width - Style.space(28)
-              text: "Microfone mudo. A gravação sai em silêncio até você desmutar."
+              text: I18N.t("mic_warning.body", root.lang)
               color: root.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -525,7 +537,7 @@ Panel {
         // ---------- Ação principal ----------
         Button {
           width: parent.width
-          text: root.isBusy ? "Finalizar e salvar" : "Iniciar gravação"
+          text: root.isBusy ? I18N.t("btn.finish_save", root.lang) : I18N.t("btn.start_recording", root.lang)
           iconText: root.isBusy ? "󰓛" : "󰻂"
           enabled: !root.isProcessing
           active: root.isBusy
@@ -544,7 +556,7 @@ Panel {
           PanelActionButton {
             visible: root.isBusy
             iconText: root.isPaused ? "󰐊" : "󰏤"
-            tooltipText: root.isPaused ? "Retomar a gravação" : "Pausar a gravação"
+            tooltipText: root.isPaused ? I18N.t("btn.resume", root.lang) : I18N.t("btn.pause", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: root.run(root.isPaused ? "castanha resume" : "castanha pause")
@@ -553,7 +565,7 @@ Panel {
           PanelActionButton {
             visible: !!(root.meeting && root.meeting.conference_url)
             iconText: "󰏌"
-            tooltipText: "Entrar na chamada"
+            tooltipText: I18N.t("btn.join_call", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
@@ -565,7 +577,7 @@ Panel {
 
           PanelActionButton {
             iconText: "󰉋"
-            tooltipText: "Abrir a pasta de notas"
+            tooltipText: I18N.t("btn.open_notes_folder", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: { root.run("castanha notes --open"); root.close() }
@@ -586,7 +598,7 @@ Panel {
 
           PanelSectionHeader {
             width: parent.width
-            text: "REUNIÃO ATUAL"
+            text: I18N.t("panel.current_meeting", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -594,7 +606,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: root.currentMeeting && root.currentMeeting.title ? root.currentMeeting.title : "Gravação avulsa"
+            text: root.currentMeeting && root.currentMeeting.title ? root.currentMeeting.title : I18N.t("panel.adhoc_recording", root.lang)
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -614,7 +626,7 @@ Panel {
             spacing: Style.space(8)
 
             PanelSectionHeader {
-              text: "PRÓXIMAS REUNIÕES"
+              text: I18N.t("panel.upcoming_meetings", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               anchors.verticalCenter: parent.verticalCenter
@@ -626,7 +638,7 @@ Panel {
               id: btnRefreshAgenda
               anchors.verticalCenter: parent.verticalCenter
               iconText: "󰑐"
-              tooltipText: root.refreshingAgenda ? "Atualizando agendas…" : "Atualizar agendas agora"
+              tooltipText: root.refreshingAgenda ? I18N.t("agenda.refreshing", root.lang) : I18N.t("agenda.refresh_now", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -649,8 +661,8 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             visible: root.upcoming.length === 0
-            text: root.agendaError !== "" ? "Agenda indisponível: " + root.agendaError
-                                          : (root.refreshingAgenda ? "Atualizando agendas…" : "Nada nas próximas horas")
+            text: root.agendaError !== "" ? I18N.t("agenda.unavailable", root.lang).replace("{err}", root.agendaError)
+                                          : (root.refreshingAgenda ? I18N.t("agenda.refreshing", root.lang) : I18N.t("agenda.empty", root.lang))
             color: root.agendaError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -692,7 +704,7 @@ Panel {
 
           PanelSectionHeader {
             width: parent.width
-            text: "NOTAS RECENTES"
+            text: I18N.t("panel.recent_notes", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -758,7 +770,7 @@ Panel {
             textFormat: Text.PlainText
             text: {
               if (!meetingRow.meeting) return ""
-              if (meetingRow.meeting.all_day) return "Dia"
+              if (meetingRow.meeting.all_day) return I18N.t("meeting.all_day_short", root.lang)
               return root.formatClock(meetingRow.meeting.start)
             }
             color: root.foreground
@@ -804,7 +816,7 @@ Panel {
               opacity: rowHover.containsMouse ? 1 : 0
               enabled: rowHover.containsMouse
               iconText: "󰈉"
-              tooltipText: "Não mostrar mais este evento (a série inteira)"
+              tooltipText: I18N.t("meeting.hide_series", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -823,7 +835,7 @@ Panel {
             var partes = []
             if (meetingRow.meeting.account) partes.push(meetingRow.meeting.account)
             var n = meetingRow.participantes.length
-            if (n > 0) partes.push(n + (n === 1 ? " participante" : " participantes"))
+            if (n > 0) partes.push(I18N.t(n === 1 ? "count.participants_one" : "count.participants_many", root.lang).replace("{n}", n))
             return partes.join(" · ")
           }
           color: root.dim
@@ -843,7 +855,7 @@ Panel {
 
       PanelToolTip {
         visible: rowHover.containsMouse && !meetingRow.aberta
-        text: "Ver os detalhes da reunião"
+        text: I18N.t("tooltip.view_meeting_details", root.lang)
         fontFamily: root.fontFamily
       }
     }
@@ -885,7 +897,8 @@ Panel {
         width: parent.width
         visible: meetingRow.participantes.length > 0
         text: meetingRow.participantes.length === 1
-              ? "1 PARTICIPANTE" : meetingRow.participantes.length + " PARTICIPANTES"
+              ? I18N.t("panel.participants_one", root.lang)
+              : I18N.t("panel.participants_many", root.lang).replace("{n}", meetingRow.participantes.length)
         foreground: root.foreground
         fontFamily: root.fontFamily
       }
@@ -929,7 +942,7 @@ Panel {
             anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             text: (modelData.name || modelData.email || "")
-                  + (modelData.organizer ? "  (organizador)" : "")
+                  + (modelData.organizer ? I18N.t("attendee.organizer_suffix", root.lang) : "")
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -955,7 +968,7 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: meetingRow.participantes.length === 0
-        text: "Sem convidados neste evento."
+        text: I18N.t("meeting.no_guests", root.lang)
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -967,7 +980,7 @@ Panel {
 
         Button {
           visible: !!(meetingRow.meeting && meetingRow.meeting.conference_url)
-          text: "Entrar na chamada"
+          text: I18N.t("btn.join_call", root.lang)
           iconText: "󰕧"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -980,7 +993,7 @@ Panel {
           // Grava este evento, com ou sem link: o uid leva título, participantes
           // e link para a nota; o título vai junto para o caso de a agenda ter
           // mudado desde que o painel abriu.
-          text: "Gravar reunião"
+          text: I18N.t("btn.record_meeting", root.lang)
           iconText: "󰻂"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -988,7 +1001,7 @@ Panel {
           bordered: !(meetingRow.meeting && meetingRow.meeting.conference_url)
           enabled: !root.isBusy
           onClicked: {
-            var tit = (meetingRow.meeting && meetingRow.meeting.title) ? String(meetingRow.meeting.title) : "Reunião"
+            var tit = (meetingRow.meeting && meetingRow.meeting.title) ? String(meetingRow.meeting.title) : I18N.t("meeting.default_title", root.lang)
             var uid = (meetingRow.meeting && meetingRow.meeting.uid) ? String(meetingRow.meeting.uid) : ""
             var cmd = "castanha start --title='" + tit.replace(/'/g, "'\\''") + "'"
             if (uid) cmd += " --event='" + uid.replace(/'/g, "'\\''") + "'"
@@ -999,7 +1012,7 @@ Panel {
 
         Button {
           visible: !!(meetingRow.meeting && meetingRow.meeting.html_link)
-          text: "No Google"
+          text: I18N.t("btn.on_google", root.lang)
           iconText: "󰏌"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1008,7 +1021,7 @@ Panel {
         }
 
         Button {
-          text: "Ocultar do Castanha"
+          text: I18N.t("btn.hide_from_castanha", root.lang)
           iconText: "󰈉"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1117,7 +1130,7 @@ Panel {
               opacity: noteRow.precisaRetry && (noteHover.containsMouse || noteRow.reprocessando) ? 1 : 0
               enabled: opacity > 0 && !noteRow.reprocessando
               iconText: "󰑐"
-              tooltipText: noteRow.reprocessando ? "Reprocessando upload/transcrição…" : "Tentar upload e transcrição novamente"
+              tooltipText: noteRow.reprocessando ? I18N.t("tooltip.reprocessing", root.lang) : I18N.t("tooltip.retry_upload", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1132,7 +1145,7 @@ Panel {
               opacity: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando) ? 1 : 0
               enabled: opacity > 0 && !noteRow.sincronizando
               iconText: "󰑐"
-              tooltipText: noteRow.sincronizando ? "Enviando ao Zinom…" : "Enviar esta reunião ao Zinom de novo"
+              tooltipText: noteRow.sincronizando ? I18N.t("zinom.sending", root.lang) : I18N.t("zinom.resend", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1153,10 +1166,10 @@ Panel {
             if (noteRow.note.duration_seconds > 0)
               partes.push(root.formatDuration(noteRow.note.duration_seconds))
             if (noteRow.participantes.length > 0)
-              partes.push(noteRow.participantes.length + (noteRow.participantes.length === 1 ? " participante" : " participantes"))
+              partes.push(I18N.t(noteRow.participantes.length === 1 ? "count.participants_one" : "count.participants_many", root.lang).replace("{n}", noteRow.participantes.length))
             if (noteRow.note.recordings_count !== undefined) {
-              if (noteRow.note.recordings_count === 0) partes.push("sem áudio")
-              else if (noteRow.note.recordings_count > 1) partes.push(noteRow.note.recordings_count + " gravações")
+              if (noteRow.note.recordings_count === 0) partes.push(I18N.t("note.no_audio", root.lang))
+              else if (noteRow.note.recordings_count > 1) partes.push(I18N.t("note.recordings_plural", root.lang).replace("{n}", noteRow.note.recordings_count))
             }
             return partes.join(" · ")
           }
@@ -1170,7 +1183,7 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           visible: noteRow.precisaRetry && !noteRow.aberta
-          text: noteRow.reprocessando ? "󰑐  Reprocessando upload e transcrição…" : "󰀦  Upload/Transcrição pendente: 󰑐 tenta de novo"
+          text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang) : "󰀦  " + I18N.t("note.upload_pending", root.lang)
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1181,7 +1194,7 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           visible: noteRow.comProblema && !noteRow.precisaRetry && !noteRow.aberta
-          text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
+          text: "󰀦  " + root.audioDiag(noteRow.note)
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1193,7 +1206,7 @@ Panel {
           width: parent.width
           visible: text !== "" && !noteRow.aberta
           text: {
-            if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
+            if (noteRow.sincronizando) return "󰑐  " + I18N.t("zinom.sending", root.lang)
             var linha = root.zinomLine(noteRow.statusInfo)
             if (linha === "") return ""
             return DeliveryStatus.zinomIcon(noteRow.note) + linha
@@ -1215,7 +1228,7 @@ Panel {
 
       PanelToolTip {
         visible: noteHover.containsMouse
-        text: noteRow.aberta ? "Recolher detalhes da reunião" : "Ver detalhes da reunião"
+        text: noteRow.aberta ? I18N.t("note.collapse_details", root.lang) : I18N.t("note.view_details", root.lang)
         fontFamily: root.fontFamily
       }
     }
@@ -1239,7 +1252,7 @@ Panel {
           var partes = []
           if (noteRow.note.when) partes.push(root.formatWhen(noteRow.note.when))
           if (noteRow.note.duration_seconds > 0) partes.push(root.formatDuration(noteRow.note.duration_seconds))
-          if (noteRow.note.mode) partes.push("modo " + (noteRow.note.mode === "mic_only" ? "microfone" : "chamada"))
+            if (noteRow.note.mode) partes.push(I18N.t(noteRow.note.mode === "mic_only" ? "meta.mode_mic" : "meta.mode_call", root.lang))
           return partes.join("  ·  ")
         }
         color: root.dim
@@ -1254,7 +1267,7 @@ Panel {
         width: parent.width
         visible: text !== ""
         text: {
-          if (noteRow.sincronizando) return "󰑐  Enviando ao Zinom…"
+          if (noteRow.sincronizando) return "󰑐  " + I18N.t("zinom.sending", root.lang)
           var linha = root.zinomLine(noteRow.statusInfo)
           if (linha === "") return ""
           return DeliveryStatus.zinomIcon(noteRow.note) + linha
@@ -1270,7 +1283,7 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: !!(noteRow.note && noteRow.note.audio_diagnostico && noteRow.note.audio_status !== "ok")
-        text: "󰀦  " + (noteRow.note && noteRow.note.audio_diagnostico ? noteRow.note.audio_diagnostico : "")
+        text: "󰀦  " + root.audioDiag(noteRow.note)
         color: noteRow.note && noteRow.note.audio_status === "audio_apagado" ? root.dim : root.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1285,7 +1298,7 @@ Panel {
 
         PanelSectionHeader {
           width: parent.width
-          text: "RESUMO"
+          text: I18N.t("panel.summary", root.lang)
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
@@ -1323,7 +1336,8 @@ Panel {
         PanelSectionHeader {
           width: parent.width
           text: noteRow.participantes.length === 1
-                ? "1 PARTICIPANTE" : noteRow.participantes.length + " PARTICIPANTES"
+                ? I18N.t("panel.participants_one", root.lang)
+                : I18N.t("panel.participants_many", root.lang).replace("{n}", noteRow.participantes.length)
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
@@ -1356,7 +1370,7 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               text: typeof modelData === "string" ? modelData
-                    : ((modelData.name || modelData.email || "") + (modelData.organizer ? "  (organizador)" : ""))
+                    : ((modelData.name || modelData.email || "") + (modelData.organizer ? I18N.t("attendee.organizer_suffix", root.lang) : ""))
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1387,8 +1401,9 @@ Panel {
         PanelSectionHeader {
           width: parent.width
           text: noteRow.gravacoes.length === 1
-                ? "1 GRAVAÇÃO DE ÁUDIO"
-                : (noteRow.gravacoes.length === 0 ? "ÁUDIO" : noteRow.gravacoes.length + " GRAVAÇÕES DE ÁUDIO")
+                ? I18N.t("recordings.header_one", root.lang)
+                : (noteRow.gravacoes.length === 0 ? I18N.t("recordings.header_zero", root.lang)
+                                                 : I18N.t("recordings.header_many", root.lang).replace("{n}", noteRow.gravacoes.length))
           foreground: root.foreground
           fontFamily: root.fontFamily
         }
@@ -1397,7 +1412,7 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           visible: noteRow.gravacoes.length === 0
-          text: "Áudio removido para liberar espaço (notas e transcrição preservadas)."
+          text: I18N.t("recordings.deleted_notice", root.lang)
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1464,7 +1479,7 @@ Panel {
               anchors.rightMargin: Style.space(2)
               anchors.verticalCenter: parent.verticalCenter
               iconText: "󰐊"
-              tooltipText: "Ouvir gravação"
+              tooltipText: I18N.t("btn.play_recording", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1477,7 +1492,7 @@ Panel {
               anchors.rightMargin: Style.space(4)
               anchors.verticalCenter: parent.verticalCenter
               iconText: "󰆴"
-              tooltipText: "Apagar este áudio (mantém notas e transcrição)"
+              tooltipText: I18N.t("btn.delete_recording", root.lang)
               foreground: root.urgent
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1502,7 +1517,7 @@ Panel {
 
         Button {
           visible: !!(noteRow.note && noteRow.note.can_retry)
-          text: noteRow.reprocessando ? "Reprocessando…" : "Tentar upload/transcrição de novo"
+          text: noteRow.reprocessando ? I18N.t("btn.reprocessing", root.lang) : I18N.t("btn.retry", root.lang)
           iconText: "󰑐"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1513,7 +1528,7 @@ Panel {
         }
 
         Button {
-          text: "Notas"
+          text: I18N.t("btn.notes", root.lang)
           iconText: "󰈙"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1524,7 +1539,7 @@ Panel {
 
         Button {
           visible: !!(noteRow.note && noteRow.note.has_transcript)
-          text: "Transcrição"
+          text: I18N.t("btn.transcript", root.lang)
           iconText: "󰗊"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1535,7 +1550,7 @@ Panel {
 
         Button {
           visible: !!(noteRow.note && noteRow.note.bronze_dir)
-          text: "Pasta"
+          text: I18N.t("btn.folder", root.lang)
           iconText: "󰉋"
           foreground: root.foreground
           fontFamily: root.fontFamily

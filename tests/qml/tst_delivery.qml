@@ -20,7 +20,17 @@ TestCase {
     ]
   }
   function test_status(data) {
-    compare(DeliveryStatus.zinomLine({zinom: data.value}), data.expected)
+    compare(DeliveryStatus.zinomLine({zinom: data.value}, "pt"), data.expected)
+  }
+
+  function test_status_english() {
+    compare(DeliveryStatus.zinomLine({zinom: {status: "tombstoned", remember_id: "old-id"}}, "en"), "Deleted in Zinom")
+    compare(DeliveryStatus.zinomLine({zinom: {status: "ok", remember_id: "note-id"}}, "en"), "Saved in Zinom")
+    compare(DeliveryStatus.zinomLine({zinom: {status: "pending", remember_id: "note-id", facts_status: "pending_lineage"}}, "en"), "Note saved in Zinom; facts pending")
+    compare(DeliveryStatus.zinomLine({zinom: {status: "pending"}}, "en"), "Zinom delivery pending")
+    compare(DeliveryStatus.zinomLine({zinom: {status: "skipped", reason: "Gravação sem áudio, nada para lembrar"}}, "en"), "Not sent to Zinom: Gravação sem áudio, nada para lembrar")
+    compare(DeliveryStatus.zinomLine({zinom: {status: "ok", remember_id: "note-id", facts_ingested: 2}}, "en"), "Saved in Zinom, with 2 facts")
+    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "pending"}}, "en"), "Summary pending")
   }
 
   function test_legacy_projection_is_read_only_and_bound_to_slug() {
@@ -28,13 +38,13 @@ TestCase {
     var delivered = {status: "ok", receipt_source: "legacy-recovery"}
     compare(DeliveryStatus.projectedLastResult(last, [{slug: "other", zinom: delivered}]), last)
     var current = DeliveryStatus.projectedLastResult(last, [{slug: "fixture", zinom: delivered}])
-    compare(DeliveryStatus.zinomLine(current), "Salvo no Zinom")
+    compare(DeliveryStatus.zinomLine(current, "pt"), "Salvo no Zinom")
     compare(current.title, "Original")
     compare(last.zinom.status, "error")
     compare(last.zinom.errors[0], "HTTP 530")
     var corrupt = DeliveryStatus.projectedLastResult(current, [{slug: "fixture", zinom: {
       status: "error", receipt_source: "legacy-recovery"}}])
-    compare(DeliveryStatus.zinomLine(corrupt), "Envio ao Zinom não confirmado")
+    compare(DeliveryStatus.zinomLine(corrupt, "pt"), "Envio ao Zinom não confirmado")
     verify(DeliveryStatus.zinomNeedsSync(corrupt))
   }
 
@@ -63,9 +73,9 @@ TestCase {
   function test_summary_pending_line_and_retry() {
     var note = {processing_status: "pending", summary_status: "pending",
                 summary_error: "cota da Groq esgotada (HTTP 429), 4 tentativas", zinom: {status: "pending"}}
-    compare(DeliveryStatus.zinomLine(note), "Resumo pendente: cota da Groq esgotada (HTTP 429), 4 tentativas")
+    compare(DeliveryStatus.zinomLine(note, "pt"), "Resumo pendente: cota da Groq esgotada (HTTP 429), 4 tentativas")
     verify(DeliveryStatus.zinomNeedsSync(note))
-    compare(DeliveryStatus.zinomLine({summary_status: "", zinom: {status: "pending"}}), "Envio ao Zinom pendente")
-    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "tombstoned"}}), "Excluído no Zinom")
+    compare(DeliveryStatus.zinomLine({summary_status: "", zinom: {status: "pending"}}, "pt"), "Envio ao Zinom pendente")
+    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "tombstoned"}}, "pt"), "Excluído no Zinom")
   }
 }
