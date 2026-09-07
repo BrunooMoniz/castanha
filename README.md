@@ -26,7 +26,10 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
 3. **Esteira Bronze -> Silver -> Gold**:
    - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
    - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
-   - **Gold**: Fatos atômicos preservados no Bronze/Gold, pendentes de suporte a origem no servidor. A entrega atual publica somente a nota narrativa via `remember`.
+   - **Gold**: Fatos atômicos, cada um citando a passagem literal do Silver de onde saiu.
+   - **No Zinom**: a transcrição (Bronze) e o resumo (Silver, como documento de síntese) ficam
+     pesquisáveis; os fatos citados vão junto do Silver e o servidor confere cada passagem
+     (posição em bytes e hash) antes de gravar. Fato sem passagem literal é descartado.
    - O áudio entra no Bronze antes de qualquer transcrição. Se ela falhar (sem internet, Groq fora
      do ar), o painel mostra "tentar de novo" e `castanha retry` reprocessa só o que faltou, sem
      apagar nada. Reunião longa vai em fatias para a Groq e as notas saem em partes (uma por
