@@ -57,3 +57,76 @@ class TestIcalDiaInteiro(unittest.TestCase):
         ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:x2\nSUMMARY:Reunião\nDTSTART:20260905T130000Z\nDTEND:20260905T140000Z\nEND:VEVENT\nEND:VCALENDAR\n"
         (ev,) = parse_ics_content(ics)
         self.assertFalse(ev.all_day)
+
+
+class TestZinomCalendarFalhas(unittest.TestCase):
+    """Tool ausente no hub é só o erro JSON-RPC -32602; um 404 do Google numa
+    agenda não rebaixa todas as outras à listagem magra por meia hora."""
+
+    AUSENTE = "list_event_details devolveu erro: MCP error -32602: Tool list_event_details not found"
+    GOOGLE_404 = ("list_event_details devolveu erro: Google Calendar 404: "
+                  "https://www.googleapis.com/calendar/v3/calendars/x/events Not Found")
+
+    def _fonte(self):
+        import time
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {}}})
+        fonte._calendars = [
+            {"calendar_ref": "a", "summary": "Bruno", "email": "a@x", "primary": True},
+            {"calendar_ref": "b", "summary": "Eventos Nora", "email": "a@x", "accessRole": "owner"},
+        ]
+        fonte._calendars_at = time.time()
+        return fonte
+
+    @staticmethod
+    def _evento(ref):
+        agora = datetime.datetime.now().astimezone()
+        return {"id": f"ev-{ref}", "summary": f"Reunião {ref}",
+                "start": {"dateTime": (agora + datetime.timedelta(hours=1)).isoformat()},
+                "end": {"dateTime": (agora + datetime.timedelta(hours=2)).isoformat()}}
+
+    def _respostas(self, fonte, falhas=None, chamadas=None):
+        """`falhas`: {(tool, ref): exceção}. `chamadas` recebe (tool, ref)."""
+        falhas = falhas or {}
+        agendas = list(fonte._calendars)
+
+        def _call(name, args):
+            if name == "list_calendars":
+                return {"calendars": agendas}
+            ref = args.get("calendar_ref")
+            if chamadas is not None:
+                chamadas.append((name, ref))
+            erro = falhas.get((name, ref))
+            if erro is not None:
+                raise erro
+            return {"events": [self._evento(ref)]}
+
+        fonte._call = _call
+
+    def test_tool_ausente_rebaixa_para_a_listagem_magra(self):
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        chamadas = []
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError(self.AUSENTE, tool="list_event_details")}, chamadas)
+        self.assertEqual([e.uid for e in fonte.upcoming()], ["ev-a", "ev-b"])
+        self.assertFalse(fonte._detalhe_disponivel)
+        self.assertEqual(chamadas, [("list_event_details", "a"), ("list_events", "a"), ("list_events", "b")])
+
+    def test_404_do_google_numa_agenda_nao_rebaixa_as_outras(self):
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        chamadas = []
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError(self.GOOGLE_404, tool="list_event_details")}, chamadas)
+        self.assertEqual([e.uid for e in fonte.upcoming()], ["ev-b"])
+        self.assertNotEqual(fonte._detalhe_disponivel, False)
+        self.assertEqual(chamadas, [("list_event_details", "a"), ("list_event_details", "b")])
+
+    def test_tool_ausente_com_outro_nome_nao_rebaixa(self):
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        chamadas = []
+        outra = "list_event_details devolveu erro: MCP error -32602: Tool list_events not found"
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError(outra, tool="list_event_details")}, chamadas)
+        fonte.upcoming()
+        self.assertNotEqual(fonte._detalhe_disponivel, False)
+        self.assertNotIn(("list_events", "a"), chamadas)

@@ -29,6 +29,18 @@ CALENDARS_TTL_SEC = 3600
 # alguém reiniciar o processo. Foi o que aconteceu em 04/09.
 DETALHE_RETRY_SEC = 1800
 
+# Como o hub diz que uma tool não existe (sondado em 07/09/2026):
+# `isError` com o texto "MCP error -32602: Tool <nome> not found". Só isso
+# rebaixa para a listagem magra. Um 404 do Google numa agenda também termina
+# em "Not Found", e antes derrubava TODAS as agendas por meia hora.
+_TOOL_AUSENTE = re.compile(r"MCP error -32602: Tool (\S+) not found", re.IGNORECASE)
+
+
+def tool_ausente(e: BaseException, name: str) -> bool:
+    """True só para o erro JSON-RPC -32602 do hub sobre ESTA tool."""
+    m = _TOOL_AUSENTE.search(str(e))
+    return bool(m) and m.group(1) == name and (getattr(e, "tool", None) in (None, name))
+
 
 def _parse_google_dt(node: Optional[Dict[str, Any]]) -> Optional[datetime.datetime]:
     """Aceita o par {dateTime, timeZone} e o {date} de evento de dia inteiro."""
@@ -200,7 +212,7 @@ class ZinomCalendar:
             except ZinomError as e:
                 # Hub antigo, sem a tool: cai para a listagem magra e não tenta
                 # de novo nas próximas agendas do mesmo ciclo.
-                if "not found" in str(e).lower() or "unknown tool" in str(e).lower():
+                if tool_ausente(e, "list_event_details"):
                     self._detalhe_disponivel = False
                     self._detalhe_negado_em = time.time()
                 else:
