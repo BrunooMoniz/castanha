@@ -1,73 +1,77 @@
+English | [Português (Brasil)](README.pt-BR.md)
+
 # Castanha 🌰
 
-Assistente executivo e gravador inteligente de reuniões para Linux e Omarchy.
+Executive assistant and smart meeting recorder for Linux and Omarchy.
 
-Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em dois canais via PipeWire, sincroniza com o Google Calendar, notifica antes da reunião e transforma transcrições brutas em notas estruturadas (Bronze, Silver e Gold), prontas para o **Zinom** e para sua **LLM Wiki**.
+An open, native replacement for Granola: it records calls without a bot, splits audio into two channels via PipeWire, syncs with Google Calendar, notifies you before the meeting, and turns raw transcripts into structured notes (Bronze, Silver and Gold), ready for **Zinom** and your **LLM Wiki**. English by default, Brazilian Portuguese when your locale is `pt_BR`.
 
 <p align="center">
-  <img src="preview.png" alt="Painel do Castanha no Omarchy" width="480">
+  <img src="preview.png" alt="Castanha panel on Omarchy" width="480">
 </p>
 
 ---
 
-## 🚀 Principais Recursos
+## 🚀 Key Features
 
-1. **Captura Bot-Free via PipeWire**:
-   - Grava silenciosamente chamadas no Google Meet, Teams, Zoom e WhatsApp Web/Desktop.
-   - **Modo Duplo**: Canal esquerdo (microfone do usuário) e canal direito (áudio dos participantes remotos).
-   - **Modo Presencial**: Grava apenas o microfone do computador para reuniões presenciais.
-2. **Integração com Google Calendar**:
-   - Sincronização direta via feed privado iCal ou integração com o hub Zinom.
-   - Todos os eventos das suas agendas (a principal de cada conta e as que você pode editar, como
-     uma agenda de grupo da empresa), inclusive os de dia inteiro e os sem link de chamada;
-     o que não for reunião você esconde no painel (a série inteira, de uma vez).
-   - Popup interativo 2 minutos antes com botão para entrar na chamada e botão para gravar.
-   - Captura automática dos participantes (nomes e e-mails), pauta e links.
-3. **Esteira Bronze -> Silver -> Gold**:
-   - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
-   - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
-   - **Gold**: Fatos atômicos preservados no Bronze/Gold, pendentes de suporte a origem no servidor. A entrega atual publica somente a nota narrativa via `remember`.
-   - O áudio entra no Bronze antes de qualquer transcrição. Se ela falhar (sem internet, Groq fora
-     do ar), o painel mostra "tentar de novo" e `castanha retry` reprocessa só o que faltou, sem
-     apagar nada. Reunião longa vai em fatias para a Groq e as notas saem em partes (uma por
-     minuto, no plano gratuito), então uma reunião de 2 h leva alguns minutos.
-   - Sem chave da Groq e sem VPS, a transcrição falha declarada. O transcritor simulado só entra
-     com `"provider": "mock"` na config (ou `CASTANHA_MOCK_TRANSCRIBER=1`), para teste.
-4. **Plugin Nativo do Omarchy (Quickshell)**:
-   - Widget discreto na barra com status ao vivo (`● REC 00:14:20`).
-   - Painel popout com controle de gravação, próxima reunião e acesso rápido às notas.
-   - Atalho global de teclado no Hyprland (`Super+Alt+R`).
-5. **Backend Flexível**:
-   - Roda 100% local ou envia o processamento pesado para uma VPS remota.
+1. **Bot-Free Capture via PipeWire**:
+   - Silently records calls on Google Meet, Teams, Zoom and WhatsApp Web/Desktop.
+   - **Dual Mode**: left channel (the user's microphone) and right channel (the remote participants' audio).
+   - **In-Person Mode**: records only the computer's microphone for in-person meetings.
+2. **Google Calendar Integration**:
+   - Direct sync via a private iCal feed or integration with the Zinom hub.
+   - Every event from your calendars (the primary one of each account and the ones you can edit, such as
+     a company group calendar), including all-day events and events without a call link;
+     whatever is not a meeting you hide in the panel (the whole series, in one go).
+   - Interactive popup 2 minutes before, with a button to join the call and a button to record.
+   - Automatic capture of attendees (names and emails), agenda and links.
+3. **Bronze -> Silver -> Gold Pipeline**:
+   - **Bronze**: original audio compressed to Opus + `metadata.json` + `transcript_raw.txt`.
+   - **Silver**: structured meeting notes in Markdown (YAML frontmatter, Executive Summary, Discussions, Decisions Made and Actions).
+   - **Gold**: atomic facts preserved in Bronze/Gold, pending origin support on the server. The current delivery publishes only the narrative note via `remember`.
+   - Audio lands in Bronze before any transcription. If transcription fails (no internet,
+     Groq down), the panel shows "try again" and `castanha retry` reprocesses only what was
+     missing, without deleting anything. A long meeting goes to Groq in slices and the notes
+     come out in parts (one per minute, on the free plan), so a 2-hour meeting takes a few
+     minutes.
+   - Without a Groq key and without a VPS, the transcription failure is declared. The mock
+     transcriber only comes in with `"provider": "mock"` in the config (or
+     `CASTANHA_MOCK_TRANSCRIBER=1`), for testing.
+4. **Native Omarchy Plugin (Quickshell)**:
+   - Discreet bar widget with live status (`● REC 00:14:20`).
+   - Popout panel with recording control, the next meeting and quick access to the notes.
+   - Global keyboard shortcut in Hyprland (`Super+Alt+R`).
+5. **Flexible Backend**:
+   - Runs 100% locally or sends heavy processing to a remote VPS.
 
 ---
 
-## 📦 Instalação
+## 📦 Installation
 
-### Via Omarchy Plugin Marketplace (Recomendado)
+### Via the Omarchy Plugin Marketplace (Recommended)
 
 ```bash
 omarchy plugin add https://github.com/BrunooMoniz/castanha --enable
 ~/.config/omarchy/plugins/io.github.brunoomoniz.castanha/setup
 ```
 
-### Instalação Manual
+### Manual Installation
 
 ```bash
 git clone https://github.com/BrunooMoniz/castanha.git ~/.local/share/castanha
 cd ~/.local/share/castanha && ./install.sh
 ```
 
-Para adicionar o atalho global no Hyprland (`~/.config/hypr/hyprland.conf`):
+To add the global shortcut in Hyprland (`~/.config/hypr/hyprland.conf`):
 ```ini
 bind = $mainMod ALT, R, exec, castanha toggle
 ```
 
 ---
 
-## 🗑️ Remoção
+## 🗑️ Removal
 
-Para desinstalar o plugin e o comando da máquina:
+To uninstall the plugin and the command from the machine:
 ```bash
 rm -f ~/.local/bin/castanha
 omarchy plugin remove io.github.brunoomoniz.castanha
@@ -75,66 +79,87 @@ omarchy plugin remove io.github.brunoomoniz.castanha
 
 ---
 
-## 📋 Requisitos de Sistema
+## 📋 System Requirements
 
-- **Omarchy** com omarchy-shell / Quickshell
-- **PipeWire** com módulo pulse (`pactl`)
-- **FFmpeg** e **ffprobe**
-- **Python** 3.10 ou superior
+- **Omarchy** with omarchy-shell / Quickshell
+- **PipeWire** with the pulse module (`pactl`)
+- **FFmpeg** and **ffprobe**
+- **Python** 3.10 or higher
 
 ---
 
-## 🛠️ Uso via CLI
+## 🛠️ CLI Usage
 
 ```bash
-# Iniciar gravação de reunião
+# Start recording a meeting
 castanha start
-castanha start --mic-only          # Modo presencial (somente microfone)
-castanha start --title "Alinhamento com Time"
+castanha start --mic-only          # In-person mode (microphone only)
+castanha start --title "Team Sync"
 
-# Alternar gravação (inicia se ocioso, finaliza se gravando)
+# Toggle recording (starts when idle, stops when recording)
 castanha toggle
 
-# Pausar e retomar
+# Pause and resume
 castanha pause
 castanha resume
 
-# Finalizar e processar notas
+# Stop and process the notes
 castanha stop
 
-# Retomar jobs e entregas pendentes, incluindo gravações sem notas
+# Resume pending jobs and deliveries, including recordings without notes
 castanha sync --all
-castanha sync --all --limit 20     # Limita pendências, não apenas reuniões recentes
+castanha sync --all --limit 20     # Limits the backlog, not just recent meetings
 
-# Consultar status
+# Check status
 castanha status
 castanha status --json
 
-# Iniciar o daemon de calendário e notificações
+# Start the calendar and notification daemon
 castanha daemon --background
+castanha daemon --stop             # Stop the running daemon
+castanha daemon --status           # Whether a daemon is running, and which PID
 
-# Listar e abrir notas
+# List and open notes
 castanha notes
 castanha notes --open
+castanha notes <slug>              # Full details of one meeting
 
-# Segunda chance: transcrever de novo uma gravação que ficou sem notas
-# (sem internet na hora do stop, Groq fora do ar, VPS lenta)
-castanha retry                     # a última pendente (nada pendente = não faz nada)
-castanha retry <slug>              # uma reunião específica; já transcrita, só refaz as notas
-castanha retry --all               # todas as pendentes
+# Second chance: transcribe again a recording that was left without notes
+# (no internet at stop time, Groq down, slow VPS)
+castanha retry                     # the latest pending one (nothing pending = does nothing)
+castanha retry <slug>              # a specific meeting; if already transcribed, only rebuilds the notes
+castanha retry --all               # all pending ones
 
-# Gravar um evento da agenda com título, participantes e link dele
+# Record a calendar event with its title, attendees and link
 castanha start --event <uid>
 
-# Reenviar ao Zinom uma reunião já transcrita
+# Append the recording to an existing meeting
+castanha start --meeting <slug>
+
+# Send an already-transcribed meeting to Zinom again
 castanha sync [slug]
+
+# Upcoming meetings from the Google accounts connected in Zinom
+castanha agenda
+castanha agenda refresh            # Hit the calendars now and update the state
+castanha agenda hide <uid>         # Stop showing an event (the whole series)
+castanha agenda unhide <uid>       # Show a hidden event again (--all shows everything again)
+castanha agenda hidden             # List what you asked not to show
+castanha refresh-agenda            # Refresh the agenda now across accounts and feeds
+
+# Delete a meeting's audio recording without deleting the notes
+castanha delete-recording <slug>
+
+# Manage a meeting's audio recordings
+castanha recordings list <slug>
+castanha recordings delete <slug> [file]
 ```
 
 ---
 
-## ⚙️ Configuração
+## ⚙️ Configuration
 
-O arquivo de configuração vive em `~/.config/castanha/config.json`:
+The configuration file lives at `~/.config/castanha/config.json`:
 
 ```json
 {
@@ -144,36 +169,37 @@ O arquivo de configuração vive em `~/.config/castanha/config.json`:
   "calendar": {
     "feeds": [
       {
-        "name": "Meu Calendário",
-        "url": "https://calendar.google.com/calendar/ical/seu-email/private-xxx/basic.ics"
+        "name": "My Calendar",
+        "url": "https://calendar.google.com/calendar/ical/your-email/private-xxx/basic.ics"
       }
     ]
   },
   "transcription": {
     "provider": "groq",
-    "groq_api_key": "sua-chave-groq"
+    "groq_api_key": "your-groq-key"
   },
   "llm": {
     "provider": "groq",
-    "api_key": "sua-chave-groq",
+    "api_key": "your-groq-key",
     "model": "openai/gpt-oss-120b"
   },
   "zinom": {
     "enabled": true,
     "endpoint": "https://zinom.ai/mcp",
-    "token": "seu-bearer-token"
+    "token": "your-bearer-token"
   }
 }
 ```
 
-A captura preserva o áudio no Bronze antes da transcrição. Jobs remotos continuam
-na VPS sem prender a conexão SSH; `castanha sync --all` consulta o resultado e
-retoma checkpoints. SCP tem limite de 30 segundos e cada SSH, 15 segundos.
-A VPS precisa de `flock`, `nohup` e do transcritor `/root/castanha-transcribe.py`.
+Capture preserves the audio in Bronze before transcription. Remote jobs keep
+running on the VPS without holding the SSH connection; `castanha sync --all`
+checks the result and resumes checkpoints. SCP has a 30-second limit and each
+SSH command, 15 seconds. The VPS needs `flock`, `nohup` and the transcriber
+`/root/castanha-transcribe.py`.
 
-Uma nota pode estar entregue enquanto seus fatos continuam em `pending_lineage`.
-O Castanha não envia `brain_fact` até o servidor oferecer linhagem recuperável.
-Transcrições mock ficam nos jobs locais e são excluídas das notas reais.
-Notas longas são enviadas inteiras: eventual rejeição do servidor permanece erro
-pendente, sem truncamento silencioso. Consulte `docs/F5-ENTREGA.md` para instalação
-e reversão desta versão sem alterar a worktree XPS ativa.
+A note can be delivered while its facts remain in `pending_lineage`. Castanha
+does not send `brain_fact` until the server offers recoverable lineage. Mock
+transcripts stay in local jobs and are excluded from real notes. Long notes
+are sent whole: any server rejection remains a pending error, with no silent
+truncation. See `docs/F5-ENTREGA.md` for installing and rolling back this
+version without changing the active XPS worktree.

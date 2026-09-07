@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.brunoomoniz.castanha",
   "name": "Castanha",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "Bruno Moniz",
   "license": "MIT",
-  "description": "Gravador de reuniões bot-free para Omarchy: captura PipeWire em dois canais, cronômetro ao vivo na barra, e a esteira Bronze, Silver e Gold para o Zinom.",
+  "description": "Bot-free meeting recorder for Omarchy: dual-channel PipeWire capture, a live timer in the bar, and the Bronze, Silver and Gold pipeline for Zinom.",
   "kinds": [
     "bar-widget"
   ],
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Castanha",
-    "description": "Um ícone e um painel: iniciar e finalizar a gravação, o cronômetro, a reunião atual ou a próxima, a segunda chance de transcrição quando o upload falhou, e o diagnóstico da última (áudio mudo, erro de Zinom).",
+    "description": "One icon and one panel: start and stop the recording, the timer, the current or next meeting, a second chance at transcription when the upload failed, and the diagnosis of the last one (silent audio, Zinom error).",
     "category": "Productivity",
     "aliases": [
       "castanha",
