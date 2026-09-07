@@ -12,7 +12,7 @@ from typing import Set
 
 from castanha.config import get_state_dir
 
-from castanha.agenda import collect_upcoming, next_timed
+from castanha.agenda import agenda_warning, collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.i18n import t
@@ -125,7 +125,7 @@ class CastanhaDaemon:
                     self.state_mgr.write({
                         "next_meeting": proxima.to_dict() if proxima else None,
                         "upcoming_meetings": [m.to_dict() for m in proximas],
-                        "agenda_error": None,
+                        "agenda_error": agenda_warning(self.config),
                     })
 
                     if proxima:
@@ -145,7 +145,7 @@ class CastanhaDaemon:
                             ).start()
                 except Exception as e:
                     print(t("daemon.calendar_error", error=e))
-                    self.state_mgr.write({"agenda_error": str(e)})
+                    self.state_mgr.write({"agenda_error": agenda_warning(self.config, e)})
 
             time.sleep(1)
 

@@ -29,6 +29,18 @@ DEFAULT_STATE: Dict[str, Any] = {
 def get_state_file() -> Path:
     return get_state_dir() / "state.json"
 
+
+def _sem_resultado_orfao(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Reunião cuja pasta Bronze sumiu (foi para a lixeira) não é mais a última entrega.
+
+    Projeção de leitura: quem lê não reescreve o arquivo; a próxima escrita
+    de quem escreve (o daemon, a cada ciclo) é que persiste o None.
+    """
+    last = state.get("last_result")
+    if isinstance(last, dict) and last.get("bronze_dir") and not Path(str(last["bronze_dir"])).expanduser().is_dir():
+        state["last_result"] = None
+    return state
+
 class StateManager:
     def __init__(self):
         self.state_dir = get_state_dir()
@@ -43,7 +55,7 @@ class StateManager:
                 data = json.load(f)
                 state = dict(DEFAULT_STATE)
                 state.update(data)
-                return state
+                return _sem_resultado_orfao(state)
         except Exception:
             return dict(DEFAULT_STATE)
 

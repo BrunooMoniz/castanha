@@ -661,7 +661,7 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             visible: root.upcoming.length === 0
-            text: root.agendaError !== "" ? I18N.t("agenda.unavailable", root.lang).replace("{err}", root.agendaError)
+            text: root.agendaError !== "" ? root.agendaError
                                           : (root.refreshingAgenda ? I18N.t("agenda.refreshing", root.lang) : I18N.t("agenda.empty", root.lang))
             color: root.agendaError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily

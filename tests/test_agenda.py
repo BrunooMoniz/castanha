@@ -148,3 +148,124 @@ class TestZinomDiaInteiro(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAgendaAviso(unittest.TestCase):
+    """O aviso da agenda em linguagem de produto, e o daemon gravando-o no estado."""
+
+    def setUp(self):
+        from castanha import agenda
+        self.temp = Path(tempfile.mkdtemp())
+        self.env = patch.dict("os.environ", {"XDG_STATE_HOME": str(self.temp / "state"),
+                                             "XDG_CONFIG_HOME": str(self.temp / "config")})
+        self.env.start()
+        self.cfg = {"calendar": {"feeds": [], "zinom": {}}, "zinom": {"token": "t"}}
+        agenda._zinom = None
+        agenda._erro_coleta = None
+
+    def tearDown(self):
+        from castanha import agenda
+        agenda._zinom = None
+        agenda._erro_coleta = None
+        self.env.stop()
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _fonte(self, last_error=None, good_at=0.0):
+        from castanha import agenda
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar(self.cfg)
+        fonte.last_error = last_error
+        fonte._good_at = good_at
+        agenda._zinom = fonte
+        return fonte
+
+    def test_sem_erro_nao_ha_aviso(self):
+        from castanha.agenda import agenda_warning
+        self._fonte()
+        self.assertIsNone(agenda_warning(self.cfg))
+
+    def test_sem_ciclo_bom_diz_indisponivel(self):
+        from castanha.agenda import agenda_warning
+        self._fonte(last_error="limite de chamadas do Zinom")
+        self.assertEqual(agenda_warning(self.cfg), "Agenda indisponível: limite de chamadas do Zinom")
+
+    def test_depois_de_ciclo_bom_diz_desde_quando(self):
+        import time
+        from castanha.agenda import agenda_warning
+        bom_em = time.time() - 600
+        self._fonte(last_error="sem conexão com o Zinom", good_at=bom_em)
+        hora = time.strftime("%H:%M", time.localtime(bom_em))
+        self.assertEqual(agenda_warning(self.cfg), f"Agenda desatualizada desde {hora}: sem conexão com o Zinom")
+
+    def test_ciclo_bom_de_mais_de_um_dia_traz_a_data(self):
+        import time
+        from castanha.agenda import agenda_warning
+        bom_em = time.time() - 2 * 86400
+        self._fonte(last_error="sem conexão com o Zinom", good_at=bom_em)
+        self.assertIn(time.strftime("%d/%m %H:%M", time.localtime(bom_em)), agenda_warning(self.cfg))
+
+    def test_excecao_da_coleta_vira_aviso_e_some_no_ciclo_bom(self):
+        from castanha.agenda import agenda_warning
+        fonte = self._fonte()
+        with patch.object(fonte, "upcoming", side_effect=RuntimeError("<urlopen error timed out>")):
+            self.assertEqual(collect_upcoming(self.cfg), [])
+        self.assertEqual(agenda_warning(self.cfg), "Agenda indisponível: sem conexão com o Zinom")
+        with patch.object(fonte, "upcoming", return_value=[]):
+            collect_upcoming(self.cfg)
+        self.assertIsNone(agenda_warning(self.cfg))
+
+    def test_erro_explicito_do_daemon_vira_o_mesmo_texto(self):
+        from castanha.agenda import agenda_warning
+        self._fonte()
+        self.assertEqual(agenda_warning(self.cfg, RuntimeError("HTTP 429: Too Many Requests")),
+                         "Agenda indisponível: limite de chamadas do Zinom")
+
+    # ---- o daemon escreve o aviso no estado
+    def _daemon(self):
+        import json
+        from castanha.daemon import CastanhaDaemon
+        cfg_dir = self.temp / "config" / "castanha"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        meetings = self.temp / "meetings"
+        (cfg_dir / "config.json").write_text(json.dumps({
+            "storage": {"base_dir": str(meetings), "bronze_dir": str(meetings / "bronze"),
+                        "silver_dir": str(meetings / "silver"), "gold_dir": str(meetings / "gold")},
+            "transcription": {"groq_api_key": "", "vps_ssh_host": ""},
+            "llm": {"api_key": ""},
+            "zinom": {"enabled": False, "token": "t"},
+        }), encoding="utf-8")
+        daemon = CastanhaDaemon()
+
+        def _para(_):
+            daemon.running = False
+        return daemon, _para
+
+    def test_daemon_grava_o_aviso_no_estado_a_cada_ciclo(self):
+        from castanha.state import StateManager
+        daemon, para = self._daemon()
+        self._fonte(last_error="limite de chamadas do Zinom")
+        with patch("castanha.daemon.collect_upcoming", return_value=[]), \
+             patch("castanha.daemon.signal.signal"), patch("castanha.daemon.time.sleep", side_effect=para):
+            daemon.run()
+        estado = StateManager().read()
+        self.assertEqual(estado["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")
+        self.assertEqual(estado["upcoming_meetings"], [])
+
+    def test_daemon_limpa_o_aviso_quando_o_ciclo_e_bom(self):
+        from castanha.state import StateManager
+        daemon, para = self._daemon()
+        StateManager().write({"agenda_error": "Agenda indisponível: limite de chamadas do Zinom"})
+        self._fonte()
+        with patch("castanha.daemon.collect_upcoming", return_value=[]), \
+             patch("castanha.daemon.signal.signal"), patch("castanha.daemon.time.sleep", side_effect=para):
+            daemon.run()
+        self.assertIsNone(StateManager().read()["agenda_error"])
+
+    def test_daemon_traduz_a_propria_excecao(self):
+        from castanha.state import StateManager
+        daemon, para = self._daemon()
+        self._fonte()
+        with patch("castanha.daemon.collect_upcoming", side_effect=RuntimeError("HTTP 429: Too Many Requests")), \
+             patch("castanha.daemon.signal.signal"), patch("castanha.daemon.time.sleep", side_effect=para):
+            daemon.run()
+        self.assertEqual(StateManager().read()["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")

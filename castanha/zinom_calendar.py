@@ -13,6 +13,7 @@ aparece com título e horário, sem participantes e sem link.
 import datetime
 import json
 import re
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,36 @@ CALENDARS_TTL_SEC = 3600
 # magra PARA SEMPRE, e reunião com participante aparecia sem participante até
 # alguém reiniciar o processo. Foi o que aconteceu em 04/09.
 DETALHE_RETRY_SEC = 1800
+
+# Como o hub diz que uma tool não existe (sondado em 07/09/2026):
+# `isError` com o texto "MCP error -32602: Tool <nome> not found". Só isso
+# rebaixa para a listagem magra. Um 404 do Google numa agenda também termina
+# em "Not Found", e antes derrubava TODAS as agendas por meia hora.
+_TOOL_AUSENTE = re.compile(r"MCP error -32602: Tool (\S+) not found", re.IGNORECASE)
+
+MOTIVO_LIMITE = "limite de chamadas do Zinom"
+MOTIVO_CONEXAO = "sem conexão com o Zinom"
+
+
+def tool_ausente(e: BaseException, name: str) -> bool:
+    """True só para o erro JSON-RPC -32602 do hub sobre ESTA tool."""
+    m = _TOOL_AUSENTE.search(str(e))
+    return bool(m) and m.group(1) == name and (getattr(e, "tool", None) in (None, name))
+
+
+def motivo_curto(e: BaseException) -> str:
+    """Linguagem de produto para o painel: sem URL, sem token, sem prefixo de log."""
+    texto = str(e) or e.__class__.__name__
+    baixo = texto.lower()
+    if re.search(r"\b429\b", baixo) or "rate limit" in baixo or "too many requests" in baixo:
+        return MOTIVO_LIMITE
+    if any(p in baixo for p in ("urlopen error", "timed out", "connection", "name resolution",
+                                "não respondeu", "http 5")):
+        return MOTIVO_CONEXAO
+    texto = re.sub(r"^(?:tools/call|[\w.-]+ devolveu erro|[\w.-]+):\s*", "", texto)
+    texto = re.sub(r"https?://\S+", "", texto)
+    texto = re.sub(r"\s+", " ", texto).strip(" :") or e.__class__.__name__
+    return texto if len(texto) <= 80 else texto[:79] + "…"
 
 
 def _parse_google_dt(node: Optional[Dict[str, Any]]) -> Optional[datetime.datetime]:
@@ -103,6 +134,16 @@ class ZinomCalendar:
         self._detalhe_negado_em: float = 0.0
         self._cache: List[MeetingEvent] = []
         self._cache_at: float = 0.0
+        # Honestidade da agenda: em falha, a última lista boa fica e o painel
+        # é avisado. Sem isto, rate limit virava "nada nas próximas horas".
+        self._good_at: float = 0.0
+        self.last_error: Optional[str] = None
+
+    @property
+    def stale_since(self) -> Optional[float]:
+        """Hora do último ciclo inteiro bom (None se nunca houve): é desde
+        quando a lista está parada quando `last_error` está preenchido."""
+        return self._good_at or None
 
     # ------------------------------------------------------------- transporte
     def _connect(self) -> ZinomMcpClient:
@@ -160,11 +201,26 @@ class ZinomCalendar:
 
         eventos: List[MeetingEvent] = []
         vistos = set()
-        for cal in self.selected_calendars(force=force):
+        falha: Optional[str] = None
+        try:
+            agendas = self.selected_calendars(force=force)
+        except Exception as e:
+            print(f"[Castanha] Lista de agendas falhou: {e}", file=sys.stderr)
+            agendas, falha = [], motivo_curto(e)
+        for cal in agendas:
             ref = cal.get("calendar_ref")
             if not ref:
                 continue
-            for raw in self._events_for(ref, t_min, t_max, cal):
+            try:
+                brutos = self._events_for(ref, t_min, t_max)
+            except Exception as e:
+                print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}", file=sys.stderr)
+                motivo = motivo_curto(e)
+                falha = falha or motivo
+                if motivo == MOTIVO_LIMITE:
+                    break  # as outras agendas vão bater no mesmo limite
+                continue
+            for raw in brutos:
                 if self.skip_all_day and _is_all_day(raw):
                     continue
                 evento = self._to_meeting(raw, cal)
@@ -173,9 +229,15 @@ class ZinomCalendar:
                 vistos.add(evento.uid)
                 eventos.append(evento)
 
+        # Mesma cadência com ou sem falha: bater de novo a cada minuto num
+        # limite compartilhado só piora.
+        self._cache_at = time.time()
+        self.last_error = falha
+        if falha is not None:
+            return self._cache
         eventos.sort(key=lambda e: e.start)
         self._cache = eventos
-        self._cache_at = time.time()
+        self._good_at = self._cache_at
         return eventos
 
     def _quer_detalhe(self) -> bool:
@@ -189,7 +251,8 @@ class ZinomCalendar:
             return True
         return (time.time() - self._detalhe_negado_em) > DETALHE_RETRY_SEC
 
-    def _events_for(self, ref: str, t_min: str, t_max: str, cal: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _events_for(self, ref: str, t_min: str, t_max: str) -> List[Dict[str, Any]]:
+        """Eventos brutos de uma agenda. Qualquer falha sobe: é desta agenda, neste ciclo."""
         args = {"calendar_ref": ref, "time_min": t_min, "time_max": t_max}
 
         if self._quer_detalhe():
@@ -198,23 +261,14 @@ class ZinomCalendar:
                 self._detalhe_disponivel = True
                 return payload.get("events", []) or []
             except ZinomError as e:
+                if not tool_ausente(e, "list_event_details"):
+                    raise
                 # Hub antigo, sem a tool: cai para a listagem magra e não tenta
                 # de novo nas próximas agendas do mesmo ciclo.
-                if "not found" in str(e).lower() or "unknown tool" in str(e).lower():
-                    self._detalhe_disponivel = False
-                    self._detalhe_negado_em = time.time()
-                else:
-                    print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
-                    return []
-            except Exception as e:
-                print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
-                return []
+                self._detalhe_disponivel = False
+                self._detalhe_negado_em = time.time()
 
-        try:
-            return self._call("list_events", args).get("events", []) or []
-        except Exception as e:
-            print(f"[Castanha] Agenda {cal.get('summary')!r} falhou: {e}")
-            return []
+        return self._call("list_events", args).get("events", []) or []
 
     def _to_meeting(self, raw: Dict[str, Any], cal: Dict[str, Any]) -> Optional[MeetingEvent]:
         inicio = _parse_google_dt(raw.get("start"))
