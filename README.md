@@ -18,7 +18,8 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
    - **Modo Presencial**: Grava apenas o microfone do computador para reuniões presenciais.
 2. **Integração com Google Calendar**:
    - Sincronização direta via feed privado iCal ou integração com o hub Zinom.
-   - Todos os eventos da agenda principal, inclusive os de dia inteiro e os sem link de chamada;
+   - Todos os eventos das suas agendas (a principal de cada conta e as que você pode editar, como
+     uma agenda de grupo da empresa), inclusive os de dia inteiro e os sem link de chamada;
      o que não for reunião você esconde no painel (a série inteira, de uma vez).
    - Popup interativo 2 minutos antes com botão para entrar na chamada e botão para gravar.
    - Captura automática dos participantes (nomes e e-mails), pauta e links.

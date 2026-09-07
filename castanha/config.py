@@ -32,7 +32,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "enabled": True,
             "poll_interval_sec": 300,
             "window_hours": 12,
-            # Vazio = a agenda principal de cada conta conectada.
+            # Vazio = a principal de cada conta mais as agendas que ele pode
+            # editar (owner/writer). Só-leitura (feriados, agenda alheia) fica fora.
             "calendars": [],
             # Dia inteiro entra: lembrete também é agenda. O que não for
             # reunião, ele esconde no painel (série inteira).

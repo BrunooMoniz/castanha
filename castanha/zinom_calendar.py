@@ -79,8 +79,10 @@ class ZinomCalendar:
         # Dia inteiro entra por padrão desde 05/09/2026: lembrete e evento sem
         # link também são agenda, e o que não for reunião ele esconde no painel.
         self.skip_all_day = bool(c_cfg.get("skip_all_day", False))
-        # Vazio quer dizer "a agenda principal de cada conta conectada". Para
-        # somar agendas secundárias, o nome ou e-mail delas vai em `calendars`.
+        # Vazio quer dizer "as agendas dele": a principal de cada conta mais as
+        # que ele pode editar (owner/writer), como a de grupo "Eventos Nora".
+        # Feriados e agendas de outras pessoas vêm só-leitura e ficam de fora.
+        # Uma lista explícita em `calendars` substitui essa regra.
         self.wanted = [str(x) for x in (c_cfg.get("calendars") or [])]
 
         # A agenda não muda de minuto em minuto, e o endpoint tem rate limit
@@ -126,7 +128,9 @@ class ZinomCalendar:
     def selected_calendars(self, force: bool = False) -> List[Dict[str, Any]]:
         todas = self.calendars(force=force)
         if not self.wanted:
-            return [c for c in todas if c.get("primary")]
+            # Em 07/09 a reunião do dia estava só em "Eventos Nora" (agenda de
+            # grupo, não principal) e o painel mostrou "nada nas próximas horas".
+            return [c for c in todas if c.get("primary") or c.get("accessRole") in ("owner", "writer")]
 
         alvo = {_normalize(w) for w in self.wanted}
         return [

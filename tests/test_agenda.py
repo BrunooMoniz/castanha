@@ -100,6 +100,33 @@ class TestZinomDiaInteiro(unittest.TestCase):
         fonte._calendars_at = _t.time()
         self.assertEqual([c["calendar_ref"] for c in fonte.selected_calendars()], ["a@x"])
 
+    def test_sem_lista_entram_as_agendas_que_ele_pode_editar(self):
+        """07/09: a reunião do dia só existia na agenda de grupo 'Eventos Nora'."""
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {}}})
+        fonte._calendars = [
+            {"calendar_ref": "principal", "summary": "Bruno", "primary": True, "accessRole": "owner"},
+            {"calendar_ref": "grupo", "summary": "Eventos Nora", "primary": False, "accessRole": "owner"},
+            {"calendar_ref": "compartilhada", "summary": "Time", "primary": False, "accessRole": "writer"},
+            {"calendar_ref": "feriados", "summary": "Feriados", "primary": False, "accessRole": "reader"},
+            {"calendar_ref": "de-outro", "summary": "luigi@x", "primary": False, "accessRole": "freeBusyReader"},
+        ]
+        import time as _t
+        fonte._calendars_at = _t.time()
+        self.assertEqual([c["calendar_ref"] for c in fonte.selected_calendars()],
+                         ["principal", "grupo", "compartilhada"])
+
+    def test_lista_explicita_continua_mandando(self):
+        from castanha.zinom_calendar import ZinomCalendar
+        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {"calendars": ["Eventos Nora"]}}})
+        fonte._calendars = [
+            {"calendar_ref": "principal", "summary": "Bruno", "primary": True, "accessRole": "owner"},
+            {"calendar_ref": "grupo", "summary": "Eventos Nora", "primary": False, "accessRole": "owner"},
+        ]
+        import time as _t
+        fonte._calendars_at = _t.time()
+        self.assertEqual([c["calendar_ref"] for c in fonte.selected_calendars()], ["grupo"])
+
 
 if __name__ == "__main__":
     unittest.main()
