@@ -154,7 +154,15 @@ O arquivo de configuração vive em `~/.config/castanha/config.json`:
     "groq_api_key": "sua-chave-groq"
   },
   "llm": {
-    "provider": "groq",
+    "provider": "hermes_ssh",
+    "hermes_ssh_host": "zinom-vps-2",
+    "hermes_models": [
+      {"provider": "anthropic", "model": "claude-opus-5"},
+      {"provider": "openai-codex", "model": "gpt-5.5"}
+    ],
+    "hermes_reasoning": "medium",
+    "hermes_timeout_sec": 900,
+    "fallback_provider": "groq",
     "api_key": "sua-chave-groq",
     "model": "openai/gpt-oss-120b"
   },
@@ -170,6 +178,21 @@ A captura preserva o áudio no Bronze antes da transcrição. Jobs remotos conti
 na VPS sem prender a conexão SSH; `castanha sync --all` consulta o resultado e
 retoma checkpoints. SCP tem limite de 30 segundos e cada SSH, 15 segundos.
 A VPS precisa de `flock`, `nohup` e do transcritor `/root/castanha-transcribe.py`.
+
+### Resumo (Silver e Gold): Hermes na VPS, Groq como reserva
+
+Com `"provider": "hermes_ssh"` (padrão), as notas e os fatos são gerados pela
+Hermes Agent CLI na VPS, com as assinaturas do próprio dono (Claude e Codex), na
+ordem de `hermes_models`: o próximo modelo só entra quando o anterior falhou de
+fato. A chamada roda com `--safe-mode -t none` (sem ferramentas, memória ou MCP):
+quem resume nunca escreve na memória. O prompt viaja só como arquivo, e cada
+pedido vira um job durável em `~/.local/state/castanha/llm/<hash>` na VPS: se o
+resumo passar de `hermes_timeout_sec`, a reunião fica com o resumo pendente e a
+retomada automática encontra o resultado pronto, sem rodar de novo. Só quando a
+cadeia inteira falha (ou o SSH está fora) o Castanha usa a Groq como reserva
+(`fallback_provider`; `""` desliga). `"provider": "groq"` continua valendo como
+primário, com o comportamento antigo (fatias por minuto). Quem resumiu fica em
+`summary_provider` no metadata da reunião.
 
 Uma nota pode estar entregue enquanto seus fatos continuam em `pending_lineage`.
 O Castanha não envia `brain_fact` até o servidor oferecer linhagem recuperável.

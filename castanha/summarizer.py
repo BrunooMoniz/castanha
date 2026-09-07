@@ -1,15 +1,20 @@
 """Processador de notas: transforma transcrição bruta (Bronze) em Silver (Markdown) e Gold (Fatos)."""
 
+import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional
-from castanha.config import load_config
+from castanha.config import get_state_dir, load_config
 
 # O plano gratuito da Groq dá 8.000 tokens por MINUTO para o modelo de notas.
 # Uma reunião de 2h13 (05/09/2026) tem 23.454 tokens de transcrição: a chamada
@@ -208,9 +213,16 @@ ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
   de quem falou, mantenha autoria desconhecida e responsável null.
 """
 
+# No caminho Hermes a transcrição não é pedida de volta: reescrever 2 h de fala
+# são dezenas de milhares de tokens de saída. Ela é anexada localmente, íntegra.
+SILVER_NOTES_SYSTEM_PROMPT = SILVER_SYSTEM_PROMPT.replace(
+    "## 📝 Transcrição Estruturada\n(Transcrição limpa, com pontuação e agrupada por temas ou falantes)\n",
+    "Não inclua a transcrição: ela é anexada depois.\n")
+
 PARTIAL_SYSTEM_PROMPT += CHANNEL_GROUNDING
 COMBINE_SYSTEM_PROMPT += CHANNEL_GROUNDING
 SILVER_SYSTEM_PROMPT += CHANNEL_GROUNDING
+SILVER_NOTES_SYSTEM_PROMPT += CHANNEL_GROUNDING
 GOLD_SYSTEM_PROMPT += CHANNEL_GROUNDING
 
 
@@ -274,6 +286,152 @@ def _ground_gold(data, metadata):
     return result
 
 
+# ---------------------------------------------------------------- Hermes
+# Resumo pela Hermes Agent CLI na VPS, com as assinaturas do Bruno (Claude e
+# Codex). Mesmo padrão do ASR remoto (VpsSshTranscriber._transcribe_flac): o
+# prompt vai como arquivo, o job roda solto (nohup + flock) e é identificado
+# pelo hash do pedido, então repetir a chamada encontra o resultado pronto em
+# vez de rodar de novo. `--safe-mode -t none` é obrigatório: sem ferramentas,
+# memória ou MCP, quem resume nunca escreve na memória do Bruno.
+HERMES_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                   "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"]
+HERMES_POLL_SEC = 5
+HERMES_JSON_INSTRUCTION = "Responda SOMENTE com o objeto JSON pedido, sem texto antes ou depois."
+_SESSION_LINE = re.compile(r"^\s*session_id:[^\n]*\n?")
+# Caminho ou coisa parecida com chave não entra em mensagem de produto.
+_UNSAFE_TOKEN = re.compile(r"\S*/\S*|[A-Za-z0-9_-]{32,}")
+
+
+class HermesInProgress(LlmUnavailable):
+    """O job continua rodando na VPS: a retomada encontra o resultado, sem reserva."""
+
+
+class _HermesJobFailed(Exception):
+    """Um modelo da cadeia falhou de fato; o próximo pode tentar."""
+
+
+class HermesSshLlm:
+    def __init__(self, host: str, models, reasoning: str = "medium", timeout_sec: int = 900,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.host = host
+        self.models = [m for m in (models or [])
+                       if isinstance(m, dict) and m.get("provider") and m.get("model")]
+        self.reasoning = str(reasoning or "medium")
+        self.timeout_sec = int(timeout_sec or 900)
+        self.sleep = sleep
+        self.clock = clock
+        self.last_model: Optional[str] = None  # "anthropic/claude-opus-5"
+
+    def _ssh(self, command: str) -> str:
+        try:
+            result = subprocess.run(["ssh", *HERMES_SSH_OPTS, self.host, command],
+                                    capture_output=True, text=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise LlmUnavailable("SSH da VPS indisponível") from exc
+        if result.returncode != 0:
+            raise LlmUnavailable("SSH da VPS indisponível")
+        return result.stdout.strip()
+
+    def _state(self, remote: str) -> str:
+        return self._ssh(f"umask 077; mkdir -p {remote} && if test -f {remote}/result.txt; then echo DONE; "
+                         f"elif test -f {remote}/exit.txt; then echo FAILED; "
+                         f"elif test -f {remote}/prompt.txt; then echo RUNNING; else echo UPLOAD; fi")
+
+    def _upload(self, prompt: str, remote: str) -> None:
+        # O prompt (com a transcrição) só viaja como arquivo, nunca em argv.
+        local_dir = get_state_dir() / "llm"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        fd, local = tempfile.mkstemp(prefix=".hermes-", suffix=".txt", dir=local_dir)
+        upload = f"{remote}/upload-{uuid.uuid4().hex}.txt"
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                out.write(prompt)
+            try:
+                result = subprocess.run(["scp", *HERMES_SSH_OPTS, local, f"{self.host}:{upload}"],
+                                        capture_output=True, text=True, timeout=30)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                raise LlmUnavailable("SSH da VPS indisponível") from exc
+            if result.returncode != 0:
+                raise LlmUnavailable("SSH da VPS indisponível")
+        finally:
+            os.unlink(local)
+        self._ssh(f"chmod 600 {upload} && mv {upload} {remote}/prompt.txt")
+
+    def _launch(self, remote: str, provider: str, model: str) -> None:
+        script = (f"test -f {remote}/result.txt && exit 0; "
+                  f"timeout --kill-after=30s {self.timeout_sec}s hermes chat -Q --oneshot --safe-mode -t none "
+                  f"--source tool --query-file {remote}/prompt.txt --provider {shlex.quote(provider)} "
+                  f"-m {shlex.quote(model)} --reasoning {shlex.quote(self.reasoning)} "
+                  f"> {remote}/result.part 2> {remote}/worker.log; rc=$?; "
+                  f"if [ $rc -eq 0 ] && [ -s {remote}/result.part ]; then mv {remote}/result.part {remote}/result.txt; "
+                  f"else echo $rc > {remote}/exit.txt; fi")
+        self._ssh(f"umask 077; nohup flock -n {remote}/job.lock sh -c {shlex.quote(script)} "
+                  ">/dev/null 2>&1 </dev/null &")
+
+    def _failure(self, remote: str) -> str:
+        """Motivo curto do worker.log, sem caminho nem segredo."""
+        try:
+            tail = self._ssh(f"cat {remote}/exit.txt 2>/dev/null; tail -n 3 {remote}/worker.log 2>/dev/null")
+        except LlmUnavailable:
+            return "falhou na VPS"
+        lines = [line.strip() for line in tail.splitlines() if line.strip()]
+        rc = lines.pop(0) if lines and lines[0].isdigit() else "?"
+        detail = " | ".join(" ".join(_UNSAFE_TOKEN.sub("", line).split()) for line in lines)
+        return f"saída {rc}" + (f": {detail[:160]}" if detail else "")
+
+    @staticmethod
+    def _answer(text: str) -> str:
+        answer = _SESSION_LINE.sub("", text, count=1).strip()
+        if not answer:
+            raise _HermesJobFailed("resposta vazia")
+        return answer
+
+    def _run(self, provider: str, model: str, prompt: str) -> str:
+        identity = {"provider": provider, "model": model, "reasoning": self.reasoning, "prompt": prompt}
+        canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        job_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        remote = f".local/state/castanha/llm/{job_id}"
+        state = self._state(remote)
+        if state == "UPLOAD":
+            self._upload(prompt, remote)
+            self._launch(remote, provider, model)
+            state = "RUNNING"
+        deadline = self.clock() + self.timeout_sec
+        while state == "RUNNING":
+            if self.clock() >= deadline:
+                raise HermesInProgress("Resumo ainda em andamento na VPS; retomada automática")
+            self.sleep(HERMES_POLL_SEC)
+            state = self._state(remote)
+        if state == "DONE":
+            return self._answer(self._ssh(f"cat {remote}/result.txt"))
+        if state == "FAILED":
+            raise _HermesJobFailed(self._failure(remote))
+        raise LlmUnavailable("SSH da VPS indisponível")
+
+    def complete(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
+        if not self.host:
+            raise LlmUnavailable("Hermes indisponível na VPS: host SSH não configurado")
+        if not self.models:
+            raise LlmUnavailable("Hermes indisponível na VPS: nenhum modelo configurado")
+        # Sem flag de system prompt na CLI: tudo vai no único arquivo de consulta.
+        prompt = f"{system_prompt.rstrip()}\n\n{user_prompt.rstrip()}\n"
+        if json_mode:
+            prompt += f"\n{HERMES_JSON_INSTRUCTION}\n"
+        reasons: List[str] = []
+        for entry in self.models:
+            provider, model = entry["provider"], entry["model"]
+            try:
+                answer = self._run(provider, model, prompt)
+            except _HermesJobFailed as exc:
+                print(f"[Castanha] Hermes {provider}/{model} falhou ({exc}); tentando o próximo modelo",
+                      file=sys.stderr)
+                reasons.append(f"{provider}/{model}: {exc}")
+                continue
+            self.last_model = f"{provider}/{model}"
+            return answer
+        raise LlmUnavailable("Hermes indisponível na VPS: " + "; ".join(reasons))
+
+
 class MeetingSummarizer:
     def __init__(self):
         cfg = load_config()
@@ -281,14 +439,36 @@ class MeetingSummarizer:
         self.provider = llm_cfg.get("provider", "groq")
         self.api_key = llm_cfg.get("api_key") or os.environ.get("GROQ_API_KEY", "")
         self.model = llm_cfg.get("model", "openai/gpt-oss-120b")
+        self.fallback_provider = llm_cfg.get("fallback_provider") or ""
+        self.hermes = HermesSshLlm(llm_cfg.get("hermes_ssh_host", ""), llm_cfg.get("hermes_models", []),
+                                   reasoning=llm_cfg.get("hermes_reasoning", "medium"),
+                                   timeout_sec=llm_cfg.get("hermes_timeout_sec", 900))
+        # Quem produziu o último resumo: "hermes:<provider>/<model>" ou "groq".
+        self.last_provider: Optional[str] = None
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
+        if self.provider == "hermes_ssh":
+            try:
+                answer = self.hermes.complete(system_prompt, user_prompt, json_mode)
+            except HermesInProgress:
+                # Job vivo na VPS: a retomada acha o resultado. Trocar por Groq
+                # agora jogaria fora o resumo melhor que está quase pronto.
+                raise
+            except LlmUnavailable as exc:
+                if self.fallback_provider != "groq" or not self.api_key:
+                    raise
+                print(f"[Castanha] Hermes indisponível ({exc}); usando Groq como reserva", file=sys.stderr)
+                return self._call_groq(system_prompt, user_prompt, json_mode)
+            self.last_provider = f"hermes:{self.hermes.last_model}"
+            return answer
         if self.provider != "groq":
             # Outro provedor configurado nunca vai parar na Groq por engano.
-            raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; só 'groq' por enquanto")
+            raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; só 'hermes_ssh' e 'groq'")
         if not self.api_key:
             return ""
+        return self._call_groq(system_prompt, user_prompt, json_mode)
 
+    def _call_groq(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         url = "https://api.groq.com/openai/v1/chat/completions"
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -319,7 +499,9 @@ class MeetingSummarizer:
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
-                    return res["choices"][0]["message"]["content"]
+                    content = res["choices"][0]["message"]["content"]
+                    self.last_provider = "groq"
+                    return content
             except urllib.error.HTTPError as e:
                 corpo = ""
                 try:
@@ -414,15 +596,22 @@ Transcrição Bruta:
         audio_status = metadata.get("audio_status", "ok")
         audio_aviso = metadata.get("audio_diagnostico", "")
 
+        # Hermes tem contexto grande: sem partes, e a transcrição íntegra é
+        # anexada aqui em vez de pedir ao modelo que a reescreva.
+        sem_transcricao = self.provider == "hermes_ssh"
         llm_output = ""
+        narrativa = ""  # só o que a LLM escreveu; a barreira de identidade olha isso
         if raw_transcript.strip():
             try:
-                llm_output = self._call_llm(SILVER_SYSTEM_PROMPT, prompt)
+                narrativa = llm_output = self._call_llm(
+                    SILVER_NOTES_SYSTEM_PROMPT if sem_transcricao else SILVER_SYSTEM_PROMPT, prompt)
+                if sem_transcricao and narrativa.strip():
+                    llm_output = narrativa.strip() + f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}\n"
             except LlmTooLarge as e:
                 print(f"[Castanha] Transcrição grande para uma chamada ({e}); resumindo em partes...", file=sys.stderr)
-                llm_output = self._silver_em_partes(title, cabecalho, raw_transcript, self._tamanho_da_parte(prompt, e))
+                narrativa = llm_output = self._silver_em_partes(title, cabecalho, raw_transcript, self._tamanho_da_parte(prompt, e))
 
-        if llm_output and _unsupported_identity(llm_output, metadata):
+        if llm_output and _unsupported_identity(narrativa, metadata):
             # Não aproveita uma narrativa que atribui voz/presença à agenda.
             # O Bronze integral segue abaixo; a recusa fica explícita no Silver.
             llm_output = (f"# {title}\n\nResumo retido: atribuição de pessoa ou presença sem "

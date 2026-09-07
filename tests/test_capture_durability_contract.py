@@ -29,7 +29,7 @@ class TestCaptureDurabilityContract(unittest.TestCase):
                     "gold_dir": str(meetings / "gold"),
                 },
                 "zinom": {"enabled": False, "token": ""},
-                "llm": {"api_key": ""},
+                "llm": {"provider": "groq", "api_key": ""},
                 "transcription": {"groq_api_key": ""},
             }), encoding="utf-8")
             source = root / "volatile-audio.ogg"
