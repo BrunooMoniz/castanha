@@ -34,6 +34,7 @@ class TestCLI(unittest.TestCase):
         self.env = {
             "XDG_CONFIG_HOME": str(self.temp_dir / "config"),
             "XDG_STATE_HOME": str(self.temp_dir / "state"),
+            "CASTANHA_LANG": "pt_BR",
             "PATH": sys.executable + ":" + str(Path(sys.executable).parent),
         }
         self.cli_bin = Path(__file__).resolve().parent.parent / "bin" / "castanha"

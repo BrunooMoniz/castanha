@@ -14,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from castanha.config import get_config_file, load_config, save_config
 from castanha.engine import CastanhaEngine
+from castanha.i18n import t
 from castanha.state import StateManager
 from castanha.storage import MeetingStorage
 
@@ -37,41 +38,41 @@ def cmd_start(args):
     meeting_slug = getattr(args, "meeting", None)
     evento = _evento_da_agenda(getattr(args, "event", None))
     if getattr(args, "event", None) and evento is None:
-        print(f"[Castanha] Evento {args.event} não está na agenda carregada; gravando pelo título.", file=sys.stderr)
+        print(t("cli.start.event_not_in_agenda", event=args.event), file=sys.stderr)
     res = engine.start_recording(mode=mode, title=args.title, meeting_event=evento, meeting_slug=meeting_slug)
     if res.get("status") == "recording":
-        print(f"🌰 Gravação iniciada com sucesso! [PID: {res.get('pid')}]")
-        print(f"📌 Título: {res.get('title')}")
-        print(f"🎙️ Modo: {mode}")
+        print(t("cli.start.success", pid=res.get("pid")))
+        print(t("cli.start.title", title=res.get("title")))
+        print(t("cli.start.mode", mode=mode))
         if meeting_slug:
-            print(f"🔗 Vinculada à reunião: {meeting_slug}")
+            print(t("cli.start.linked", slug=meeting_slug))
         if res.get("mic_muted"):
-            print("🔇 ATENÇÃO: o microfone está MUDO no sistema/teclado. Desmute antes de falar.")
+            print(t("cli.start.mic_muted"))
     else:
-        print(f"❌ Erro: {res.get('message')}")
+        print(t("cli.erro", message=res.get("message")))
         sys.exit(1)
 
 def cmd_stop(args):
     engine = CastanhaEngine()
-    print("⏳ Finalizando reunião e processando notas...")
+    print(t("cli.stop.processing"))
     res = engine.stop_recording()
     if res.get("status") not in ("success", "partial"):
-        print(f"❌ Erro: {res.get('message')}")
+        print(t("cli.erro", message=res.get("message")))
         sys.exit(1)
 
     result = res.get("result", {})
     problemas = result.get("problemas") or []
 
     if not problemas:
-        print("✅ Reunião finalizada com sucesso!")
+        print(t("cli.stop.success"))
     else:
-        print("⚠️  Reunião finalizada COM PROBLEMA:")
+        print(t("cli.stop.with_problems"))
         for p in problemas:
             print(f"   · {p}")
 
-    print(f"📁 Bronze: {result.get('bronze_dir')}")
-    print(f"📝 Silver (Notas): {result.get('silver_file')}")
-    print(f"🧠 Gold (Fatos): {result.get('gold_file')}")
+    print(t("cli.stop.bronze", dir=result.get("bronze_dir")))
+    print(t("cli.stop.silver", file=result.get("silver_file")))
+    print(t("cli.stop.gold", file=result.get("gold_file")))
 
     # Código de saída honesto: quem chamar isto de script precisa saber.
     if problemas:
@@ -81,17 +82,17 @@ def cmd_pause(args):
     engine = CastanhaEngine()
     res = engine.pause_recording()
     if res.get("status") == "paused":
-        print("⏸️ Gravação pausada.")
+        print(t("cli.pause.done"))
     else:
-        print(f"❌ Erro: {res.get('message')}")
+        print(t("cli.erro", message=res.get("message")))
 
 def cmd_resume(args):
     engine = CastanhaEngine()
     res = engine.resume_recording()
     if res.get("status") == "recording":
-        print("▶️ Gravação retomada.")
+        print(t("cli.resume.done"))
     else:
-        print(f"❌ Erro: {res.get('message')}")
+        print(t("cli.erro", message=res.get("message")))
 
 def cmd_toggle(args):
     engine = CastanhaEngine()
@@ -109,21 +110,22 @@ def cmd_status(args):
         return
 
     status = state.get("status", "idle")
-    icons = {"idle": "⚪ Ocioso", "recording": "🔴 Gravando", "paused": "⏸️ Pausado", "processing": "⏳ Processando"}
-    print(f"Status: {icons.get(status, status)}")
+    icons = {"idle": t("cli.status.idle"), "recording": t("cli.status.recording"),
+             "paused": t("cli.status.paused"), "processing": t("cli.status.processing")}
+    print(t("cli.status.label", status=icons.get(status, status)))
     if status in ["recording", "paused"]:
         elapsed = state.get("elapsed_seconds", 0)
         mins, secs = divmod(elapsed, 60)
         hours, mins = divmod(mins, 60)
         timer = f"{hours:02d}:{mins:02d}:{secs:02d}" if hours else f"{mins:02d}:{secs:02d}"
-        print(f"Tempo decorrido: {timer}")
-        print(f"Modo: {state.get('mode')}")
+        print(t("cli.status.elapsed", timer=timer))
+        print(t("cli.status.mode", mode=state.get("mode")))
         if state.get("current_meeting"):
-            print(f"Reunião: {state['current_meeting'].get('title')}")
+            print(t("cli.status.meeting", title=state["current_meeting"].get("title")))
     
     if state.get("next_meeting"):
         next_m = state["next_meeting"]
-        print(f"Próxima reunião: {next_m.get('title')} ({next_m.get('start')})")
+        print(t("cli.status.next_meeting", title=next_m.get("title"), start=next_m.get("start")))
 
 def cmd_daemon(args):
     from castanha.daemon import run_daemon, running_daemon_pid
@@ -132,27 +134,27 @@ def cmd_daemon(args):
         import signal as _sig
         pid = running_daemon_pid()
         if pid is None:
-            print("Nenhum daemon rodando.")
+            print(t("cli.daemon.not_running"))
             return
         os.kill(pid, _sig.SIGTERM)
-        print(f"🌰 Daemon encerrado (PID {pid}).")
+        print(t("cli.daemon.stopped", pid=pid))
         return
 
     if args.status:
         pid = running_daemon_pid()
-        print(f"🌰 Daemon rodando (PID {pid})." if pid else "Nenhum daemon rodando.")
+        print(t("cli.daemon.running", pid=pid) if pid else t("cli.daemon.not_running"))
         return
 
     ja = running_daemon_pid()
     if ja is not None:
-        print(f"🌰 Já existe um daemon rodando (PID {ja}). Nada a fazer.")
+        print(t("cli.daemon.already_running", pid=ja))
         return
 
     if args.background:
         subprocess.Popen([sys.executable, "-m", "castanha.daemon"], cwd=str(project_root), start_new_session=True)
-        print("🌰 Daemon do Castanha iniciado em segundo plano.")
+        print(t("cli.daemon.background_started"))
     else:
-        print("🌰 Iniciando daemon do Castanha em primeiro plano (Ctrl+C para encerrar)...")
+        print(t("cli.daemon.foreground"))
         run_daemon()
 
 def cmd_config(args):
@@ -167,33 +169,33 @@ def cmd_notes(args):
     if slug:
         meeting = storage.get_meeting(slug)
         if not meeting:
-            print(f"Reunião '{slug}' não encontrada.")
+            print(t("cli.notes.not_found", slug=slug))
             sys.exit(1)
         if getattr(args, "json", False):
             print(json.dumps(meeting, indent=2, ensure_ascii=False))
             return
         print(f"📌 {meeting['title']}")
-        print(f"   Data: {meeting['when']} · Duração: {meeting['duration_seconds']}s · Modo: {meeting['mode']}")
-        print(f"   Status do áudio: {meeting['audio_status']}")
+        print(t("cli.notes.meta", when=meeting["when"], duration=meeting["duration_seconds"], mode=meeting["mode"]))
+        print(t("cli.notes.audio_status", status=meeting["audio_status"]))
         if meeting.get("attendees"):
-            print("   Participantes:")
+            print(t("cli.notes.attendees"))
             for a in meeting["attendees"]:
-                nome = a.get("name") or a.get("email") or "Sem nome"
+                nome = a.get("name") or a.get("email") or t("cli.notes.no_name")
                 email = f" <{a['email']}>" if a.get("email") and a.get("name") else ""
                 print(f"     · {nome}{email}")
         if meeting.get("recordings"):
-            print("   Gravações de áudio:")
+            print(t("cli.notes.recordings"))
             for r in meeting["recordings"]:
                 print(f"     · {r['filename']} ({r['size_human']}) -> {r['path']}")
         else:
-            print("   Gravações de áudio: (nenhuma no disco / apagada)")
+            print(t("cli.notes.recordings_none"))
         if meeting.get("summary_preview"):
-            print(f"   Resumo Executivo:\n     {meeting['summary_preview']}")
-        print(f"   Notas Silver: {meeting['silver_path']}")
+            print(t("cli.notes.summary", preview=meeting["summary_preview"]))
+        print(t("cli.notes.silver_path", path=meeting["silver_path"]))
         if meeting.get("has_transcript"):
-            print(f"   Transcrição: {meeting['transcript_path']}")
+            print(t("cli.notes.transcript", path=meeting["transcript_path"]))
         if meeting.get("gold_path"):
-            print(f"   Fatos Gold: {meeting['gold_path']}")
+            print(t("cli.notes.gold_path", path=meeting["gold_path"]))
         return
 
     notes = storage.list_recent_meetings(limit=args.limit)
@@ -205,11 +207,11 @@ def cmd_notes(args):
         return
 
     if not notes:
-        print("Nenhuma nota de reunião gravada ainda.")
+        print(t("cli.notes.none_yet"))
         return
-    print("Últimas reuniões registradas:")
+    print(t("cli.notes.recent"))
     for idx, n in enumerate(notes, 1):
-        recs = f" ({n.get('recordings_count', 0)} gravação/ões)" if n.get('recordings_count') else ""
+        recs = t("cli.notes.recordings_count", count=n.get("recordings_count", 0)) if n.get("recordings_count") else ""
         print(f" {idx}. {n['title']} ({n['when']}){recs} -> {n['silver_path']}")
     if args.open:
         subprocess.Popen(["xdg-open", str(storage.silver_dir)])
@@ -221,7 +223,7 @@ def cmd_delete_recording(args):
     if slug in ("last", "latest"):
         recentes = engine.storage.list_recent_meetings(limit=1)
         if not recentes:
-            print("Nenhuma reunião encontrada.")
+            print(t("cli.none_found"))
             sys.exit(1)
         slug = recentes[0]["slug"]
 
@@ -233,14 +235,14 @@ def cmd_delete_recording(args):
         return
 
     if res.get("status") == "ok":
-        print(f"🗑️ Gravação '{res.get('deleted_file')}' apagada com sucesso da reunião '{slug}'.")
+        print(t("cli.delete.success", file=res.get("deleted_file"), slug=slug))
         rem = res.get("remaining_count", 0)
         if rem > 0:
-            print(f"   Ainda restam {rem} gravação(ões) nesta reunião.")
+            print(t("cli.delete.remaining", count=rem))
         else:
-            print("   As notas em Silver, transcrição e dados no Zinom foram preservados.")
+            print(t("cli.delete.preserved"))
     else:
-        print(f"❌ Erro: {res.get('message')}")
+        print(t("cli.erro", message=res.get("message")))
         sys.exit(1)
 
 
@@ -251,9 +253,9 @@ def cmd_recordings_list(args):
         print(json.dumps({"recordings": recs}, ensure_ascii=False))
         return
     if not recs:
-        print(f"Nenhuma gravação de áudio encontrada para '{args.slug}'.")
+        print(t("cli.recordings.none", slug=args.slug))
         return
-    print(f"Gravações da reunião '{args.slug}':")
+    print(t("cli.recordings.list", slug=args.slug))
     for idx, r in enumerate(recs, 1):
         print(f" {idx}. {r['filename']} ({r['size_human']}) -> {r['path']}")
 
@@ -265,14 +267,14 @@ def cmd_sync(args):
     if args.all:
         resultados = sync_pending(limit=args.limit)
         if not resultados:
-            print("Nenhuma entrega pendente nesta execução.")
+            print(t("cli.sync.no_pending"))
             return
     elif args.slug:
         resultados = [sync_meeting(args.slug)]
     else:
         recentes = MeetingStorage().list_recent_meetings(limit=1)
         if not recentes:
-            print("Nenhuma reunião gravada ainda.")
+            print(t("cli.sync.no_meetings"))
             return
         resultados = [sync_meeting(recentes[0]["slug"])]
 
@@ -284,17 +286,18 @@ def cmd_sync(args):
     for r in resultados:
         if r.get("status") == "ok":
             fatos = r.get("facts_ingested", 0)
-            print(f"✅ {r['slug']}: salvo no Zinom" + (f", com {fatos} fato(s)" if fatos else ""))
+            print(t("cli.sync.ok", slug=r["slug"]) + (t("cli.sync.facts", count=fatos) if fatos else ""))
         elif r.get("status") == "pending":
             falhou = True
-            print(f"⏳ {r['slug']}: pendente ({r.get('reason') or 'aguardando nova tentativa'})")
+            print(t("cli.sync.pending", slug=r["slug"],
+                    reason=r.get("reason") or t("cli.sync.pending_default_reason")))
         elif r.get("status") == "tombstoned":
-            print(f"⏭️  {r['slug']}: exclusão no Zinom preservada")
+            print(t("cli.sync.tombstoned", slug=r["slug"]))
         elif r.get("status") == "skipped":
-            print(f"⏭️  {r['slug']}: não enviado ({r.get('reason')})")
+            print(t("cli.sync.skipped", slug=r["slug"], reason=r.get("reason")))
         else:
             falhou = True
-            print(f"❌ {r['slug']}: não salvou")
+            print(t("cli.sync.error", slug=r["slug"]))
             for e in r.get("errors", []):
                 print(f"     {e}")
     if falhou:
@@ -323,7 +326,7 @@ def cmd_retry(args):
         slugs = pendentes
     elif args.slug in ("last", "latest"):
         if not recentes:
-            sair("Nenhuma reunião encontrada.", 1)
+            sair(t("cli.none_found"), 1)
         slugs = [recentes[0]["slug"]]
     elif args.slug:
         slugs = [args.slug]
@@ -333,13 +336,13 @@ def cmd_retry(args):
         slugs = pendentes[:1]
 
     if not slugs:
-        sair("Nada pendente: nenhuma reunião com áudio aguardando transcrição.", 0)
+        sair(t("cli.retry.nothing_pending"), 0)
 
     resultados = []
     falhou = False
     for s in slugs:
         if not em_json:
-            print(f"⏳ Reprocessando reunião '{s}'...")
+            print(t("cli.retry.reprocessing", slug=s))
         res = engine.reprocess_meeting(s)
         resultados.append({"slug": s, **res})
         if res.get("status") not in ("success", "partial"):
@@ -356,16 +359,16 @@ def cmd_retry(args):
             res_data = r.get("result", {})
             problemas = res_data.get("problemas") or []
             if not problemas:
-                print(f"✅ {r['slug']}: áudio transcrito e notas geradas com sucesso!")
+                print(t("cli.retry.success", slug=r["slug"]))
             else:
-                print(f"⚠️  {r['slug']}: reprocessado com observações:")
+                print(t("cli.retry.partial", slug=r["slug"]))
                 for p in problemas:
                     print(f"     · {p}")
-            print(f"   📁 Bronze: {res_data.get('bronze_dir')}")
-            print(f"   📝 Silver: {res_data.get('silver_file')}")
-            print(f"   🧠 Gold:   {res_data.get('gold_file')}")
+            print(t("cli.retry.bronze", dir=res_data.get("bronze_dir")))
+            print(t("cli.retry.silver", file=res_data.get("silver_file")))
+            print(t("cli.retry.gold", file=res_data.get("gold_file")))
         else:
-            print(f"❌ {r['slug']}: erro ao reprocessar ({r.get('message')})")
+            print(t("cli.retry.error", slug=r["slug"], message=r.get("message")))
 
     # Código de saída honesto, como o `stop`: transcrição que falhou de novo
     # não é sucesso.
@@ -382,13 +385,13 @@ def cmd_agenda(args):
         return
 
     if not proximas:
-        print(f"Nenhuma reunião nas próximas {args.horas}h.")
+        print(t("cli.agenda.none", hours=args.horas))
         return
-    print(f"Próximas reuniões ({args.horas}h):")
+    print(t("cli.agenda.upcoming", hours=args.horas))
     for m in proximas:
         hora = m.start.astimezone().strftime("%d/%m %H:%M")
         conta = f" · {m.account}" if m.account else ""
-        pessoas = f" · {len(m.attendees)} participantes" if m.attendees else ""
+        pessoas = t("cli.agenda.attendees", count=len(m.attendees)) if m.attendees else ""
         chamada = f"\n      {m.conference_url}" if m.conference_url else ""
         print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
 
@@ -420,11 +423,11 @@ def cmd_agenda_refresh(args):
             }, ensure_ascii=False))
         else:
             n = len(proximas)
-            print(f"Agenda atualizada: {n} reunião(ões) encontrada(s) nas próximas {horas}h.")
+            print(t("cli.agenda.refreshed", count=n, hours=horas))
             for m in proximas:
                 hora = m.start.astimezone().strftime("%d/%m %H:%M")
                 conta = f" · {m.account}" if m.account else ""
-                pessoas = f" · {len(m.attendees)} participantes" if m.attendees else ""
+                pessoas = t("cli.agenda.attendees", count=len(m.attendees)) if m.attendees else ""
                 chamada = f"\n      {m.conference_url}" if m.conference_url else ""
                 print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
     except Exception as e:
@@ -433,7 +436,7 @@ def cmd_agenda_refresh(args):
             print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
             sys.exit(1)
         else:
-            print(f"Erro ao atualizar agenda: {e}", file=sys.stderr)
+            print(t("cli.agenda.refresh_error", error=e), file=sys.stderr)
             sys.exit(1)
 
 
@@ -467,22 +470,22 @@ def cmd_agenda_hide(args):
 
     chave = hide(args.uid, args.title)
     if not chave:
-        print("❌ Precisa de um uid ou series_key.")
+        print(t("cli.hidden.need_key"))
         sys.exit(1)
     _refresh_agenda_state()
-    print(f"🙈 Escondido: {args.title or chave}")
-    print("   Vale para a série inteira. Para voltar: castanha agenda unhide " + chave)
+    print(t("cli.hidden.hidden", title=args.title or chave))
+    print(t("cli.hidden.hint", chave=chave))
 
 
 def cmd_agenda_unhide(args):
     from castanha.hidden import unhide, unhide_all
 
     if args.all:
-        print(f"👁️  {unhide_all()} evento(s) voltaram a aparecer.")
+        print(t("cli.unhide.all", count=unhide_all()))
     elif args.uid:
-        print("👁️  De volta à agenda." if unhide(args.uid) else "Esse evento não estava escondido.")
+        print(t("cli.unhide.back") if unhide(args.uid) else t("cli.unhide.not_hidden"))
     else:
-        print("❌ Informe a chave ou use --all.")
+        print(t("cli.unhide.need_key"))
         sys.exit(1)
     _refresh_agenda_state()
 
@@ -495,41 +498,41 @@ def cmd_agenda_hidden(args):
         print(json.dumps({"hidden": escondidos}, ensure_ascii=False))
         return
     if not escondidos:
-        print("Nada escondido.")
+        print(t("cli.hidden_list.none"))
         return
-    print("Eventos que você mandou não mostrar:")
+    print(t("cli.hidden_list.title"))
     for e in escondidos:
-        print(f"  {e['title'] or '(sem título)'}\n     chave: {e['key']}")
+        print(f"  {e['title'] or t('cli.hidden_list.no_title')}\n     chave: {e['key']}")
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="castanha",
-        description="Castanha: Gravador e assistente de reuniões para Omarchy/Linux",
+        description=t("cli.help.description"),
     )
-    subparsers = parser.add_subparsers(dest="command", help="Comandos disponíveis")
+    subparsers = parser.add_subparsers(dest="command", help=t("cli.help.commands"))
 
     # Start
-    p_start = subparsers.add_parser("start", help="Inicia a gravação de uma reunião")
-    p_start.add_argument("--mode", choices=["dual", "mic_only"], default=None, help="Modo de gravação")
-    p_start.add_argument("--mic-only", action="store_true", help="Atalho para modo apenas microfone (presencial)")
-    p_start.add_argument("--title", type=str, default=None, help="Título da reunião")
-    p_start.add_argument("--meeting", "--append", type=str, default=None, help="Slug de reunião existente para adicionar a gravação")
-    p_start.add_argument("--event", type=str, default=None, help="uid de um evento da agenda: a gravação leva título, participantes e link dele")
+    p_start = subparsers.add_parser("start", help=t("cli.help.start"))
+    p_start.add_argument("--mode", choices=["dual", "mic_only"], default=None, help=t("cli.help.mode"))
+    p_start.add_argument("--mic-only", action="store_true", help=t("cli.help.mic_only"))
+    p_start.add_argument("--title", type=str, default=None, help=t("cli.help.title"))
+    p_start.add_argument("--meeting", "--append", type=str, default=None, help=t("cli.help.meeting"))
+    p_start.add_argument("--event", type=str, default=None, help=t("cli.help.event"))
     p_start.set_defaults(func=cmd_start)
 
     # Stop
-    p_stop = subparsers.add_parser("stop", help="Finaliza a gravação e processa as notas")
+    p_stop = subparsers.add_parser("stop", help=t("cli.help.stop"))
     p_stop.set_defaults(func=cmd_stop)
 
     # Pause & Resume
-    p_pause = subparsers.add_parser("pause", help="Pausa a gravação")
+    p_pause = subparsers.add_parser("pause", help=t("cli.help.pause"))
     p_pause.set_defaults(func=cmd_pause)
-    p_resume = subparsers.add_parser("resume", help="Retoma a gravação")
+    p_resume = subparsers.add_parser("resume", help=t("cli.help.resume"))
     p_resume.set_defaults(func=cmd_resume)
 
     # Toggle (para atalho de teclado global)
-    p_toggle = subparsers.add_parser("toggle", help="Inicia ou para a gravação (ideal para atalho de teclado)")
+    p_toggle = subparsers.add_parser("toggle", help=t("cli.help.toggle"))
     p_toggle.add_argument("--mode", choices=["dual", "mic_only"], default=None)
     p_toggle.add_argument("--mic-only", action="store_true")
     p_toggle.add_argument("--title", type=str, default=None)
@@ -537,101 +540,101 @@ def main():
     p_toggle.set_defaults(func=cmd_toggle)
 
     # Status
-    p_status = subparsers.add_parser("status", help="Exibe o status atual do gravador")
-    p_status.add_argument("--json", action="store_true", help="Saída em formato JSON")
+    p_status = subparsers.add_parser("status", help=t("cli.help.status"))
+    p_status.add_argument("--json", action="store_true", help=t("cli.help.json"))
     p_status.set_defaults(func=cmd_status)
 
     # Daemon
-    p_daemon = subparsers.add_parser("daemon", help="Gerencia o daemon em background")
-    p_daemon.add_argument("--background", "-b", action="store_true", help="Roda em segundo plano desanexado")
-    p_daemon.add_argument("--stop", action="store_true", help="Encerra o daemon que estiver rodando")
-    p_daemon.add_argument("--status", action="store_true", help="Diz se há daemon rodando, e qual PID")
+    p_daemon = subparsers.add_parser("daemon", help=t("cli.help.daemon"))
+    p_daemon.add_argument("--background", "-b", action="store_true", help=t("cli.help.daemon_background"))
+    p_daemon.add_argument("--stop", action="store_true", help=t("cli.help.daemon_stop"))
+    p_daemon.add_argument("--status", action="store_true", help=t("cli.help.daemon_status"))
     p_daemon.set_defaults(func=cmd_daemon)
 
     # Config
-    p_config = subparsers.add_parser("config", help="Gerencia configurações")
+    p_config = subparsers.add_parser("config", help=t("cli.help.config"))
     p_config.add_argument("action", choices=["show", "path"], default="show", nargs="?")
     p_config.set_defaults(func=cmd_config)
 
     # Notes
-    p_notes = subparsers.add_parser("notes", help="Lista as últimas reuniões ou exibe detalhes de uma reunião")
-    p_notes.add_argument("slug", nargs="?", default=None, help="Slug da reunião para ver detalhes completos")
-    p_notes.add_argument("--open", action="store_true", help="Abre a pasta de notas no gerenciador de arquivos")
-    p_notes.add_argument("--json", action="store_true", help="Saída em JSON (usada pelo plugin do Omarchy)")
-    p_notes.add_argument("--limit", type=int, default=10, help="Quantas reuniões listar")
+    p_notes = subparsers.add_parser("notes", help=t("cli.help.notes"))
+    p_notes.add_argument("slug", nargs="?", default=None, help=t("cli.help.notes_slug"))
+    p_notes.add_argument("--open", action="store_true", help=t("cli.help.notes_open"))
+    p_notes.add_argument("--json", action="store_true", help=t("cli.help.notes_json"))
+    p_notes.add_argument("--limit", type=int, default=10, help=t("cli.help.notes_limit"))
     p_notes.set_defaults(func=cmd_notes)
 
     # Delete Recording (atalho direto)
-    p_del = subparsers.add_parser("delete-recording", aliases=["del-rec", "delete-audio"], help="Apaga uma gravação de áudio de uma reunião sem apagar as notas")
-    p_del.add_argument("slug", help="Slug da reunião (ou 'last' para a última)")
-    p_del.add_argument("arquivo", nargs="?", default=None, help="Nome do arquivo de áudio específico (ex: audio.ogg)")
-    p_del.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_del = subparsers.add_parser("delete-recording", aliases=["del-rec", "delete-audio"], help=t("cli.help.delete_recording"))
+    p_del.add_argument("slug", help=t("cli.help.slug_last"))
+    p_del.add_argument("arquivo", nargs="?", default=None, help=t("cli.help.arquivo"))
+    p_del.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_del.set_defaults(func=cmd_delete_recording)
 
     # Recordings (subcomando)
-    p_recs = subparsers.add_parser("recordings", help="Gerencia gravações de áudio das reuniões")
+    p_recs = subparsers.add_parser("recordings", help=t("cli.help.recordings"))
     recs_sub = p_recs.add_subparsers(dest="recordings_cmd")
-    p_recs_list = recs_sub.add_parser("list", help="Lista gravações de áudio de uma reunião")
-    p_recs_list.add_argument("slug", help="Slug da reunião")
+    p_recs_list = recs_sub.add_parser("list", help=t("cli.help.recordings_list"))
+    p_recs_list.add_argument("slug", help=t("cli.help.slug"))
     p_recs_list.add_argument("--json", action="store_true")
     p_recs_list.set_defaults(func=cmd_recordings_list)
-    p_recs_del = recs_sub.add_parser("delete", help="Apaga uma gravação de áudio de uma reunião")
-    p_recs_del.add_argument("slug", help="Slug da reunião")
+    p_recs_del = recs_sub.add_parser("delete", help=t("cli.help.recordings_delete"))
+    p_recs_del.add_argument("slug", help=t("cli.help.slug"))
     p_recs_del.add_argument("arquivo", nargs="?", default=None)
     p_recs_del.add_argument("--json", action="store_true")
     p_recs_del.set_defaults(func=cmd_delete_recording)
 
     # Sync
-    p_sync = subparsers.add_parser("sync", help="Reenvia uma reunião ao Zinom (a última, por padrão)")
-    p_sync.add_argument("slug", nargs="?", default=None, help="Slug da reunião; vazio = a última")
-    p_sync.add_argument("--all", action="store_true", help="Reenvia tudo que ficou pendente")
-    p_sync.add_argument("--limit", type=int, default=None, help="Máximo de pendências por execução; padrão: todas")
-    p_sync.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_sync = subparsers.add_parser("sync", help=t("cli.help.sync"))
+    p_sync.add_argument("slug", nargs="?", default=None, help=t("cli.help.sync_slug"))
+    p_sync.add_argument("--all", action="store_true", help=t("cli.help.sync_all"))
+    p_sync.add_argument("--limit", type=int, default=None, help=t("cli.help.sync_limit"))
+    p_sync.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_sync.set_defaults(func=cmd_sync)
 
     # Retry / Reprocess
     p_retry = subparsers.add_parser(
         "retry",
         aliases=["reprocess", "retry-upload", "retry-transcription"],
-        help="Tenta reenviar áudio para transcrição e processar notas/fatos/Zinom",
+        help=t("cli.help.retry"),
     )
-    p_retry.add_argument("slug", nargs="?", default=None, help="Slug da reunião (ou 'last' para a última reunião); sem slug, a última pendente")
-    p_retry.add_argument("--all", action="store_true", help="Reprocessa todas as reuniões pendentes de transcrição")
-    p_retry.add_argument("--limit", type=int, default=20, help="Quantas reuniões olhar com --all")
-    p_retry.add_argument("--json", action="store_true", help="Saída em JSON")
+    p_retry.add_argument("slug", nargs="?", default=None, help=t("cli.help.retry_slug"))
+    p_retry.add_argument("--all", action="store_true", help=t("cli.help.retry_all"))
+    p_retry.add_argument("--limit", type=int, default=20, help=t("cli.help.retry_limit"))
+    p_retry.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_retry.set_defaults(func=cmd_retry)
 
     # Agenda
-    p_agenda = subparsers.add_parser("agenda", help="Próximas reuniões das contas Google conectadas no Zinom")
-    p_agenda.add_argument("--json", action="store_true", help="Saída em JSON")
-    p_agenda.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_agenda = subparsers.add_parser("agenda", help=t("cli.help.agenda"))
+    p_agenda.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_agenda.add_argument("--horas", type=int, default=12, help=t("cli.help.horas"))
     p_agenda.set_defaults(func=cmd_agenda)
 
     ag_sub = p_agenda.add_subparsers(dest="agenda_cmd")
 
-    p_refresh = ag_sub.add_parser("refresh", aliases=["sync", "update"], help="Bate nas agendas agora e atualiza o estado")
-    p_refresh.add_argument("--json", action="store_true", help="Saída em JSON")
-    p_refresh.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_refresh = ag_sub.add_parser("refresh", aliases=["sync", "update"], help=t("cli.help.agenda_refresh"))
+    p_refresh.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_refresh.add_argument("--horas", type=int, default=12, help=t("cli.help.horas"))
     p_refresh.set_defaults(func=cmd_agenda_refresh)
 
-    p_hide = ag_sub.add_parser("hide", help="Para de mostrar um evento (a série inteira)")
-    p_hide.add_argument("uid", help="uid ou series_key do evento (o painel manda o series_key)")
-    p_hide.add_argument("--title", default="", help="Título, só para você reconhecer na lista")
+    p_hide = ag_sub.add_parser("hide", help=t("cli.help.agenda_hide"))
+    p_hide.add_argument("uid", help=t("cli.help.hide_uid"))
+    p_hide.add_argument("--title", default="", help=t("cli.help.hide_title"))
     p_hide.set_defaults(func=cmd_agenda_hide)
 
-    p_unhide = ag_sub.add_parser("unhide", help="Volta a mostrar um evento escondido")
-    p_unhide.add_argument("uid", nargs="?", default=None, help="Chave a reexibir; vazio com --all limpa tudo")
-    p_unhide.add_argument("--all", action="store_true", help="Volta a mostrar todos")
+    p_unhide = ag_sub.add_parser("unhide", help=t("cli.help.agenda_unhide"))
+    p_unhide.add_argument("uid", nargs="?", default=None, help=t("cli.help.unhide_uid"))
+    p_unhide.add_argument("--all", action="store_true", help=t("cli.help.unhide_all"))
     p_unhide.set_defaults(func=cmd_agenda_unhide)
 
-    p_hidden = ag_sub.add_parser("hidden", help="Lista o que você mandou não mostrar")
+    p_hidden = ag_sub.add_parser("hidden", help=t("cli.help.agenda_hidden"))
     p_hidden.add_argument("--json", action="store_true")
     p_hidden.set_defaults(func=cmd_agenda_hidden)
 
     # Atalho de nível superior para atualizar agenda imediatamente
-    p_top_refresh = subparsers.add_parser("refresh-agenda", help="Atualiza a agenda imediatamente nas contas e feeds")
-    p_top_refresh.add_argument("--json", action="store_true", help="Saída em JSON")
-    p_top_refresh.add_argument("--horas", type=int, default=12, help="Janela em horas")
+    p_top_refresh = subparsers.add_parser("refresh-agenda", help=t("cli.help.refresh_agenda"))
+    p_top_refresh.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_top_refresh.add_argument("--horas", type=int, default=12, help=t("cli.help.horas"))
     p_top_refresh.set_defaults(func=cmd_agenda_refresh)
 
     args = parser.parse_args()

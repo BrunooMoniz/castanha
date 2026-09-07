@@ -37,7 +37,8 @@ class TestDurableJobs(unittest.TestCase):
         }))
         for patcher in (
             patch.dict('os.environ', {'XDG_CONFIG_HOME': str(self.root / 'config'),
-                                     'XDG_STATE_HOME': str(self.root / 'state')}),
+                                     'XDG_STATE_HOME': str(self.root / 'state'),
+                                     'CASTANHA_LANG': 'pt_BR'}),
             patch('castanha.engine.notify'),
             patch('castanha.engine.measure_channel_levels', return_value=[ChannelLevels(0, 'mic', -30, -10, False)]),
             patch('castanha.engine.probe_duration_seconds', return_value=30),

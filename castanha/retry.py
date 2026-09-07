@@ -78,8 +78,9 @@ def drain_queue(storage=None, now=None, limit=5):
                 write_json(receipt_path, receipt)
                 results.append(result)
             except (OSError, ValueError, TypeError) as exc:
+                from castanha.i18n import t
                 results.append({"slug": slug, "status": "error", "error_type": type(exc).__name__,
-                                "reason": "Checkpoint indisponível; arquivos preservados"})
+                                "reason": t("retry.reason_checkpoint_unavailable")})
     return results
 
 

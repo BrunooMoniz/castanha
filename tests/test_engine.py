@@ -55,6 +55,7 @@ class TestEngine(unittest.TestCase):
         self.env = patch.dict("os.environ", {
             "XDG_CONFIG_HOME": str(self.temp_dir / "config"),
             "XDG_STATE_HOME": str(self.temp_dir / "state"),
+            "CASTANHA_LANG": "pt_BR",
         })
         self.env.start()
 

@@ -125,7 +125,8 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
             return {"slug": slug, **result["zinom"]}
         if jobs:
             if _finalizer_status(StateManager().read(), slug) == "protected":
-                return {"slug": slug, "status": "pending", "reason": "Finalizador ativo ou identidade indisponível"}
+                from castanha.i18n import t
+                return {"slug": slug, "status": "pending", "reason": t("sync.reason_finalizer_active")}
             reconciled = _reconcile_finished_capture_locked(slug, storage)
             delivery = metadata.get("zinom") or {}
             delivered_current = (delivery.get("note_status") == "ok" and delivery.get("remember_id")
@@ -170,11 +171,12 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
                 audio_file = candidates[0]
 
         if audio_file:
-            from castanha.audio import AUDIO_STATUS_MESSAGES, classify_audio, measure_channel_levels
+            from castanha.i18n import audio_status_message
+            from castanha.audio import classify_audio, measure_channel_levels
             levels = measure_channel_levels(audio_file, mode=metadata.get("mode", "dual"))
             st = classify_audio(levels)
             metadata["audio_status"] = st
-            metadata["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(st, "")
+            metadata["audio_diagnostico"] = audio_status_message(st)
 
     silver = silver_file.read_text(encoding="utf-8") if silver_file.exists() else ""
     gold = _read_json(gold_file)

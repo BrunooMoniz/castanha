@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from castanha.audio import (
-    AUDIO_STATUS_MESSAGES,
     AudioRecorder,
     RecordingResult,
     classify_audio,
@@ -25,6 +24,7 @@ from castanha.channel_transcription import transcribe_dual
 from castanha.capture_gate import capture_start
 from castanha.config import load_config
 from castanha.durability import atomic_write, write_json, meeting_lock, sync_directory, file_sha256
+from castanha.i18n import audio_status_message, t
 from castanha.state import StateManager
 from castanha.storage import MeetingStorage
 from castanha.summarizer import MeetingSummarizer
@@ -40,13 +40,13 @@ def notify(title: str, message: str, actions: Optional[list] = None, timeout: in
             res = subprocess.run(cmd, capture_output=True, text=True)
             return res.stdout.strip()
         except OSError as exc:
-            print(f"[Castanha] Notificação indisponível ({type(exc).__name__}); processamento continua", file=sys.stderr)
+            print(t("notify.unavailable", exc=type(exc).__name__), file=sys.stderr)
             return None
     else:
         try:
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as exc:
-            print(f"[Castanha] Notificação indisponível ({type(exc).__name__}); processamento continua", file=sys.stderr)
+            print(t("notify.unavailable", exc=type(exc).__name__), file=sys.stderr)
         return None
 
 class CastanhaEngine:
@@ -117,9 +117,8 @@ class CastanhaEngine:
         mic_muted = is_default_source_muted()
         if mic_muted:
             notify(
-                "Microfone mudo! 🔇",
-                "O microfone está mudo no sistema ou no teclado. Desmute antes de falar, "
-                "senão a gravação sai em silêncio.",
+                t("notify.mic_muted_title"),
+                t("notify.mic_muted_body"),
                 timeout=10000,
             )
 
@@ -170,8 +169,8 @@ class CastanhaEngine:
             "error": None,
         })
 
-        mode_label = "Microfone + Chamada" if chosen_mode == "dual" else "Somente Microfone"
-        notify("Gravação Iniciada 🌰", f"{meeting_title}\nModo: {mode_label}")
+        mode_label = t("mode.dual") if chosen_mode == "dual" else t("mode.mic_only")
+        notify(t("notify.started_title"), t("notify.started_body", title=meeting_title, mode_label=mode_label))
         return {
             "status": "recording",
             "pid": proc.pid,
@@ -193,7 +192,7 @@ class CastanhaEngine:
                 return {"status": "error", "message": str(e)}
 
         self.state_mgr.write({"status": "paused"})
-        notify("Gravação Pausada ⏸️", "Clique em Retomar quando continuar.")
+        notify(t("notify.paused_title"), t("notify.paused_body"))
         return {"status": "paused"}
 
     def resume_recording(self) -> Dict[str, Any]:
@@ -210,7 +209,7 @@ class CastanhaEngine:
                 return {"status": "error", "message": str(e)}
 
         self.state_mgr.write({"status": "recording"})
-        notify("Gravação Retomada ▶️", "Capturando áudio da reunião.")
+        notify(t("notify.resumed_title"), t("notify.resumed_body"))
         return {"status": "recording"}
 
     def stop_recording(self) -> Dict[str, Any]:
@@ -219,7 +218,7 @@ class CastanhaEngine:
             return {"status": "error", "message": "Nenhuma gravação em andamento para finalizar."}
 
         self.state_mgr.write({"status": "processing", "processing_pid": os.getpid()})
-        notify("Finalizando Reunião ⏳", "Processando transcrição e gerando notas...")
+        notify(t("notify.finishing_title"), t("notify.finishing_body"))
 
         pid = state.get("pid")
         audio_path = Path(state.get("audio_path", ""))
@@ -295,9 +294,9 @@ class CastanhaEngine:
                               "current_meeting": None, "capture_slug": None, "capture_job_id": None,
                               "elapsed_seconds": 0, "last_result": result["result"]})
         if result["status"] == "partial":
-            notify("Gravação preservada, processamento pendente", title, timeout=10000)
+            notify(t("notify.preserved_title"), title, timeout=10000)
         else:
-            notify("Notas Prontas! 🌰", title)
+            notify(t("notify.notes_ready_title"), title)
         return result
 
     def _por_canal(self) -> bool:
@@ -572,7 +571,7 @@ class CastanhaEngine:
                         bronze_audio_file=last_job["audio_path"], transcription_provider=provider,
                         memory_recording_ids=[r["id"] for r in memory_records],
                         transcription_error=transcription_error, audio_status=audio_status,
-                        audio_diagnostico=AUDIO_STATUS_MESSAGES.get(audio_status, ""),
+                        audio_diagnostico=audio_status_message(audio_status),
                         audio_levels=last_job.get("audio_levels", []),
                         processing_status="pending" if errors else "complete")
         write_json(bronze / "metadata.json", metadata)
@@ -603,8 +602,8 @@ class CastanhaEngine:
                 "summary_status": "pending", "summary_error": str(exc),
                 # O recibo antigo (se houver) fica no metadata; o resultado desta
                 # rodada é pendente, senão a fila zera o backoff e o CLI diz "salvo".
-                "zinom": {"status": "pending", "reason": f"Resumo pendente: {exc}"},
-                "problemas": errors + [f"Resumo pendente: {exc}"]}}
+                "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
+                "problemas": errors + [t("engine.problem_summary_pending", exc=exc)]}}
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
         zinom_status = self.zinom.ingest_meeting(
@@ -617,9 +616,9 @@ class CastanhaEngine:
                 job["stage"] = "done"
                 write_json(job_file, job)
         if audio_status in ("sem_audio", "mic_mudo"):
-            errors.append(AUDIO_STATUS_MESSAGES[audio_status])
+            errors.append(audio_status_message(audio_status))
         if any(r.get("transcription_provider") == "mock" for r in records):
-            errors.append("Transcrição simulada preservada separadamente, não enviada à memória")
+            errors.append(t("engine.problem_mock_transcription"))
         if zinom_status.get("facts_status") == "pending_lineage":
             errors.append(zinom_status["reason"])
         if zinom_status.get("status") == "error":
@@ -647,7 +646,7 @@ class CastanhaEngine:
             if last_res and last_res.get("slug") == slug:
                 if res.get("remaining_count", 0) == 0:
                     last_res["audio_status"] = "audio_apagado"
-                    last_res["audio_diagnostico"] = "Gravação de áudio apagada (notas e transcrição preservadas)"
+                    last_res["audio_diagnostico"] = t("audio_status.audio_apagado")
                     self.state_mgr.write({"last_result": last_res})
         return res
 
@@ -725,7 +724,7 @@ class CastanhaEngine:
                 r.get("transcribed") is False or (r.get("transcribed") is None and not texto_antes.strip()))
         ]
 
-        notify("Reprocessando Reunião ⏳", f"{title}\nEnviando para transcrição e gerando notas...")
+        notify(t("notify.reprocessing_title"), t("notify.reprocessing_body", title=title))
 
         erros: List[str] = []
         provider_final = None
@@ -746,7 +745,7 @@ class CastanhaEngine:
             if indice == 0:
                 meta = self.storage._read_bronze_metadata(slug)
                 meta["audio_status"] = audio_status
-                meta["audio_diagnostico"] = AUDIO_STATUS_MESSAGES.get(audio_status, "")
+                meta["audio_diagnostico"] = audio_status_message(audio_status)
                 meta["audio_levels"] = [
                     {"canal": ch.channel, "origem": ch.label, "mean_db": ch.mean_db,
                      "max_db": ch.max_db, "silencio": ch.silent}
@@ -840,8 +839,8 @@ class CastanhaEngine:
                     "transcription_provider": meta.get("transcription_provider") or "failed",
                     "transcription_error": meta.get("transcription_error"),
                     "summary_status": "pending", "summary_error": str(exc),
-                    "zinom": {"status": "pending", "reason": f"Resumo pendente: {exc}"},
-                    "problemas": [f"Resumo pendente: {exc}"]}}
+                    "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
+                    "problemas": [t("engine.problem_summary_pending", exc=exc)]}}
             self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
             gold_path = self.storage.save_gold(slug, gold_data)
@@ -874,13 +873,13 @@ class CastanhaEngine:
 
         problemas = []
         if erros:
-            problemas.append(f"a transcrição falhou ({'; '.join(erros)})")
-            notify("Falha ao reprocessar ⚠️", f"{title}\nNão foi possível transcrever o áudio.", timeout=10000)
+            problemas.append(t("engine.problem_transcription_failed", errors="; ".join(erros)))
+            notify(t("notify.reprocess_fail_title"), t("notify.reprocess_fail_body", title=title), timeout=10000)
         else:
-            notify("Reunião Reprocessada! 🌰", f"{title}\nNotas e fatos atualizados.")
+            notify(t("notify.reprocessed_title"), t("notify.reprocessed_body", title=title))
 
         if meta.get("audio_status") in ("sem_audio", "mic_mudo"):
-            problemas.append(AUDIO_STATUS_MESSAGES.get(meta["audio_status"], meta["audio_status"]))
+            problemas.append(audio_status_message(meta["audio_status"]) or meta["audio_status"])
         if isinstance(zinom_status, dict) and zinom_status.get("status") == "error":
             problemas.extend(zinom_status.get("errors", []))
         result_summary["problemas"] = problemas

@@ -15,6 +15,7 @@ from castanha.config import get_state_dir
 from castanha.agenda import collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
+from castanha.i18n import t
 from castanha.state import StateManager
 from castanha.retry import RetryScheduler
 
@@ -52,7 +53,7 @@ def claim_pid_file() -> bool:
     """
     outro = running_daemon_pid()
     if outro is not None:
-        print(f"[Castanha] Já existe um daemon rodando (PID {outro}). Este não sobe.")
+        print(t("daemon.already_running", pid=outro))
         return False
     arquivo = pid_file()
     arquivo.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +144,7 @@ class CastanhaDaemon:
                                 name=f"alert-{next_m.uid}",
                             ).start()
                 except Exception as e:
-                    print(f"[Castanha Daemon] Erro ao checar calendário: {e}")
+                    print(t("daemon.calendar_error", error=e))
                     self.state_mgr.write({"agenda_error": str(e)})
 
             time.sleep(1)
@@ -151,15 +152,15 @@ class CastanhaDaemon:
     def _trigger_meeting_alert(self, meeting):
         title = meeting.title
         conf_url = meeting.conference_url
-        attendees = ", ".join([a.name for a in meeting.attendees[:3]]) or "Sem convidados"
+        attendees = ", ".join([a.name for a in meeting.attendees[:3]]) or t("daemon.no_attendees")
 
-        actions = [("record", "Gravar Reunião 🌰")]
+        actions = [("record", t("daemon.action_record"))]
         if conf_url:
-            actions.insert(0, ("join", "Entrar na Chamada 🌐"))
+            actions.insert(0, ("join", t("daemon.action_join")))
 
         chosen = notify(
-            f"Reunião em Instantes: {title}",
-            f"Participantes: {attendees}\nClique para entrar ou iniciar a gravação.",
+            t("daemon.meeting_soon_title", title=title),
+            t("daemon.meeting_soon_body", attendees=attendees),
             actions=actions,
             timeout=15000,
         )

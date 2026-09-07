@@ -6,12 +6,41 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bin_dir="$HOME/.local/bin"
 config_dir="$HOME/.config/castanha"
 
-echo "🌰 Configurando Castanha para Omarchy/Linux..."
+castanha_lang() {
+    case "${LC_ALL:-${LANG:-}}" in
+        [pP][tT]*) echo "pt" ;;
+        *) echo "en" ;;
+    esac
+}
+
+t() {
+    if [ "$(castanha_lang)" = "pt" ]; then
+        case "$1" in
+            welcome) echo "🌰 Configurando Castanha para Omarchy/Linux..." ;;
+            dep_missing) echo "⚠️  Aviso: dependência obrigatória '$2' não foi encontrada no PATH." ;;
+            cli_installed) echo "  ✔ CLI instalado em $2" ;;
+            config_created) echo "  ✔ Arquivo de configuração criado em $2" ;;
+            done) echo "🎉 Castanha configurado com sucesso!" ;;
+            bar_hint) echo "Para colocar o widget na barra:" ;;
+        esac
+    else
+        case "$1" in
+            welcome) echo "🌰 Setting up Castanha for Omarchy/Linux..." ;;
+            dep_missing) echo "⚠️  Warning: required dependency '$2' was not found in PATH." ;;
+            cli_installed) echo "  ✔ CLI installed at $2" ;;
+            config_created) echo "  ✔ Config file created at $2" ;;
+            done) echo "🎉 Castanha set up successfully!" ;;
+            bar_hint) echo "To place the widget on the bar:" ;;
+        esac
+    fi
+}
+
+t welcome
 
 # Verifica dependências obrigatórias
 for dep in ffmpeg ffprobe pactl python3; do
     if ! command -v "$dep" >/dev/null 2>&1; then
-        echo "⚠️  Aviso: dependência obrigatória '$dep' não foi encontrada no PATH."
+        t dep_missing "$dep"
     fi
 done
 
@@ -21,16 +50,16 @@ mkdir -p "$bin_dir" "$config_dir" "$HOME/Notes/Meetings/bronze" "$HOME/Notes/Mee
 ln -sf "$root/bin/castanha" "$bin_dir/castanha"
 chmod +x "$bin_dir/castanha"
 chmod +x "$root/bin/castanha"
-echo "  ✔ CLI instalado em $bin_dir/castanha"
+t cli_installed "$bin_dir/castanha"
 
 # 2. Configuração padrão se não existir
 if [ ! -f "$config_dir/config.json" ]; then
     cp "$root/config.example.json" "$config_dir/config.json"
-    echo "  ✔ Arquivo de configuração criado em $config_dir/config.json"
+    t config_created "$config_dir/config.json"
 fi
 
 echo ""
-echo "🎉 Castanha configurado com sucesso!"
-echo "Para colocar o widget na barra:"
+t done
+t bar_hint
 echo "  omarchy bar put io.github.brunoomoniz.castanha"
 echo ""

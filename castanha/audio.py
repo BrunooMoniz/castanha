@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from castanha.i18n import audio_status_message
+
 @dataclass
 class AudioDeviceInfo:
     source: str
@@ -319,8 +321,8 @@ def classify_audio(levels: List[ChannelLevels]) -> str:
 
 
 AUDIO_STATUS_MESSAGES = {
-    "ok": "Áudio capturado nos dois canais.",
-    "mic_mudo": "O canal do microfone saiu em silêncio: o mic estava mudo (teclado ou sistema). Só o áudio da chamada foi gravado.",
-    "sem_audio": "Nenhum canal captou áudio: a gravação está em silêncio do início ao fim.",
-    "desconhecido": "Não foi possível medir os níveis do áudio.",
+    "ok": audio_status_message("ok", locale="pt"),
+    "mic_mudo": audio_status_message("mic_mudo", locale="pt"),
+    "sem_audio": audio_status_message("sem_audio", locale="pt"),
+    "desconhecido": audio_status_message("desconhecido", locale="pt"),
 }

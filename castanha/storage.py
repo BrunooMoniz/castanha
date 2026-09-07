@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from castanha.config import load_config
 from castanha.durability import atomic_write, write_json
+from castanha.i18n import t
 
 AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".opus", ".flac", ".aac"}
 
@@ -328,7 +329,7 @@ class MeetingStorage:
         else:
             meta["bronze_audio_file"] = None
             meta["audio_status"] = "audio_apagado"
-            meta["audio_diagnostico"] = "Gravação de áudio apagada (notas e transcrição preservadas)"
+            meta["audio_diagnostico"] = t("audio_status.audio_apagado")
 
         meta_file = target_dir / "metadata.json"
         try:
