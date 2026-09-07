@@ -5,14 +5,19 @@ Existe separado de `calendar.py` porque aquele módulo é o leitor de iCal e o
 """
 
 import datetime
+import sys
+import time
 from typing import Any, Dict, List, Optional
 
 from castanha.calendar import MeetingEvent, get_upcoming_meetings
 from castanha.config import load_config
 from castanha.hidden import is_hidden, load_hidden
-from castanha.zinom_calendar import ZinomCalendar
+from castanha.zinom_calendar import ZinomCalendar, motivo_curto
 
 _zinom: Optional[ZinomCalendar] = None
+# Falha fora do ZinomCalendar (rede de segurança): a fonte não deve levantar,
+# mas se levantar o painel precisa saber.
+_erro_coleta: Optional[str] = None
 
 
 def _zinom_source(config: Dict[str, Any]) -> ZinomCalendar:
@@ -39,11 +44,13 @@ def collect_upcoming(
     if feeds:
         eventos.extend(get_upcoming_meetings(feeds, window_minutes=window_minutes))
 
+    global _erro_coleta
     try:
         eventos.extend(_zinom_source(cfg).upcoming(window_hours=max(1, window_minutes // 60), force=force))
+        _erro_coleta = None
     except Exception as e:
-        import sys as _sys
-        print(f"[Castanha] Agenda do Zinom indisponível: {e}", file=_sys.stderr)
+        _erro_coleta = motivo_curto(e)
+        print(f"[Castanha] Agenda do Zinom indisponível: {e}", file=sys.stderr)
 
     agora = datetime.datetime.now(datetime.timezone.utc)
     corte = agora - datetime.timedelta(minutes=15)
@@ -85,3 +92,22 @@ def next_timed(eventos: List[MeetingEvent]) -> Optional[MeetingEvent]:
 
 def next_meeting(config: Optional[Dict[str, Any]] = None) -> Optional[MeetingEvent]:
     return next_timed(collect_upcoming(config, window_minutes=720))
+
+
+def agenda_warning(config: Optional[Dict[str, Any]] = None, erro: Optional[BaseException] = None) -> Optional[str]:
+    """O aviso que vai para o painel, ou None quando o último ciclo foi inteiro bom.
+
+    Antes, uma agenda que falhava (limite de chamadas do hub, compartilhado
+    com o resto da máquina) virava lista vazia sem aviso, e o painel dizia
+    "nada nas próximas horas" como se fosse verdade.
+    """
+    fonte = _zinom_source(config or load_config())
+    motivo = (motivo_curto(erro) if erro is not None else None) or fonte.last_error or _erro_coleta
+    if not motivo:
+        return None
+    desde = fonte.stale_since
+    if desde:
+        # Mais de um dia sem ciclo bom: só a hora enganaria.
+        formato = "%H:%M" if (time.time() - desde) < 86400 else "%d/%m %H:%M"
+        return f"Agenda desatualizada desde {time.strftime(formato, time.localtime(desde))}: {motivo}"
+    return f"Agenda indisponível: {motivo}"

@@ -649,7 +649,7 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             visible: root.upcoming.length === 0
-            text: root.agendaError !== "" ? "Agenda indisponível: " + root.agendaError
+            text: root.agendaError !== "" ? root.agendaError
                                           : (root.refreshingAgenda ? "Atualizando agendas…" : "Nada nas próximas horas")
             color: root.agendaError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily

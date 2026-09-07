@@ -395,7 +395,7 @@ def cmd_agenda(args):
 
 def cmd_agenda_refresh(args):
     """Bate manualmente nas agendas (feeds iCal + contas Zinom) e atualiza o estado imediatamente."""
-    from castanha.agenda import collect_upcoming
+    from castanha.agenda import agenda_warning, collect_upcoming
     from castanha.config import load_config
     from castanha.state import StateManager
 
@@ -410,7 +410,7 @@ def cmd_agenda_refresh(args):
         mgr.write({
             "next_meeting": _proxima_com_hora(proximas_dicts),
             "upcoming_meetings": proximas_dicts,
-            "agenda_error": None,
+            "agenda_error": agenda_warning(cfg),
         })
         if getattr(args, "json", False):
             print(json.dumps({
@@ -428,7 +428,7 @@ def cmd_agenda_refresh(args):
                 chamada = f"\n      {m.conference_url}" if m.conference_url else ""
                 print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
     except Exception as e:
-        mgr.write({"agenda_error": str(e)})
+        mgr.write({"agenda_error": agenda_warning(cfg, e)})
         if getattr(args, "json", False):
             print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
             sys.exit(1)

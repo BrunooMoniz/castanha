@@ -60,8 +60,11 @@ class TestIcalDiaInteiro(unittest.TestCase):
 
 
 class TestZinomCalendarFalhas(unittest.TestCase):
-    """Tool ausente no hub é só o erro JSON-RPC -32602; um 404 do Google numa
-    agenda não rebaixa todas as outras à listagem magra por meia hora."""
+    """Agenda honesta: falha numa agenda mantém a última lista boa e avisa.
+
+    Antes, um rate limit do hub (60/min, compartilhado com o resto da máquina)
+    virava `[]` sem aviso, e o painel dizia "nada nas próximas horas".
+    """
 
     AUSENTE = "list_event_details devolveu erro: MCP error -32602: Tool list_event_details not found"
     GOOGLE_404 = ("list_event_details devolveu erro: Google Calendar 404: "
@@ -103,12 +106,75 @@ class TestZinomCalendarFalhas(unittest.TestCase):
 
         fonte._call = _call
 
+    def test_falha_numa_agenda_mantem_a_ultima_lista_boa_e_avisa(self):
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        self._respostas(fonte)
+        boa = fonte.upcoming()
+        self.assertEqual([e.uid for e in boa], ["ev-a", "ev-b"])
+        self.assertIsNone(fonte.last_error)
+        bom_em = fonte.stale_since
+        self.assertIsNotNone(bom_em)
+
+        self._respostas(fonte, {("list_event_details", "b"): ZinomError(self.GOOGLE_404, tool="list_event_details")})
+        de_novo = fonte.upcoming(force=True)
+        self.assertEqual([e.uid for e in de_novo], ["ev-a", "ev-b"])  # não virou só "a"
+        self.assertEqual(fonte.last_error, "Google Calendar 404: Not Found")  # sem URL
+        self.assertEqual(fonte.stale_since, bom_em)
+
+    def test_sem_ciclo_bom_fica_vazio_com_erro_e_sem_hora(self):
+        from castanha.zinom_adapter import ZinomError
+        from castanha.zinom_calendar import MOTIVO_LIMITE
+        fonte = self._fonte()
+        chamadas = []
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError("HTTP 429: Too Many Requests")}, chamadas)
+        self.assertEqual(fonte.upcoming(), [])
+        self.assertEqual(fonte.last_error, MOTIVO_LIMITE)
+        self.assertIsNone(fonte.stale_since)
+        # Estourou o limite: não bate nas outras agendas no mesmo ciclo.
+        self.assertEqual(chamadas, [("list_event_details", "a")])
+
+    def test_ciclo_bom_depois_da_falha_limpa_o_aviso(self):
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError("HTTP 429: Too Many Requests")})
+        fonte.upcoming()
+        self._respostas(fonte)
+        self.assertEqual(len(fonte.upcoming(force=True)), 2)
+        self.assertIsNone(fonte.last_error)
+
+    def test_falha_na_lista_de_agendas_nao_levanta_e_diz_sem_conexao(self):
+        from castanha.zinom_adapter import ZinomError
+        from castanha.zinom_calendar import MOTIVO_CONEXAO
+        fonte = self._fonte()
+        self._respostas(fonte)
+        fonte.upcoming()
+        fonte._calendars_at = 0.0  # a lista de agendas expirou
+
+        def _call(name, args):
+            raise ZinomError("<urlopen error [Errno 111] Connection refused>")
+        fonte._call = _call
+        self.assertEqual([e.uid for e in fonte.upcoming(force=True)], ["ev-a", "ev-b"])
+        self.assertEqual(fonte.last_error, MOTIVO_CONEXAO)
+
+    def test_falha_nao_e_rebatida_a_cada_minuto(self):
+        """Mesma cadência com falha: o daemon pergunta a cada 60 s, a fonte só vai ao hub a cada 300 s."""
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        chamadas = []
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError("HTTP 429: Too Many Requests")}, chamadas)
+        fonte.upcoming()
+        fonte.upcoming()
+        self.assertEqual(len(chamadas), 1)
+
+    # ---- tool ausente só pela forma JSON-RPC do hub
     def test_tool_ausente_rebaixa_para_a_listagem_magra(self):
         from castanha.zinom_adapter import ZinomError
         fonte = self._fonte()
         chamadas = []
         self._respostas(fonte, {("list_event_details", "a"): ZinomError(self.AUSENTE, tool="list_event_details")}, chamadas)
         self.assertEqual([e.uid for e in fonte.upcoming()], ["ev-a", "ev-b"])
+        self.assertIsNone(fonte.last_error)
         self.assertFalse(fonte._detalhe_disponivel)
         self.assertEqual(chamadas, [("list_event_details", "a"), ("list_events", "a"), ("list_events", "b")])
 
@@ -117,9 +183,10 @@ class TestZinomCalendarFalhas(unittest.TestCase):
         fonte = self._fonte()
         chamadas = []
         self._respostas(fonte, {("list_event_details", "a"): ZinomError(self.GOOGLE_404, tool="list_event_details")}, chamadas)
-        self.assertEqual([e.uid for e in fonte.upcoming()], ["ev-b"])
+        self.assertEqual(fonte.upcoming(), [])  # nunca houve ciclo bom
         self.assertNotEqual(fonte._detalhe_disponivel, False)
         self.assertEqual(chamadas, [("list_event_details", "a"), ("list_event_details", "b")])
+        self.assertIn("404", fonte.last_error)
 
     def test_tool_ausente_com_outro_nome_nao_rebaixa(self):
         from castanha.zinom_adapter import ZinomError
@@ -130,3 +197,17 @@ class TestZinomCalendarFalhas(unittest.TestCase):
         fonte.upcoming()
         self.assertNotEqual(fonte._detalhe_disponivel, False)
         self.assertNotIn(("list_events", "a"), chamadas)
+        self.assertIsNotNone(fonte.last_error)
+
+    def test_motivo_curto_fala_a_lingua_do_painel(self):
+        from castanha.zinom_adapter import ZinomError
+        from castanha.zinom_calendar import MOTIVO_CONEXAO, MOTIVO_LIMITE, motivo_curto
+        self.assertEqual(motivo_curto(ZinomError("HTTP 429: Rate limit exceeded")), MOTIVO_LIMITE)
+        self.assertEqual(motivo_curto(ZinomError("tools/call: rate limit exceeded for client")), MOTIVO_LIMITE)
+        self.assertEqual(motivo_curto(ZinomError("<urlopen error [Errno -3] Temporary failure in name resolution>")), MOTIVO_CONEXAO)
+        self.assertEqual(motivo_curto(ZinomError("The read operation timed out")), MOTIVO_CONEXAO)
+        self.assertEqual(motivo_curto(ZinomError("HTTP 502: Bad Gateway")), MOTIVO_CONEXAO)
+        self.assertEqual(motivo_curto(ZinomError("tools/call: Unauthorized")), "Unauthorized")
+        longo = motivo_curto(ZinomError("list_event_details devolveu erro: " + "x" * 200))
+        self.assertLessEqual(len(longo), 80)
+        self.assertNotIn("http", motivo_curto(ZinomError(self.GOOGLE_404)))
