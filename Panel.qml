@@ -1199,7 +1199,9 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           visible: noteRow.precisaRetry && !noteRow.aberta
-          text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang) : "󰀦  " + I18N.t("note.upload_pending", root.lang)
+          text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang)
+                : noteRow.note.transcription_pending ? "󰑐  " + I18N.t("note.transcription_pending", root.lang)
+                : "󰀦  " + I18N.t("note.upload_pending", root.lang)
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1295,6 +1297,17 @@ Panel {
       }
 
       // Diagnóstico de áudio se houver
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: !!(noteRow.note && noteRow.note.transcription_pending)
+        text: "󰑐  " + I18N.t("note.transcription_pending", root.lang)
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
       Text {
         textFormat: Text.PlainText
         width: parent.width

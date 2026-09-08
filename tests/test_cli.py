@@ -201,8 +201,9 @@ with patch("castanha.engine.get_transcriber") as provider:
 
         # Falha real da tentativa mantém o áudio e a segunda chance.
         failed = self._run_cli("retry", slug, "--json")
-        self.assertEqual(failed.returncode, 2, failed.stderr)
-        self.assertEqual(json.loads(failed.stdout)["results"][0]["result"]["transcription_provider"], "failed")
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertEqual(json.loads(failed.stdout)["results"][0]["result"]["transcription_provider"], "pending")
+        self.assertTrue(json.loads(failed.stdout)["results"][0]["result"]["transcription_pending"])
         notes = self._run_cli("notes", slug, "--json")
         self.assertEqual(notes.returncode, 0, notes.stderr)
         self.assertTrue(json.loads(notes.stdout)["can_retry"])
@@ -266,9 +267,10 @@ with patch("castanha.engine.get_transcriber") as provider:
         m_bronze = self._bronze_falho(slug)
         self._sem_transcritor()
         res = self._run_cli("retry", slug, "--json")
-        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertEqual(res.returncode, 0, res.stderr)
         data = json.loads(res.stdout)
-        self.assertEqual(data["results"][0]["result"]["transcription_provider"], "failed")
+        self.assertEqual(data["results"][0]["result"]["transcription_provider"], "pending")
+        self.assertTrue(data["results"][0]["result"]["transcription_pending"])
         self.assertNotIn("Simulada", (m_bronze / "transcript_raw.txt").read_text(encoding="utf-8"))
         notes = json.loads(self._run_cli("notes", "--json").stdout)["notes"]
         self.assertTrue([n for n in notes if n["slug"] == slug][0]["can_retry"])

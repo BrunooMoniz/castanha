@@ -83,7 +83,9 @@ class CastanhaEngine:
         except Exception as e:
             # Pelo nome, e não por isinstance: com a classe trocada por mock,
             # isinstance estoura.
-            if isinstance(e, TranscriptionPending) or transcriber.__class__.__name__ == "VpsSshTranscriber":
+            if isinstance(e, TranscriptionPending):
+                return "", "pending", str(e)
+            if transcriber.__class__.__name__ == "VpsSshTranscriber":
                 return "", "failed", str(e)
             print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...", file=sys.stderr)
             host = (self.config.get("transcription", {}) or {}).get("vps_ssh_host") or "zinom-vps-2"
@@ -426,6 +428,7 @@ class CastanhaEngine:
             metadata = {"slug": slug, "title": (state.get("current_meeting") or {}).get("title") or "Reunião",
                         "recorded_at": first["recorded_at"], "calendar_event": state.get("current_meeting") or {},
                         "mode": state.get("mode", "dual"), "recordings": []}
+        from castanha.transcription import TranscriptionPending
         for job_file, job in jobs:
             revision = self.config.get("transcription", {}).get("provider_revision", 0)
             if (self._por_canal() and type(revision) is int
@@ -485,14 +488,30 @@ class CastanhaEngine:
                                channel_provenance=transcription.raw_response.get("channel_provenance") is True,
                                channels=transcription.raw_response.get("channels") or [])
                 job.update(stage="transcribed", error=None)
+                job.pop("pending_reason", None)
+            except TranscriptionPending as exc:
+                # Um job remoto aceito, ou um transporte temporariamente
+                # indisponível, não é falha. O checkpoint continua pendente
+                # para que a próxima rodada consulte o mesmo job determinístico
+                # sem reenviar o áudio nem mostrar um falso erro.
+                job.update(stage="pending", provider="pending", error=None,
+                           pending_reason=str(exc))
             except Exception as exc:
                 job.update(error=str(exc), provider="failed")
+                job.pop("pending_reason", None)
             write_json(job_file, job)
 
         # Pendência/erro histórico também contam; o último job não pode apagá-los.
+        pending_jobs = [job for _, job in jobs
+                        if job.get("pending_reason") or
+                        (job.get("stage") == "pending" and job.get("provider") == "pending")]
         errors = [f"{job['id']}: a transcrição falhou ({job['error']})" if job.get("error")
-                  else f"{job['id']}: transcrição pendente"
-                  for _, job in jobs if job.get("error") or job.get("stage") not in ("transcribed", "done")]
+                  else f"{job['id']}: transcrição falhou"
+                  for _, job in jobs
+                  if job.get("error") or
+                  (job.get("stage") not in ("transcribed", "done") and job not in pending_jobs)]
+        pending_messages = [f"{job['id']}: {job.get('pending_reason') or 'transcrição pendente'}"
+                            for job in pending_jobs]
 
         # Reconstrói sempre a mesma transcrição a partir de checkpoints imutáveis.
         base = jobs_dir / "base_transcript.txt"
@@ -556,7 +575,7 @@ class CastanhaEngine:
                                or (not r.get("job_id") and bool(parts and base.exists())))]
         providers = {r["transcription_provider"] for r in memory_records}
         provider = ((next(iter(providers)) if len(providers) == 1 else "mixed") if providers
-                    else "failed" if errors else "mock" if any(r.get("transcription_provider") == "mock" for r in records)
+                    else "pending" if pending_jobs else "failed" if errors else "mock" if any(r.get("transcription_provider") == "mock" for r in records)
                     else "nenhum (áudio em silêncio)")
         statuses = {r.get("audio_status") for r in memory_records}
         audio_status = ("ok" if "ok" in statuses else "mic_mudo" if "mic_mudo" in statuses
@@ -571,11 +590,13 @@ class CastanhaEngine:
                         bronze_audio_file=last_job["audio_path"], transcription_provider=provider,
                         memory_recording_ids=[r["id"] for r in memory_records],
                         transcription_error=transcription_error, audio_status=audio_status,
+                        transcription_pending=bool(pending_jobs),
+                        transcription_pending_reason="; ".join(pending_messages) or None,
                         audio_diagnostico=audio_status_message(audio_status),
                         audio_levels=last_job.get("audio_levels", []),
-                        processing_status="pending" if errors else "complete")
+                        processing_status="pending" if errors or pending_jobs else "complete")
         write_json(bronze / "metadata.json", metadata)
-        if errors and self._por_canal():
+        if (errors or pending_jobs) and (self._por_canal() or pending_jobs):
             # Canal recusado não pode gerar Silver/Gold parcial nem entrega nova.
             return {"status": "partial", "result": {
                 "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
@@ -583,7 +604,23 @@ class CastanhaEngine:
                 "gold_file": str(self.storage.gold_dir / f"{slug}.json"),
                 "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
                 "transcription_provider": provider, "transcription_error": transcription_error,
-                "zinom": metadata.get("zinom") or {"status": "pending"}, "problemas": errors}}
+                "transcription_pending": bool(pending_jobs),
+                "transcription_pending_reason": metadata.get("transcription_pending_reason"),
+                "zinom": metadata.get("zinom") or {"status": "pending"},
+                "problemas": errors + pending_messages}}
+        if pending_jobs:
+            # Não gere Silver/Gold com uma transcrição que ainda não chegou.
+            # O Bronze e o job remoto permanecem intactos para a próxima rodada.
+            return {"status": "partial", "result": {
+                "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
+                "silver_file": str(self.storage.silver_dir / f"{slug}.md"),
+                "gold_file": str(self.storage.gold_dir / f"{slug}.json"),
+                "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
+                "transcription_provider": provider, "transcription_error": transcription_error,
+                "transcription_pending": True,
+                "transcription_pending_reason": metadata.get("transcription_pending_reason"),
+                "zinom": metadata.get("zinom") or {"status": "pending"},
+                "problemas": pending_messages}}
         from castanha.summarizer import LlmUnavailable
         try:
             silver_content = self.summarizer.generate_silver(metadata, transcript)
@@ -731,6 +768,7 @@ class CastanhaEngine:
         notify(t("notify.reprocessing_title"), t("notify.reprocessing_body", title=title))
 
         erros: List[str] = []
+        pendencias: List[str] = []
         provider_final = None
         novo_texto = False
         for indice, rec in enumerate(recordings):
@@ -799,7 +837,10 @@ class CastanhaEngine:
                                               transcription_error=motivo, audio_status=audio_status,
                                               transcription_provider=provider,
                                               duration_seconds=dur)
-                erros.append(f"{rec['filename']}: {motivo}")
+                if provider == "pending":
+                    pendencias.append(f"{rec['filename']}: {motivo}")
+                else:
+                    erros.append(f"{rec['filename']}: {motivo}")
 
         meta = self.storage._read_bronze_metadata(slug)
         transcript = self.storage.read_transcript(slug)
@@ -807,7 +848,9 @@ class CastanhaEngine:
         soma = sum(float(r.get("duration_seconds") or 0) for r in recordings)
         if soma > 0:
             meta["duration_seconds"] = soma
-        if erros and not transcript.strip():
+        if pendencias and not transcript.strip():
+            meta["transcription_provider"] = "pending"
+        elif erros and not transcript.strip():
             meta["transcription_provider"] = "failed"
         elif provider_final:
             meta["transcription_provider"] = provider_final
@@ -815,6 +858,8 @@ class CastanhaEngine:
                                         if r.get("transcription_provider") not in ("mock", "failed", "pending")
                                         and r.get("audio_status") != "sem_audio"]
         meta["transcription_error"] = "; ".join(erros) if erros else None
+        meta["transcription_pending"] = bool(pendencias)
+        meta["transcription_pending_reason"] = "; ".join(pendencias) or None
         self.storage.write_bronze_metadata(slug, meta)
 
         silver_path = self.storage.silver_dir / f"{slug}.md"
@@ -868,6 +913,8 @@ class CastanhaEngine:
             "audio_diagnostico": meta.get("audio_diagnostico", ""),
             "transcription_provider": provider_name,
             "transcription_error": meta.get("transcription_error"),
+            "transcription_pending": bool(pendencias),
+            "transcription_pending_reason": meta.get("transcription_pending_reason"),
             "zinom": zinom_status,
         }
 
@@ -881,6 +928,8 @@ class CastanhaEngine:
         if erros:
             problemas.append(t("engine.problem_transcription_failed", errors="; ".join(erros)))
             notify(t("notify.reprocess_fail_title"), t("notify.reprocess_fail_body", title=title), timeout=10000)
+        elif pendencias:
+            problemas.append(t("engine.problem_transcription_pending", errors="; ".join(pendencias)))
         else:
             notify(t("notify.reprocessed_title"), t("notify.reprocessed_body", title=title))
 

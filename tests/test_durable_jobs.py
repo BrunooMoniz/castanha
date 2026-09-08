@@ -248,7 +248,9 @@ class TestDurableJobs(unittest.TestCase):
         job = json.loads(next((bronze / '.jobs').glob('*.json')).read_text())
         self.assertEqual(job['stage'], 'pending')
         self.assertTrue(Path(job['audio_path']).exists())
-        self.assertIn('SSH', resultado['result']['transcription_error'] or '')
+        self.assertIsNone(resultado['result']['transcription_error'])
+        self.assertTrue(resultado['result']['transcription_pending'])
+        self.assertIn('SSH', resultado['result']['transcription_pending_reason'] or '')
 
     def test_all_summary_stages_receive_channel_identity_guardrail(self):
         from castanha import summarizer
@@ -304,7 +306,13 @@ class TestDurableJobs(unittest.TestCase):
             first = self.engine.stop_recording()
         self.assertEqual(first['status'], 'partial')
         slug = first['result']['slug']
-        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['processing_status'], 'pending')
+        metadata = self.engine.storage._read_bronze_metadata(slug)
+        self.assertEqual(metadata['processing_status'], 'pending')
+        self.assertEqual(metadata['transcription_provider'], 'pending')
+        self.assertIsNone(metadata['transcription_error'])
+        self.assertTrue(metadata['transcription_pending'])
+        self.assertIn('Aguardando VPS', metadata['transcription_pending_reason'])
+        self.assertTrue(first['result']['transcription_pending'])
         with patch('castanha.engine.get_transcriber') as provider:
             provider.return_value.transcribe.return_value = self.transcription()
             sync_pending(storage=self.engine.storage)
@@ -484,11 +492,14 @@ class TestDurableJobs(unittest.TestCase):
             provider.return_value.transcribe.side_effect = TranscriptionPending('erro persistente')
             result = self.engine.process_pending(slug)
         meta = json.loads((bronze / 'metadata.json').read_text())
-        self.assertEqual(meta['transcription_provider'], 'failed')
+        self.assertEqual(meta['transcription_provider'], 'pending')
         self.assertEqual(meta['audio_status'], 'desconhecido')
         self.assertEqual(meta['processing_status'], 'pending')
-        self.assertIn('erro persistente', meta['transcription_error'])
-        self.assertIn('erro persistente', result['result']['transcription_error'])
+        self.assertIsNone(meta['transcription_error'])
+        self.assertTrue(meta['transcription_pending'])
+        self.assertIn('erro persistente', meta['transcription_pending_reason'])
+        self.assertTrue(result['result']['transcription_pending'])
+        self.assertIn('erro persistente', result['result']['transcription_pending_reason'])
         self.assertEqual(result['status'], 'partial')
 
     def test_error_on_previously_completed_job_is_not_cleared_by_next_job(self):

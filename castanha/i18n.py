@@ -98,6 +98,10 @@ STRINGS = {
         "en": "transcription failed ({errors})",
         "pt": "a transcrição falhou ({errors})",
     },
+    "engine.problem_transcription_pending": {
+        "en": "transcription pending ({errors})",
+        "pt": "a transcrição está pendente ({errors})",
+    },
     "engine.problem_mock_transcription": {
         "en": "Simulated transcript kept separately, not sent to memory",
         "pt": "Transcrição simulada preservada separadamente, não enviada à memória",
