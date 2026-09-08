@@ -55,6 +55,7 @@ TestCase {
       Button {
         objectName: "hidden-event-action"
         visible: false
+        text: "This hidden action must not affect the flow geometry"
         width: 500
       }
 
@@ -97,6 +98,7 @@ TestCase {
       Button {
         objectName: "hidden-note-action"
         visible: false
+        text: "This hidden note action must not affect the flow geometry"
         width: 500
       }
 
@@ -151,6 +153,7 @@ TestCase {
     var hide = findChild(flow, "hide")
     compare(hide.text, data.locale === "pt" ? "Ocultar do Castanha" : "Hide from Castanha")
     verify(hide.y > findChild(flow, "join").y)
+    verify(flow.implicitHeight >= hide.y + hide.height)
     mouseClick(hide, hide.width / 2, hide.height / 2, Qt.LeftButton)
     compare(testCase.hideClicks, 1)
   }
@@ -164,6 +167,8 @@ TestCase {
     verifyContained(flow, ["retry", "notes", "transcript", "folder"])
     verify(findChild(flow, "hidden-note-action") !== null)
     verify(!findChild(flow, "hidden-note-action").visible)
-    verify(findChild(flow, "folder").y > findChild(flow, "retry").y)
+    var folder = findChild(flow, "folder")
+    verify(folder.y > findChild(flow, "retry").y)
+    verify(flow.implicitHeight >= folder.y + folder.height)
   }
 }
