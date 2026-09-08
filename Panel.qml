@@ -13,7 +13,6 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
-import "AudioMeter.js" as AudioMeterLogic
 import "DeliveryStatus.js" as DeliveryStatus
 import "i18n.js" as I18N
 
@@ -128,39 +127,14 @@ Panel {
   readonly property var systemSink: Pipewire.defaultAudioSink
   readonly property bool micMuted: micSource && micSource.audio ? micSource.audio.muted : false
 
-  PwObjectTracker {
-    objects: {
-      var tracked = []
-      if (root.micSource) tracked.push(root.micSource)
-      if (root.systemSink) tracked.push(root.systemSink)
-      return tracked
-    }
-  }
-
-  PwNodePeakMonitor {
-    id: micPeakMonitor
-    node: root.micSource
-    enabled: root.isRecording && !!root.micSource
-  }
-
-  PwNodePeakMonitor {
-    id: systemPeakMonitor
-    node: root.systemSink
-    enabled: root.isRecording && root.mode === "dual" && !!root.systemSink
-  }
-
-  readonly property real audioPeak: AudioMeterLogic.combinedPeak(
-    micPeakMonitor.peak, systemPeakMonitor.peak, mode, micMuted)
-
-  AudioMeter {
+  RecordingAudioMeter {
     id: audioMeter
-    active: root.isRecording
-    peak: root.audioPeak
+    recording: root.isRecording
+    mode: root.mode
+    micSource: root.micSource
+    systemSink: root.systemSink
+    micMuted: root.micMuted
   }
-
-  onModeChanged: audioMeter.reset()
-  onMicSourceChanged: audioMeter.reset()
-  onSystemSinkChanged: audioMeter.reset()
 
   // ----------------------------------------------------------- diagnósticos
   readonly property string lastAudioStatus: lastResult && lastResult.audio_status ? lastResult.audio_status : "ok"

@@ -11,6 +11,7 @@ ShellRoot {
   property int sampleTicks: 0
   property double silenceStartedMs: 0
   property bool firstSampleWasLoud: false
+  property bool recordingLifecycleOk: false
 
   function widthsAreStable() {
     var minLabel = Infinity, maxLabel = 0
@@ -30,14 +31,12 @@ ShellRoot {
     Qt.quit()
   }
 
-  PwNodePeakMonitor {
-    node: null
-    enabled: false
-  }
-
-  PwNodePeakMonitor {
-    node: null
-    enabled: false
+  Castanha.RecordingAudioMeter {
+    id: recordingMeter
+    recording: true
+    mode: "dual"
+    micSource: null
+    systemSink: null
   }
 
   Castanha.AudioMeter {
@@ -52,11 +51,20 @@ ShellRoot {
       root.sampleTicks++
       if (root.sampleTicks === 1) {
         root.firstSampleWasLoud = meter.text === "▁▁▁▁█"
+        root.recordingLifecycleOk = recordingMeter.text === "▁▁▁▁▁"
+                                    && !recordingMeter.micMonitoring
+                                    && !recordingMeter.systemMonitoring
+        recordingMeter.recording = false
+        root.recordingLifecycleOk = root.recordingLifecycleOk
+                                    && recordingMeter.text === ""
+                                    && !recordingMeter.micMonitoring
+                                    && !recordingMeter.systemMonitoring
         root.silenceStartedMs = Date.now()
         meter.peak = 0
       } else if (root.sampleTicks === 6) {
         var silenceElapsed = Date.now() - root.silenceStartedMs
         root.finish(root.firstSampleWasLoud
+                    && root.recordingLifecycleOk
                     && meter.text === "▁▁▁▁▁"
                     && silenceElapsed <= 1000
                     && root.widthsAreStable()
