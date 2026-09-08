@@ -173,7 +173,8 @@ class PluginLayoutTest(unittest.TestCase):
         self.assertIn('RecordingAudioMeter {', panel)
         self.assertIn('recording: root.isRecording', panel)
         self.assertIn('mode: root.mode', panel)
-        self.assertIn('audioPeak: stateData && stateData.audio_peak', panel)
+        self.assertIn('audioPeak: root.audioPeakFresh ? Number(stateData.audio_peak) : 0', panel)
+        self.assertIn('AudioMeterLogic.isFresh(audioPeakUpdatedAt, nowMs, isRecording)', panel)
         self.assertIn('micMuted: root.micMuted', panel)
         self.assertIn(
             'if (isRecording) return glyph + "  " + formatTime(elapsedSeconds) + "  " + audioMeter.text',
