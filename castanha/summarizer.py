@@ -237,44 +237,12 @@ def _grounding_text(value):
     return " ".join("".join(c for c in value if not unicodedata.combining(c)).split())
 
 
-def _calendar_aliases(metadata):
-    """Calendário é evidência de convite/RSVP, nunca de voz ou presença.
-
-    Inclui nomes curtos e email para não aceitar a mesma pessoa sob um alias.
-    Não tenta descobrir identidades pela transcrição nem por diarização.
-    """
-    aliases = set()
-    event = metadata.get("calendar_event") or {}
-    people = list(event.get("attendees") or [])
-    if isinstance(event.get("organizer"), dict):
-        people.append(event["organizer"])
-    elif isinstance(event.get("organizer"), str) and event["organizer"].strip():
-        people.append({"email": event["organizer"]})
-    for person in people:
-        for field in ("name", "email", "displayName"):
-            value = person.get(field)
-            if isinstance(value, str) and value.strip():
-                normalized = _grounding_text(value)
-                aliases.add(normalized)
-                if field != "email":
-                    aliases.update(word for word in normalized.split()
-                                   if word not in {"da", "de", "do", "das", "dos", "e"})
-    return aliases
-
-
-def _mentions_calendar_person(value, aliases):
-    normalized = _grounding_text(value)
-    return any(re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", normalized) for alias in aliases)
-
-
 # Termos de presença também cobrem a atribuição coletiva sem nome próprio.
-# Bloqueio conservador: a saída gerada não é uma fonte de presença/identidade.
+# Vale só para o Gold (fato durável): o Silver não é retido por citar convidado.
+# Em 07/09 a retenção do Silver inteiro descartava todo resumo real da Nora
+# Weekly, e o Zinom recebia um stub. O frontmatter já marca presença como
+# não verificada; o prompt já proíbe atribuir voz pela agenda.
 _PRESENCE = re.compile(r"\b(particip\w*|presen\w*|comparec\w*|attend\w*|joined|spoke|falou|falaram|disse|disseram)\b")
-
-
-def _unsupported_identity(value, metadata):
-    return (_mentions_calendar_person(value, _calendar_aliases(metadata))
-            or bool(_PRESENCE.search(_grounding_text(value))))
 
 
 def _ground_gold(data):
@@ -305,7 +273,8 @@ HERMES_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                    "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"]
 HERMES_POLL_SEC = 5
 HERMES_JSON_INSTRUCTION = "Responda SOMENTE com o objeto JSON pedido, sem texto antes ou depois."
-_SESSION_LINE = re.compile(r"^\s*session_id:[^\n]*\n?")
+# A CLI imprime "session_id: ..." antes OU depois da resposta (varia por versão).
+_SESSION_LINE = re.compile(r"^\s*session_id:[^\n]*\n?", re.M)
 # Caminho ou coisa parecida com chave não entra em mensagem de produto.
 _UNSAFE_TOKEN = re.compile(r"\S*/\S*|[A-Za-z0-9_-]{32,}")
 
@@ -389,7 +358,7 @@ class HermesSshLlm:
 
     @staticmethod
     def _answer(text: str) -> str:
-        answer = _SESSION_LINE.sub("", text, count=1).strip()
+        answer = _SESSION_LINE.sub("", text).strip()
         if not answer:
             raise _HermesJobFailed("resposta vazia")
         return answer
@@ -608,7 +577,7 @@ Transcrição Bruta:
         # anexada aqui em vez de pedir ao modelo que a reescreva.
         sem_transcricao = self.provider == "hermes_ssh"
         llm_output = ""
-        narrativa = ""  # só o que a LLM escreveu; a barreira de identidade olha isso
+        narrativa = ""  # só o que a LLM escreveu, sem a transcrição anexada
         if raw_transcript.strip():
             try:
                 narrativa = llm_output = self._call_llm(
@@ -618,13 +587,6 @@ Transcrição Bruta:
             except LlmTooLarge as e:
                 print(f"[Castanha] Transcrição grande para uma chamada ({e}); resumindo em partes...", file=sys.stderr)
                 narrativa = llm_output = self._silver_em_partes(title, cabecalho, raw_transcript, self._tamanho_da_parte(prompt, e))
-
-        if llm_output and _unsupported_identity(narrativa, metadata):
-            # Não aproveita uma narrativa que atribui voz/presença à agenda.
-            # O Bronze integral segue abaixo; a recusa fica explícita no Silver.
-            llm_output = (f"# {title}\n\nResumo retido: atribuição de pessoa ou presença sem "
-                          "vínculo de voz comprovado. Convite e RSVP não confirmam presença."
-                          f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}")
 
         # Sem LLM configurada não existe resumo. O template abaixo diz isso em vez
         # de inventar "decisões tomadas" que ninguém tomou.
@@ -688,7 +650,7 @@ Notas Silver:
 {notas}
 
 Transcrição:
-{raw_transcript[:4000]}
+{raw_transcript if self.provider == "hermes_ssh" else raw_transcript[:4000]}
 """
 
         llm_output = ""

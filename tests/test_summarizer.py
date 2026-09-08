@@ -248,16 +248,16 @@ class TestCalendarGrounding(unittest.TestCase):
                            'responseStatus': 'accepted'}]}}
         self.transcript = 'Áudio do sistema: orçamento aprovado para outubro.'
 
-    def test_silver_refuses_hallucinated_calendar_person_or_collective_attendance(self):
+    def test_silver_keeps_the_narrative_and_marks_presence_unverified(self):
+        # 07/09: reter o Silver inteiro por citar convidado descartava todo resumo real.
         for claim in ('Luigi participou da reunião.', 'LUIGI ROSSI estava presente.',
-                      'luigi@example.invalid confirmou o orçamento.', 'Todos os convidados participaram.',
-                      'Rossi explicou a proposta.'):
+                      'luigi@example.invalid confirmou o orçamento.', 'Rossi explicou a proposta.'):
             with self.subTest(claim=claim), patch.object(self.s, '_call_llm', return_value=claim):
                 silver = self.s.generate_silver(self.meta, self.transcript)
-            self.assertIn('Resumo retido', silver)
-            self.assertNotIn(claim, silver)
-            self.assertIn(self.transcript, silver)
+            self.assertNotIn('Resumo retido', silver)
+            self.assertIn(claim, silver)
             self.assertIn('evidence: "calendar_invitation"', silver)
+            self.assertIn('presence: "unverified"', silver)
             self.assertIn('rsvp: "accepted"', silver)
             self.assertIn('presence: "unverified"', silver)
             self.assertIn('speech: "unverified"', silver)
@@ -296,14 +296,13 @@ class TestCalendarGrounding(unittest.TestCase):
             self.assertEqual(gold['facts'], [])
             self.assertEqual(gold['people_notes'], [])
 
-    def test_chunked_summary_final_output_passes_same_barrier(self):
+    def test_chunked_summary_final_output_is_kept(self):
         calls = [LlmTooLarge(100, 200, '413')]
         with patch.object(self.s, '_call_llm', side_effect=calls), \
              patch.object(self.s, '_silver_em_partes', return_value='Luigi participou da reunião.'):
             silver = self.s.generate_silver(self.meta, self.transcript)
-        self.assertIn('Resumo retido', silver)
-        self.assertNotIn('Luigi participou', silver)
-        self.assertIn(self.transcript, silver)
+        self.assertNotIn('Resumo retido', silver)
+        self.assertIn('Luigi participou', silver)
 
     def test_generated_person_notes_keep_context_but_never_presence(self):
         # Contexto sobre um convidado fica; presença ou fala atribuída não.
@@ -320,7 +319,7 @@ class TestCalendarGrounding(unittest.TestCase):
         self.meta['calendar_event']['organizer'] = 'owner@example.invalid'
         with patch.object(self.s, '_call_llm', return_value='owner@example.invalid aprovou o orçamento.'):
             silver = self.s.generate_silver(self.meta, self.transcript)
-        self.assertIn('Resumo retido', silver)
+        self.assertIn('aprovou o orçamento', silver)
         self.assertIn('rsvp: "accepted"', silver)
         self.assertIn('presence: "unverified"', silver)
         # No Gold, o organizador é sujeito válido de um fato citado; só presença barra.
@@ -574,15 +573,27 @@ class TestHermesNoSummarizer(unittest.TestCase):
         self.assertIn("Transcrição Estruturada", chamadas[0])
         self.assertNotIn("Transcrição Bruta", silver)
 
-    def test_barreira_de_identidade_olha_a_narrativa_e_nao_a_transcricao_anexada(self):
+    def test_narrativa_do_hermes_fica_inteira_com_a_transcricao_anexada(self):
         s = self.summarizer()
-        with patch.object(s, "_call_llm", return_value="# Nora\n\n## 📌 Resumo Executivo\nOrçamento aprovado."):
+        with patch.object(s, "_call_llm", return_value="# Nora\n\n## 📌 Resumo Executivo\nLuigi defendeu o orçamento."):
             silver = s.generate_silver(self._meta(), "Luigi participou e disse que sim.")
         self.assertNotIn("Resumo retido", silver)
-        self.assertIn("Orçamento aprovado.", silver)
-        with patch.object(s, "_call_llm", return_value="Luigi participou da reunião."):
-            silver = s.generate_silver(self._meta(), "Fala neutra.")
-        self.assertIn("Resumo retido", silver)
+        self.assertIn("Luigi defendeu o orçamento.", silver)
+        self.assertIn("## 📝 Transcrição Bruta\nLuigi participou e disse que sim.", silver)
+
+    def test_session_id_e_removido_no_inicio_e_no_fim_da_resposta(self):
+        self.assertEqual(S.HermesSshLlm._answer("session_id: a\n\n# Resumo\n\nDecidido.\n"), "# Resumo\n\nDecidido.")
+        self.assertEqual(S.HermesSshLlm._answer("# Resumo\n\nDecidido.\n\n\nsession_id: 20260908_021756_3235f1\n"),
+                         "# Resumo\n\nDecidido.")
+        self.assertEqual(S.HermesSshLlm._answer('{"facts": []}\n\nsession_id: x\n'), '{"facts": []}')
+
+    def test_gold_no_hermes_recebe_a_transcricao_inteira(self):
+        s = self.summarizer()
+        longa = "Fala. " * 2000
+        prompts = []
+        with patch.object(s, "_call_llm", side_effect=lambda sp, up, json_mode=False: prompts.append(up) or '{"facts": []}'):
+            s.generate_gold(self._meta(), "# Nora\n\nnota", longa)
+        self.assertIn(longa.strip(), prompts[0])
 
 
 if __name__ == "__main__":
