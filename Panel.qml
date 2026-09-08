@@ -13,6 +13,7 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
+import "AudioMeter.js" as AudioMeterLogic
 import "DeliveryStatus.js" as DeliveryStatus
 import "i18n.js" as I18N
 
@@ -124,9 +125,42 @@ Panel {
   // O teste de 04/09 gravou 35 minutos de silêncio porque o mic estava mudo no
   // teclado. O painel passa a dizer isso antes, não depois.
   readonly property var micSource: Pipewire.defaultAudioSource
+  readonly property var systemSink: Pipewire.defaultAudioSink
   readonly property bool micMuted: micSource && micSource.audio ? micSource.audio.muted : false
 
-  PwObjectTracker { objects: root.micSource ? [root.micSource] : [] }
+  PwObjectTracker {
+    objects: {
+      var tracked = []
+      if (root.micSource) tracked.push(root.micSource)
+      if (root.systemSink) tracked.push(root.systemSink)
+      return tracked
+    }
+  }
+
+  PwNodePeakMonitor {
+    id: micPeakMonitor
+    node: root.micSource
+    enabled: root.isRecording && !!root.micSource
+  }
+
+  PwNodePeakMonitor {
+    id: systemPeakMonitor
+    node: root.systemSink
+    enabled: root.isRecording && root.mode === "dual" && !!root.systemSink
+  }
+
+  readonly property real audioPeak: AudioMeterLogic.combinedPeak(
+    micPeakMonitor.peak, systemPeakMonitor.peak, mode, micMuted)
+
+  AudioMeter {
+    id: audioMeter
+    active: root.isRecording
+    peak: root.audioPeak
+  }
+
+  onModeChanged: audioMeter.reset()
+  onMicSourceChanged: audioMeter.reset()
+  onSystemSinkChanged: audioMeter.reset()
 
   // ----------------------------------------------------------- diagnósticos
   readonly property string lastAudioStatus: lastResult && lastResult.audio_status ? lastResult.audio_status : "ok"
@@ -147,7 +181,8 @@ Panel {
   }
 
   readonly property string barText: {
-    if (isRecording || isPaused) return glyph + "  " + formatTime(elapsedSeconds)
+    if (isRecording) return glyph + "  " + formatTime(elapsedSeconds) + "  " + audioMeter.text
+    if (isPaused) return glyph + "  " + formatTime(elapsedSeconds)
     if (isProcessing) return glyph + "  " + I18N.t("status.saving", lang)
     // Reunião de amanhã na barra vira letreiro. Só entra o que é iminente.
     if (nextMeetingSoon) {
