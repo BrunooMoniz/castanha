@@ -361,17 +361,20 @@ class TestDurableJobs(unittest.TestCase):
         bronze.mkdir(parents=True)
         audio = bronze / 'audio.ogg'
         audio.write_bytes(b'legacy-original')
+        self.engine.config['transcription']['por_canal'] = True
         self.engine.storage.write_bronze_metadata(slug, {
             'slug': slug, 'title': 'Legacy', 'mode': 'mic_only',
             'recordings': [{'id': 'audio.ogg', 'filename': 'audio.ogg', 'path': str(audio),
                             'transcribed': False, 'duration_seconds': 1}],
         })
         original = audio.read_bytes()
-        with patch('castanha.engine.get_transcriber') as provider, \
+        with patch.object(self.engine, '_transcrever_por_canal') as transcribe_channels, \
              patch.object(self.engine.summarizer, 'generate_silver', return_value='## Resumo\n\nFala'), \
              patch.object(self.engine.summarizer, 'generate_gold', return_value={'facts': []}):
-            provider.return_value.transcribe.side_effect = [
-                TranscriptionPending('VPS ainda processando'), self.transcription()
+            transcribe_channels.side_effect = [
+                TranscriptionPending('VPS ainda processando, primeira consulta'),
+                TranscriptionPending('VPS ainda processando, segunda consulta'),
+                self.transcription()
             ]
             first = self.engine.reprocess_meeting(slug)
             meta = self.engine.storage._read_bronze_metadata(slug)
@@ -386,8 +389,14 @@ class TestDurableJobs(unittest.TestCase):
             self.assertEqual(audio.read_bytes(), original)
 
             second = self.engine.reprocess_meeting(slug)
-            self.assertEqual(second['result']['transcription_provider'], 'groq')
-            self.assertFalse(second['result']['transcription_pending'])
+            self.assertEqual(second['result']['transcription_provider'], 'pending')
+            self.assertTrue(second['result']['transcription_pending'])
+            self.assertEqual(audio.read_bytes(), original)
+
+            third = self.engine.reprocess_meeting(slug)
+            self.assertEqual(third['result']['transcription_provider'], 'groq')
+            self.assertFalse(third['result']['transcription_pending'])
+            self.assertEqual(transcribe_channels.call_count, 3)
             self.assertEqual(audio.read_bytes(), original)
 
     def test_mock_append_is_excluded_while_preserving_real_recording(self):

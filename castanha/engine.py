@@ -712,6 +712,9 @@ class CastanhaEngine:
 
     def _reprocess_legacy_locked(self, slug: str) -> Dict[str, Any]:
         bronze_dir = self.storage.bronze_dir / slug
+        # O caminho legado também precisa distinguir um job remoto pendente
+        # de uma falha terminal, antes de entrar no fluxo por canal.
+        from castanha.transcription import TranscriptionPending
 
         meta = self.storage._read_bronze_metadata(slug)
         title = meta.get("title") or slug
