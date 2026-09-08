@@ -15,8 +15,6 @@ class PluginLayoutTest(unittest.TestCase):
     def test_real_omarchy_buttons_stay_inside_panel(self):
         if not shutil.which("quickshell"):
             self.skipTest("quickshell não instalado")
-        if not os.environ.get("WAYLAND_DISPLAY"):
-            self.skipTest("sessão Wayland indisponível")
         if not (OMARCHY_SHELL / "Ui").is_dir() or not (OMARCHY_SHELL / "Commons").is_dir():
             self.skipTest("componentes do shell do Omarchy indisponíveis")
 
@@ -28,11 +26,15 @@ class PluginLayoutTest(unittest.TestCase):
             (config / "i18n.js").symlink_to(ROOT / "i18n.js")
             shutil.copy2(ROOT / "tests/fixtures/real_button_layout_shell.qml", config / "shell.qml")
 
+            environment = os.environ.copy()
+            environment["QT_QPA_PLATFORM"] = "offscreen"
+            environment.pop("WAYLAND_DISPLAY", None)
             result = subprocess.run(
                 ["quickshell", "--no-duplicate", "--path", str(config / "shell.qml"), "--no-color"],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=environment,
                 timeout=10,
                 check=False,
             )

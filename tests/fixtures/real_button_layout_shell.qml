@@ -98,7 +98,9 @@ ShellRoot {
       hidePt.clicked()
       hideEn.clicked()
 
-      var ok = root.hideClicks === 2
+      var ok = hidePt.visible && hidePt.enabled && hidePt.width > 0 && hidePt.height > 0
+            && hideEn.visible && hideEn.enabled && hideEn.width > 0 && hideEn.height > 0
+            && root.hideClicks === 2
             && root.contained(eventPt) && root.contained(eventEn)
             && root.contained(notePt) && root.contained(noteEn)
       console.info(ok ? "CASTANHA_REAL_LAYOUT_OK" : "CASTANHA_REAL_LAYOUT_FAIL")
