@@ -989,7 +989,8 @@ Panel {
         font.pixelSize: Style.font.caption
       }
 
-      Row {
+      PanelActionFlow {
+        width: parent.width
         spacing: Style.space(8)
         topPadding: Style.space(3)
 
@@ -1526,7 +1527,8 @@ Panel {
       }
 
       // Botões de ação principais (Notas, Transcrição, Pasta)
-      Row {
+      PanelActionFlow {
+        width: parent.width
         spacing: Style.space(8)
         topPadding: Style.space(4)
 
