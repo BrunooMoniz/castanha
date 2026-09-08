@@ -48,7 +48,10 @@ def main():
 
     engine.state_mgr.read = read
     engine.state_mgr.write = write
-    engine.recorder = SimpleNamespace(start=start)
+    engine.recorder = SimpleNamespace(
+        start=start,
+        peak_path=Path(lock_path).parent / "capture.peak",
+    )
     engine.storage = Mock()
     # Mesmo um start incorreto não pode disparar áudio ou subprocessos reais.
     with patch("subprocess.Popen", side_effect=AssertionError("Processo externo no probe")), \
