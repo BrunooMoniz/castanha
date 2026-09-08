@@ -374,6 +374,10 @@ class MeetingStorage:
             # A síntese entrou pela ponte Bronze; o recibo vivo é o do metadata.
             return previous
         receipt = legacy_delivery_projection(self.bronze_dir / slug)
+        if receipt is not None and receipt.get("status") == "ok":
+            from castanha.sync import _legacy_synthesis_requested
+            if _legacy_synthesis_requested(self.bronze_dir / slug, self):
+                return {**receipt, "status": "pending", "reason": "Síntese aguardando envio"}
         return receipt if receipt is not None else previous
 
     def status_projection(self, state: Dict[str, Any]) -> Dict[str, Any]:

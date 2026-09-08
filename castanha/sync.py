@@ -98,6 +98,13 @@ def reconcile_finished_capture(storage):
                 return slug
 
 
+def _legacy_synthesis_requested(bronze: Path, storage: MeetingStorage) -> bool:
+    """Retoma só síntese já tentada e com os derivados locais disponíveis."""
+    return ((bronze / ".brain-ingest").is_dir()
+            and (storage.silver_dir / f"{bronze.name}.md").is_file()
+            and (storage.gold_dir / f"{bronze.name}.json").is_file())
+
+
 def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[str, Any]:
     storage = storage or MeetingStorage()
     if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
@@ -112,7 +119,9 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     # sozinho pode sobrar de uma síntese recusada antes dessa validação.
     if (recovery.exists() or recovery.is_symlink()) and not (bronze / ".brain-ingest" / "destination.json").exists():
         from castanha.legacy_recovery import resume_legacy_recovery
-        return {"slug": slug, **resume_legacy_recovery(bronze, load_config().get("zinom", {}))}
+        recovered = resume_legacy_recovery(bronze, load_config().get("zinom", {}))
+        if recovered.get("status") != "ok" or not _legacy_synthesis_requested(bronze, storage):
+            return {"slug": slug, **recovered}
     with meeting_lock(bronze):
         metadata = _read_json(bronze / "metadata.json")
         if metadata.get("zinom") is not None and not isinstance(metadata["zinom"], dict):
@@ -203,8 +212,10 @@ def pending_candidates(storage: MeetingStorage):
             continue
         recovery = bronze / ".legacy-recovery"
         if (recovery.exists() or recovery.is_symlink()) and not (bronze / ".brain-ingest" / "destination.json").exists():
-            from castanha.legacy_recovery import legacy_recovery_pending
-            if legacy_recovery_pending(bronze):
+            from castanha.legacy_recovery import legacy_delivery_projection, legacy_recovery_pending
+            if legacy_recovery_pending(bronze) or (
+                    _legacy_synthesis_requested(bronze, storage)
+                    and (legacy_delivery_projection(bronze) or {}).get("status") == "ok"):
                 candidates.append(("", bronze.name))
             continue
         path = bronze / "metadata.json"

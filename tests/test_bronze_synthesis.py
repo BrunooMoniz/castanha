@@ -288,6 +288,18 @@ class TestLegacySyncPath(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_failed_synthesis_attempt_does_not_strand_legacy_recovery(self):
+        self._resume_failed_synthesis(with_notes=False)
+
+    def test_failed_synthesis_with_notes_finishes_after_recovery(self):
+        self._resume_failed_synthesis(with_notes=True)
+
+    def test_completed_recovery_keeps_requested_synthesis_in_queue(self):
+        self._resume_failed_synthesis(with_notes=True, complete_before_sync=True)
+
+    def test_historical_notes_without_synthesis_attempt_are_not_sent(self):
+        self._resume_failed_synthesis(with_notes=True, attempt_synthesis=False)
+
+    def _resume_failed_synthesis(self, *, with_notes, complete_before_sync=False, attempt_synthesis=True):
         import subprocess
         from castanha.legacy_recovery import prepare_legacy_manifest, submit_legacy_recovery
         from castanha.sync import pending_candidates, sync_meeting
@@ -303,10 +315,20 @@ class TestLegacySyncPath(unittest.TestCase):
         write_json(bronze / "metadata.json", metadata)
         (bronze / "transcript_raw.txt").write_text("Transcrição legada integral", encoding="utf-8")
         original = (bronze / "metadata.json").read_bytes()
+        if with_notes:
+            (self.storage.silver_dir / f"{slug}.md").write_text(SILVER, encoding="utf-8")
+            write_json(self.storage.gold_dir / f"{slug}.json", GOLD)
         prepare_legacy_manifest(bronze)
         self.client.default_state = "pending"
         first = submit_legacy_recovery(bronze, self.client, workspace="fixture-workspace")
         self.assertEqual(first["status"], "pending")
+        if not attempt_synthesis:
+            self.client.default_state = "completed"
+            self.assertEqual(sync_meeting(slug, self.storage)["status"], "ok")
+            self.assertEqual(len(self.client.requests), 1)
+            self.assertEqual(pending_candidates(self.storage), [])
+            self.assertEqual((bronze / "metadata.json").read_bytes(), original)
+            return
         failed = ingest_current_recordings(bronze, slug, metadata, self.client,
                                           workspace="fixture-workspace", silver_text=SILVER, gold=GOLD)
         self.assertEqual(failed["status"], "error")
@@ -314,8 +336,20 @@ class TestLegacySyncPath(unittest.TestCase):
         self.assertFalse((bronze / ".brain-ingest" / "destination.json").exists())
         self.assertEqual([s for _, s in pending_candidates(self.storage)], [slug])
         self.client.default_state = "completed"
+        if complete_before_sync:
+            submit_legacy_recovery(bronze, self.client, workspace="fixture-workspace")
+            self.assertEqual([s for _, s in pending_candidates(self.storage)], [slug],
+                             "síntese já solicitada continua na fila após concluir transcrição")
+            self.assertEqual(self.storage.delivery_projection(slug, failed)["status"], "pending",
+                             "transcrição entregue não conclui a síntese já solicitada")
         resumed = sync_meeting(slug, self.storage)
         self.assertEqual(resumed["status"], "ok", resumed)
+        if with_notes:
+            self.assertEqual(resumed["facts_ingested"], 2)
+            self.assertEqual([r["envelope"]["fidelidade"] for r in self.client.requests.values()],
+                             ["projecao", "sintese"])
+            self.assertEqual(pending_candidates(self.storage), [])
+            return
         self.assertEqual((bronze / "metadata.json").read_bytes(), original)
         self.assertEqual(pending_candidates(self.storage), [])
         self.assertEqual(self.storage.delivery_projection(slug, failed)["status"], "ok")
