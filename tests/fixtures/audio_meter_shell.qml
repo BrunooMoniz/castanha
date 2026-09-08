@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 import "." as Castanha
@@ -35,8 +34,7 @@ ShellRoot {
     id: recordingMeter
     recording: true
     mode: "dual"
-    micSource: null
-    systemSink: null
+    audioPeak: 0
   }
 
   Castanha.AudioMeter {

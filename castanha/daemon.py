@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Set
 
 from castanha.config import get_state_dir
@@ -15,6 +16,7 @@ from castanha.config import get_state_dir
 from castanha.agenda import agenda_warning, collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
+from castanha.audio import read_audio_peak
 from castanha.i18n import t
 from castanha.state import StateManager
 from castanha.retry import RetryScheduler
@@ -115,6 +117,15 @@ class CastanhaDaemon:
                             self.state_mgr.write({"elapsed_seconds": max(0, elapsed)})
                     except Exception:
                         pass
+                peak_path = state.get("audio_peak_path")
+                peak = read_audio_peak(Path(peak_path)) if peak_path else None
+                self.state_mgr.write({
+                    "audio_peak": peak if peak is not None else 0.0,
+                    "audio_peak_updated_at": now if peak is not None else 0.0,
+                })
+            elif state.get("audio_peak"):
+                # Pause, processing e idle nunca deixam a última barra presa.
+                self.state_mgr.write({"audio_peak": 0.0, "audio_peak_updated_at": 0.0})
 
             # 2. Verificação periódica de calendário (iCal + contas Google do Zinom)
             if agenda_ligada and (now - last_calendar_check > poll_interval):

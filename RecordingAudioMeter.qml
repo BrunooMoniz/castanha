@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell.Services.Pipewire
 import "AudioMeter.js" as AudioMeterLogic
 
 QtObject {
@@ -7,34 +6,15 @@ QtObject {
 
   property bool recording: false
   property string mode: "dual"
-  property var micSource: null
-  property var systemSink: null
+  property real audioPeak: 0
   property bool micMuted: false
 
-  readonly property real peak: AudioMeterLogic.combinedPeak(
-    micPeakMonitor.peak, systemPeakMonitor.peak, mode, micMuted)
+  readonly property real peak: recording ? AudioMeterLogic.clampPeak(audioPeak) : 0
   readonly property string text: meter.text
-  readonly property bool micMonitoring: micPeakMonitor.enabled
-  readonly property bool systemMonitoring: systemPeakMonitor.enabled
-
-  property PwObjectTracker nodeTracker: PwObjectTracker {
-    objects: {
-      var tracked = []
-      if (root.micSource) tracked.push(root.micSource)
-      if (root.systemSink) tracked.push(root.systemSink)
-      return tracked
-    }
-  }
-
-  property PwNodePeakMonitor micPeakMonitor: PwNodePeakMonitor {
-    node: root.micSource
-    enabled: root.recording && !!root.micSource
-  }
-
-  property PwNodePeakMonitor systemPeakMonitor: PwNodePeakMonitor {
-    node: root.systemSink
-    enabled: root.recording && root.mode === "dual" && !!root.systemSink
-  }
+  // O QML não abre clientes de áudio. O daemon/FFmpeg faz a medição e apenas
+  // projeta o valor pronto no estado, portanto não há monitor PipeWire aqui.
+  readonly property bool micMonitoring: false
+  readonly property bool systemMonitoring: false
 
   property AudioMeter meter: AudioMeter {
     active: root.recording
@@ -42,6 +22,4 @@ QtObject {
   }
 
   onModeChanged: meter.reset()
-  onMicSourceChanged: meter.reset()
-  onSystemSinkChanged: meter.reset()
 }

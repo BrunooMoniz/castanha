@@ -1,6 +1,8 @@
 """Mecanismo de captura de áudio com PipeWire / FFmpeg."""
 
 import os
+import math
+import re
 import signal
 import subprocess
 import time
@@ -60,6 +62,7 @@ class AudioRecorder:
         self.output_path: Optional[Path] = None
         self.start_time: Optional[float] = None
         self.mode: str = "dual"
+        self.peak_path: Optional[Path] = None
 
     def is_recording(self) -> bool:
         if self.process is None:
@@ -75,6 +78,11 @@ class AudioRecorder:
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode
+        self.peak_path = self._peak_path(self.output_path)
+        try:
+            self.peak_path.unlink(missing_ok=True)
+        except OSError:
+            self.peak_path = None
 
         # Garante caminhos e fontes
         if mode == "dual":
@@ -86,11 +94,14 @@ class AudioRecorder:
                 "-f", "pulse", "-i", self.devices.source,
                 "-f", "pulse", "-i", self.devices.monitor,
                 "-filter_complex",
-                "[0:a]pan=mono|c0=0.5*c0+0.5*c1[mic];[1:a]pan=mono|c0=0.5*c0+0.5*c1[sys];[mic][sys]amerge=inputs=2[aout]",
+                "[0:a]pan=mono|c0=0.5*c0+0.5*c1[mic];[1:a]pan=mono|c0=0.5*c0+0.5*c1[sys];"
+                "[mic][sys]amerge=inputs=2[mix];[mix]asplit=2[aout][meterin];"
+                f"[meterin]{self._meter_stats()}[meter]",
                 "-map", "[aout]",
                 "-c:a", "libopus",
                 "-b:a", bitrate,
                 str(self.output_path),
+                "-map", "[meter]", "-f", "null", "-",
             ]
         elif mode == "mic_only":
             # Reunião presencial: grava apenas microfone físico
@@ -98,9 +109,13 @@ class AudioRecorder:
                 "ffmpeg",
                 "-y",
                 "-f", "pulse", "-i", self.devices.source,
+                "-filter_complex",
+                f"[0:a]asplit=2[aout][meterin];[meterin]{self._meter_stats()}[meter]",
+                "-map", "[aout]",
                 "-c:a", "libopus",
                 "-b:a", "32k",
                 str(self.output_path),
+                "-map", "[meter]", "-f", "null", "-",
             ]
         else:
             raise ValueError(f"Modo de gravação desconhecido: {mode}")
@@ -114,6 +129,36 @@ class AudioRecorder:
             preexec_fn=os.setsid,  # Isolamento de grupo de processos
         )
         return self.process
+
+    @staticmethod
+    def _peak_path(output_path: Path) -> Path:
+        return output_path.with_name(output_path.stem + ".peak")
+
+    @staticmethod
+    def _filter_path(path: Path) -> str:
+        # A opção file= usa a sintaxe do filtro do FFmpeg, que reserva ':' e '\\'.
+        return str(path).replace('\\', '\\\\').replace(':', '\\:')
+
+    def _meter_stats(self) -> str:
+        if not self.peak_path:
+            return "anull"
+        output = self._filter_path(self.peak_path)
+        return (
+            f"asetnsamples=n=12000:p=1,"
+            "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=Peak_level,"
+            f"ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file={output}:direct=1"
+        )
+
+    def stop_meter(self) -> None:
+        # O medidor é um segundo output do FFmpeg principal. Não existe
+        # processo auxiliar para órfão, inclusive quando start e stop rodam em
+        # instâncias diferentes do CLI.
+        if self.peak_path:
+            try:
+                self.peak_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.peak_path = None
 
     def pause(self) -> None:
         if self.process and self.is_recording():
@@ -139,6 +184,7 @@ class AudioRecorder:
 
         duration = time.time() - (self.start_time or time.time())
         self.process = None
+        self.stop_meter()
 
         if not self.output_path or not self.output_path.exists():
             raise FileNotFoundError("O arquivo de áudio resultante não foi gerado.")
@@ -154,6 +200,62 @@ class AudioRecorder:
             mode=self.mode,
             format=self.output_path.suffix.lstrip("."),
         )
+
+
+_PEAK_LINE = re.compile(r"lavfi\.astats\.Overall\.Peak_level=(-?(?:inf|\d+(?:\.\d+)?))")
+_CAPTURE_NAME = re.compile(r"castanha_rec_\d+\.ogg\Z")
+
+
+def is_safe_capture_peak(audio_path: Optional[Path], peak_path: Optional[Path]) -> bool:
+    """Aceita limpeza apenas do artefato que o próprio start derivou.
+
+    O caminho vem do state.json, portanto não pode ser usado como autorização
+    para apagar um arquivo arbitrário. Capturas do Castanha nascem em /tmp
+    com o nome abaixo, e o pico válido é exatamente o mesmo nome com .peak.
+    """
+    if not audio_path or not peak_path:
+        return False
+    audio = Path(audio_path)
+    peak = Path(peak_path)
+    return (audio.parent == Path("/tmp")
+            and bool(_CAPTURE_NAME.fullmatch(audio.name))
+            and peak == AudioRecorder._peak_path(audio))
+
+
+def read_audio_peak(path: Optional[Path], max_age: float = 1.5) -> Optional[float]:
+    """Lê o último pico do output auxiliar do FFmpeg sem travar a captura.
+
+    O output auxiliar escreve uma amostra a cada 250 ms. A janela curta transforma
+    processo parado, pausa ou silêncio em zero, em vez de congelar a última
+    barrinha na UI.
+    """
+    if not path:
+        return None
+    try:
+        stat = path.stat()
+        if time.time() - stat.st_mtime > max_age:
+            return None
+        with path.open("rb") as stream:
+            stream.seek(max(0, stat.st_size - 8192))
+            text = stream.read().decode("utf-8", errors="ignore")
+    except (OSError, ValueError):
+        return None
+    matches = _PEAK_LINE.findall(text)
+    if not matches:
+        return None
+    raw = matches[-1]
+    if raw == "-inf":
+        return 0.0
+    try:
+        db = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(db):
+        return 0.0
+    linear = 10.0 ** (db / 20.0)
+    # A mesma compressão perceptual (cúbica) usada pelo visualizador do
+    # Quickshell, para que o valor do sidecar preserve a escala já aprovada.
+    return max(0.0, min(1.0, linear ** (1.0 / 3.0)))
 
 
 # ---------------------------------------------------------------------------

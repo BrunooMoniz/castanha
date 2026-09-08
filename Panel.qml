@@ -124,15 +124,13 @@ Panel {
   // O teste de 04/09 gravou 35 minutos de silêncio porque o mic estava mudo no
   // teclado. O painel passa a dizer isso antes, não depois.
   readonly property var micSource: Pipewire.defaultAudioSource
-  readonly property var systemSink: Pipewire.defaultAudioSink
   readonly property bool micMuted: micSource && micSource.audio ? micSource.audio.muted : false
 
   RecordingAudioMeter {
     id: audioMeter
     recording: root.isRecording
     mode: root.mode
-    micSource: root.micSource
-    systemSink: root.systemSink
+    audioPeak: stateData && stateData.audio_peak ? Number(stateData.audio_peak) : 0
     micMuted: root.micMuted
   }
 

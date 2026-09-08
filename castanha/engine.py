@@ -16,6 +16,7 @@ from castanha.audio import (
     RecordingResult,
     classify_audio,
     is_default_source_muted,
+    is_safe_capture_peak,
     measure_channel_levels,
     probe_duration_seconds,
 )
@@ -180,6 +181,9 @@ class CastanhaEngine:
             "capture_slug": None,
             "capture_job_id": None,
             "mic_muted_at_start": mic_muted,
+            "audio_peak": 0.0,
+            "audio_peak_updated_at": 0.0,
+            "audio_peak_path": str(self.recorder.peak_path) if self.recorder.peak_path else None,
             "error": None,
         })
 
@@ -236,6 +240,8 @@ class CastanhaEngine:
 
         pid = state.get("pid")
         audio_path = Path(state.get("audio_path", ""))
+        peak_path_text = state.get("audio_peak_path")
+        peak_path = Path(peak_path_text) if peak_path_text else None
 
         # Finaliza processo do áudio
         if pid and state.get("status") in ("recording", "paused"):
@@ -256,6 +262,20 @@ class CastanhaEngine:
             except ProcessLookupError:
                 pass
             except Exception:
+                pass
+
+        # O sidecar é auxiliar e deve terminar junto com a captura, antes de
+        # limpar o estado. O método é opcional para os gravadores de teste.
+        stop_meter = getattr(self.recorder, "stop_meter", None)
+        if callable(stop_meter):
+            stop_meter()
+        # start e stop podem ser comandos CLI distintos. Nesse caso o objeto
+        # do stop não conhece o caminho em memória, então o estado persistido
+        # é a autoridade para remover o artefato temporário.
+        if is_safe_capture_peak(audio_path, peak_path):
+            try:
+                peak_path.unlink(missing_ok=True)
+            except OSError:
                 pass
 
         self.state_mgr.write({"pid": None})
@@ -306,7 +326,9 @@ class CastanhaEngine:
         result = self.process_pending(slug)
         self.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
                               "current_meeting": None, "capture_slug": None, "capture_job_id": None,
-                              "elapsed_seconds": 0, "last_result": result["result"]})
+                              "elapsed_seconds": 0, "audio_peak": 0.0,
+                              "audio_peak_updated_at": 0.0, "audio_peak_path": None,
+                              "last_result": result["result"]})
         if result["status"] == "partial":
             notify(t("notify.preserved_title"), title, timeout=10000)
         else:

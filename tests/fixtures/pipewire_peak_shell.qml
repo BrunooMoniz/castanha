@@ -1,21 +1,10 @@
 import QtQuick
 import Quickshell
-import Quickshell.Services.Pipewire
 import "." as Castanha
 
 ShellRoot {
   id: root
 
-  readonly property string sinkName: Quickshell.env("CASTANHA_TEST_SINK")
-  readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
-  readonly property var targetSink: {
-    for (var i = 0; i < nodes.length; ++i) {
-      var node = nodes[i]
-      if (node && node.isSink && !node.isStream && node.name === sinkName)
-        return node
-    }
-    return null
-  }
   property bool sawSignal: false
 
   function finish(ok) {
@@ -27,23 +16,18 @@ ShellRoot {
     id: recordingMeter
     recording: true
     mode: "dual"
-    micSource: null
-    systemSink: root.targetSink
+    audioPeak: 0.85
 
     onTextChanged: {
       if (!root.sawSignal
           && recordingMeter.text !== ""
           && recordingMeter.text !== "▁▁▁▁▁") {
         root.sawSignal = true
-        recordingMeter.mode = "mic_only"
+        recordingMeter.audioPeak = 0
         Qt.callLater(function() {
-          var modeStoppedSink = recordingMeter.text === "▁▁▁▁▁"
-                                && !recordingMeter.micMonitoring
-                                && !recordingMeter.systemMonitoring
           recordingMeter.recording = false
           Qt.callLater(function() {
-            root.finish(modeStoppedSink
-                        && recordingMeter.text === ""
+            root.finish(recordingMeter.text === ""
                         && !recordingMeter.micMonitoring
                         && !recordingMeter.systemMonitoring)
           })

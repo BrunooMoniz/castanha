@@ -173,8 +173,7 @@ class PluginLayoutTest(unittest.TestCase):
         self.assertIn('RecordingAudioMeter {', panel)
         self.assertIn('recording: root.isRecording', panel)
         self.assertIn('mode: root.mode', panel)
-        self.assertIn('micSource: root.micSource', panel)
-        self.assertIn('systemSink: root.systemSink', panel)
+        self.assertIn('audioPeak: stateData && stateData.audio_peak', panel)
         self.assertIn('micMuted: root.micMuted', panel)
         self.assertIn(
             'if (isRecording) return glyph + "  " + formatTime(elapsedSeconds) + "  " + audioMeter.text',
@@ -185,67 +184,22 @@ class PluginLayoutTest(unittest.TestCase):
             panel,
         )
 
-    def test_real_sink_peak_reaches_recording_meter_without_changing_defaults(self):
-        required = ("pactl", "ffmpeg", "quickshell")
+    def test_real_capture_sidecar_reports_peak_without_changing_defaults(self):
+        required = ("pactl", "ffmpeg")
         missing = [command for command in required if not shutil.which(command)]
         if missing:
             self.skipTest("dependências PipeWire indisponíveis: " + ", ".join(missing))
         if not _castanha_is_idle():
             self.skipTest("Castanha não está idle; smoke não toca no grafo durante gravação")
+        result = subprocess.run(
+            [os.environ.get("PYTHON", "python3"), "-B", str(ROOT / "tests" / "qa_pipewire_capture.py")],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONPATH": str(ROOT)}, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('"status": "pass"', result.stdout)
 
-        sink_name = f"castanha_peak_test_{os.getpid()}"
-        with tempfile.TemporaryDirectory() as temporary:
-            config = Path(temporary)
-            (config / "AudioMeter.qml").symlink_to(ROOT / "AudioMeter.qml")
-            (config / "AudioMeter.js").symlink_to(ROOT / "AudioMeter.js")
-            (config / "RecordingAudioMeter.qml").symlink_to(ROOT / "RecordingAudioMeter.qml")
-            shutil.copy2(ROOT / "tests/fixtures/pipewire_peak_shell.qml", config / "shell.qml")
-
-            environment = os.environ.copy()
-            environment["QT_QPA_PLATFORM"] = "offscreen"
-            environment["CASTANHA_TEST_SINK"] = sink_name
-            environment.pop("WAYLAND_DISPLAY", None)
-
-            with _isolated_null_sink(sink_name) as original_default:
-                shell = subprocess.Popen(
-                    ["quickshell", "--no-duplicate", "--path", str(config / "shell.qml"), "--no-color"],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment,
-                )
-                output = ""
-                try:
-                    time.sleep(0.8)
-                    if not _castanha_is_idle():
-                        self.skipTest("Castanha deixou idle; smoke cancelado antes do tom")
-                    tone = _command_output(_tone_command(sink_name), timeout=5)
-                    self.assertEqual(tone.returncode, 0, tone.stdout)
-                    output, _ = shell.communicate(timeout=9)
-                finally:
-                    if shell.poll() is None:
-                        shell.terminate()
-                        try:
-                            shell.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            shell.kill()
-                            shell.wait(timeout=2)
-
-                self.assertEqual(shell.returncode, 0, output)
-                self.assertIn("CASTANHA_PIPEWIRE_PEAK_OK", output)
-                self.assertNotIn("CASTANHA_PIPEWIRE_PEAK_FAIL", output)
-                current_default = _command_output(["pactl", "get-default-sink"])
-                self.assertEqual(current_default.returncode, 0, current_default.stdout)
-                self.assertEqual(current_default.stdout.strip(), original_default)
-
-            sinks_after_cleanup = _command_output(["pactl", "list", "sinks", "short"])
-            self.assertEqual(sinks_after_cleanup.returncode, 0, sinks_after_cleanup.stdout)
-            self.assertNotIn(sink_name, sinks_after_cleanup.stdout)
-            default_after_cleanup = _command_output(["pactl", "get-default-sink"])
-            self.assertEqual(default_after_cleanup.returncode, 0, default_after_cleanup.stdout)
-            self.assertEqual(default_after_cleanup.stdout.strip(), original_default)
-
-    def test_audio_meter_compiles_with_real_pipewire_monitor(self):
+    def test_audio_meter_compiles_without_pipewire_peak_monitor(self):
         if not shutil.which("quickshell"):
             self.skipTest("quickshell não instalado")
 
