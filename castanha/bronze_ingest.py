@@ -99,8 +99,9 @@ def _verify_terminal_receipts(directory: Path, metadata: dict) -> dict:
             if not isinstance(name, str) or name not in checkpoints:
                 raise BronzeIngestError("Checkpoint terminal ausente")
             saved = checkpoints[name]
+            # "checkpoint" e "synthesis" são marcas do recibo, não parte do resultado.
             if (saved.get("status") != receipt["status"] or saved.get("result") !=
-                    {k: v for k, v in receipt.items() if k != "checkpoint"}):
+                    {k: v for k, v in receipt.items() if k not in ("checkpoint", "synthesis")}):
                 raise BronzeIngestError("Evidência terminal ausente ou divergente")
     return checkpoints
 
@@ -498,11 +499,19 @@ def current_requests(bronze: Path, slug: str, metadata: dict, *, workspace, acco
 
 
 def _synthesis_for(bronze: Path, slug: str, metadata: dict, silver_text, gold, native_ids, *,
-                   workspace, account_id=None):
+                   workspace, account_id=None, tombstoned=False):
     """(construtor, pedido) da síntese, ou None quando não há notas ou origem."""
+    # O Silver agrega a reunião inteira; filtrar IDs não remove o conteúdo
+    # esquecido das notas. Uma exclusão impede novas sínteses dessa reunião.
+    if tombstoned:
+        return None
     origins = legacy_origin_ids(bronze) or list(native_ids)
     if not silver_text or not isinstance(gold, dict) or not origins:
         return None
+    if has_origin_receipts(metadata.get("zinom") or {}):
+        # Como nas gravações: a exclusão de cada origem é verificada nos
+        # checkpoints, não no estado agregado da reunião.
+        metadata = {k: v for k, v in metadata.items() if k != "zinom"}
 
     def build(instant):
         return build_synthesis_request(slug, metadata, silver_text, gold, captured_at=instant,
@@ -524,7 +533,9 @@ def bronze_needs_sync(bronze: Path, slug: str, metadata: dict, *, workspace, acc
         pending = [request for _, _, _, request in requests]
         synthesis = _synthesis_for(bronze, slug, metadata, silver_text, gold,
                                    [native_id for native_id, *_ in requests],
-                                   workspace=workspace, account_id=account_id)
+                                   workspace=workspace, account_id=account_id,
+                                   tombstoned=any(old.get("status") == "tombstoned"
+                                                  for old in checkpoints.values()))
         if synthesis:
             pending.append(synthesis[1])
         for request in pending:
@@ -607,10 +618,19 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
                     result = submit_transcript_upload(path, client)
                     results.append({"checkpoint": path.name, **result})
             facts_sent = facts_dropped = 0
+            tombstoned = (any(old.get("status") == "tombstoned" for old in checkpoints.values())
+                          or any(result["status"] == "tombstoned" for result in results))
+            if tombstoned:
+                # Preserve o recibo da síntese excluída, inclusive quando uma
+                # gravação nova mudaria a identidade da síntese agregada.
+                results.extend({"checkpoint": name, "synthesis": True, **old["result"]}
+                               for name, old in checkpoints.items()
+                               if old.get("status") == "tombstoned" and
+                               old["request"]["envelope"].get("fidelidade") == "sintese")
             synthesis = _synthesis_for(bronze, slug, metadata, silver_text, gold,
                                        [native_id for native_id, *_ in requests],
-                                       workspace=workspace, account_id=account_id)
-            if legacy and synthesis is None:
+                                       workspace=workspace, account_id=account_id, tombstoned=tombstoned)
+            if legacy and synthesis is None and not tombstoned:
                 raise BronzeIngestError("Reunião legada sem notas para sintetizar")
             if synthesis:
                 build, request = synthesis

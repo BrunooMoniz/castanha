@@ -34,6 +34,12 @@ Panel {
   readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
 
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
+  // A cor "urgente" de vários temas é um vermelho escuro (#a55555 no padrão):
+  // sobre o fundo escuro do painel o microfone mudo quase sumia. Em tema
+  // escuro a cor de estado clareia; em tema claro, escurece.
+  readonly property bool darkPanel: (0.2126 * Color.popups.background.r + 0.7152 * Color.popups.background.g
+                                     + 0.0722 * Color.popups.background.b) < 0.5
+  function contrasting(c) { return darkPanel ? Qt.lighter(c, 1.45) : Qt.darker(c, 1.25) }
 
   // ---------------------------------------------------------------- estado
   property var stateData: ({})
@@ -467,14 +473,23 @@ Panel {
 
           iconComponent: Component {
             Item {
-              width: Style.font.display
-              height: Style.font.display
+              id: heroIcon
+              readonly property color ink: root.contrasting(root.isRecording || root.micMuted ? root.urgent : root.foreground)
+              width: Style.font.display + Style.space(12)
+              height: width
+
+              // Pastilha tingida atrás do ícone: dá fundo próprio ao glifo em qualquer tema.
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: root.alpha(heroIcon.ink, 0.16)
+              }
 
               Text {
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
                 text: root.glyph
-                color: root.isRecording || root.micMuted ? root.urgent : root.foreground
+                color: heroIcon.ink
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
 
@@ -500,7 +515,7 @@ Panel {
           Rectangle {
             anchors.fill: parent
             radius: Style.cornerRadius
-            color: root.alpha(root.urgent, 0.12)
+            color: root.alpha(root.contrasting(root.urgent), 0.12)
           }
 
           Row {
@@ -515,7 +530,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               text: "󰍭"
-              color: root.urgent
+              color: root.contrasting(root.urgent)
               font.family: root.fontFamily
               font.pixelSize: Style.font.icon
               anchors.verticalCenter: parent.verticalCenter
@@ -525,7 +540,7 @@ Panel {
               textFormat: Text.PlainText
               width: micWarn.width - Style.space(28)
               text: I18N.t("mic_warning.body", root.lang)
-              color: root.urgent
+              color: root.contrasting(root.urgent)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap

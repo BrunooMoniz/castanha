@@ -370,6 +370,9 @@ class MeetingStorage:
         from castanha.legacy_recovery import legacy_delivery_projection
         if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
             return previous
+        if (self.bronze_dir / slug / ".brain-ingest").exists():
+            # A síntese entrou pela ponte Bronze; o recibo vivo é o do metadata.
+            return previous
         receipt = legacy_delivery_projection(self.bronze_dir / slug)
         return receipt if receipt is not None else previous
 

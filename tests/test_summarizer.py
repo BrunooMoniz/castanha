@@ -1,6 +1,11 @@
 """Resumo de reunião longa: a Groq gratuita dá 8.000 tokens por minuto, e uma reunião de 2h não cabe."""
 
+import fcntl
 import io
+import os
+import shlex
+import subprocess
+import itertools
 import json
 import re
 import shutil
@@ -276,8 +281,9 @@ class TestCalendarGrounding(unittest.TestCase):
                                  {'name': 'luigi@example.invalid', 'note': 'expert'}]}
         with patch.object(self.s, '_call_llm', return_value=json.dumps(fake)):
             gold = self.s.generate_gold(self.meta, 'Notas', self.transcript)
+        # A citação pode falar em presença ("quem esteve presente planeja"); o item em si não.
         self.assertEqual(gold, {'facts': [fake['facts'][1]], 'decisions': [fake['decisions'][0]],
-                                'action_items': [fake['action_items'][0]],
+                                'action_items': fake['action_items'],
                                 'people_notes': [fake['people_notes'][1]]})
         self.assertEqual(gold['facts'][0]['evidencia'], 'o projeto custa 10 mil reais', 'a passagem citada fica no Gold local')
 
@@ -377,6 +383,9 @@ class FakeVps:
             return _proc(0, job["outcome"][1])
         if command.startswith(f"cat {remote}/exit.txt"):
             return _proc(0, job["outcome"][1])
+        if command.startswith(f"rm -f {remote}/exit.txt"):
+            job.update(stage="UPLOAD", polls=0, cleaned=job.get("cleaned", 0) + 1)
+            return _proc(0)
         raise AssertionError(command)
 
 
@@ -473,6 +482,68 @@ class TestHermesSshLlm(unittest.TestCase):
         self.assertEqual(len(vps.jobs), 1)
         self.assertEqual(sum(a[0] == "scp" for a in vps.argv), scps)
         self.assertEqual(sum("nohup flock" in a[-1] for a in vps.argv), 1)
+
+    def test_retoma_prompt_orfao_sem_reenviar_nem_trocar_modelo(self):
+        for reboot in (False, True):
+            with self.subTest(reboot=reboot):
+                vps = FakeVps({"anthropic/claude-opus-5": ("done", "Resumo retomado")})
+                h = self.hermes()
+                with patch("castanha.summarizer.subprocess.run", side_effect=vps), \
+                     patch.object(h, "_launch", side_effect=S.LlmUnavailable("SSH caiu")):
+                    with self.assertRaises(S.LlmUnavailable):
+                        h.complete("s", "u")
+                # Prompt persistido, nenhum worker. Após reboot é o mesmo estado.
+                job = next(iter(vps.jobs.values()))
+                job["stage"] = "RUNNING"
+                if reboot:
+                    job["result.part"] = "saída interrompida"
+                scps = sum(a[0] == "scp" for a in vps.argv)
+                probe = vps.__call__
+
+                def sem_worker(argv, **kwargs):
+                    if "echo UPLOAD" in argv[-1] and "launch" not in job:
+                        return _proc(0, "RUNNING")
+                    return probe(argv, **kwargs)
+
+                with patch("castanha.summarizer.subprocess.run", side_effect=sem_worker):
+                    self.assertEqual(self.hermes().complete("s", "u"), "Resumo retomado")
+                self.assertEqual(len(vps.jobs), 1)
+                self.assertEqual(sum(a[0] == "scp" for a in vps.argv), scps)
+                self.assertEqual(sum("nohup flock" in a[-1] for a in vps.argv), 1)
+
+    def test_launch_com_flock_real_preserva_worker_e_estados_terminais(self):
+        remote = self.temp / "job"
+        remote.mkdir()
+        (remote / "prompt.txt").write_text("prompt de teste")
+        hermes = self.temp / "hermes"
+        hermes.write_text("#!/bin/sh\nprintf 'executou\n' >> calls.txt\nprintf 'Resumo pronto\n'\n")
+        hermes.chmod(0o700)
+        h = self.hermes()
+        with patch.object(h, "_ssh") as ssh:
+            h._launch(str(remote), "anthropic", "claude-opus-5")
+        # Mesmo comando do worker, em primeiro plano para aguardar sua conclusão.
+        tokens = shlex.split(ssh.call_args.args[0].split("nohup ", 1)[1])
+        command = tokens[:tokens.index("sh") + 3]
+        env = dict(os.environ, PATH=str(self.temp) + os.pathsep + os.environ["PATH"])
+
+        def launch():
+            return subprocess.run(command, cwd=self.temp, env=env, capture_output=True, timeout=5)
+
+        with (remote / "job.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(launch().returncode, 1)
+            self.assertFalse((self.temp / "calls.txt").exists())
+        for terminal in ("result.txt", "exit.txt"):
+            (remote / terminal).write_text("estado anterior")
+            self.assertEqual(launch().returncode, 0)
+            self.assertFalse((self.temp / "calls.txt").exists())
+            self.assertEqual((remote / terminal).read_text(), "estado anterior")
+            (remote / terminal).unlink()
+        (remote / "result.part").write_text("saída incompleta antes do reboot")
+        self.assertEqual(launch().returncode, 0)
+        self.assertEqual((remote / "result.txt").read_text(), "Resumo pronto\n")
+        self.assertEqual(launch().returncode, 0)
+        self.assertEqual((self.temp / "calls.txt").read_text(), "executou\n")
 
     def test_ssh_fora_vira_LlmUnavailable(self):
         for falha in (lambda *a, **k: _proc(255), OSError("sem ssh"),
@@ -588,6 +659,29 @@ class TestHermesNoSummarizer(unittest.TestCase):
         self.assertEqual(S.HermesSshLlm._answer('{"facts": []}\n\nsession_id: x\n'), '{"facts": []}')
         # 07/09: o aviso da CLI sobre "-t none" vazou para o Silver e para o Zinom.
         self.assertEqual(S.HermesSshLlm._answer("Warning: Unknown toolsets: none\n\n# Resumo\n\nsession_id: y\n"), "# Resumo")
+
+    def test_job_que_falhou_e_relancado_na_proxima_tentativa(self):
+        # Falha transitória (529, timeout) não pina o prompt na reserva para sempre.
+        vps = FakeVps({"anthropic/claude-opus-5": ("fail", "124\nAPI call failed: HTTP 529 overloaded"),
+                       "openai-codex/gpt-5.5": ("fail", "1\nHTTP 429: usage limit")})
+        llm = S.HermesSshLlm("vps", [{"provider": "anthropic", "model": "claude-opus-5"},
+                                     {"provider": "openai-codex", "model": "gpt-5.5"}],
+                             sleep=lambda s: None, clock=itertools.count().__next__)
+        with patch("castanha.summarizer.subprocess.run", vps):
+            with self.assertRaises(S.LlmUnavailable):
+                llm.complete("sistema", "pergunta")
+            self.assertEqual([j.get("cleaned") for j in vps.jobs.values()], [1, 1])
+            vps.outcomes["anthropic/claude-opus-5"] = ("done", "session_id: a\n\nAgora foi")
+            self.assertEqual(llm.complete("sistema", "pergunta"), "Agora foi")
+
+    def test_filtro_de_presenca_nao_olha_a_citacao(self):
+        gold = S._ground_gold({"facts": [
+            {"subject": "Nora", "predicate": "valuation", "object": "US$ 7 mi",
+             "evidencia": "os participantes consideraram o valuation alto"},
+            {"subject": "Luigi", "predicate": "participou de", "object": "reunião", "evidencia": "x"}],
+            "decisions": [{"decision": "Centralizar leads", "evidencia": "Luigi disse que centraliza"}]})
+        self.assertEqual([f["object"] for f in gold["facts"]], ["US$ 7 mi"])
+        self.assertEqual(len(gold["decisions"]), 1)
 
     def test_gold_no_hermes_recebe_a_transcricao_inteira(self):
         s = self.summarizer()

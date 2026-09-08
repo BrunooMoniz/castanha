@@ -196,6 +196,59 @@ class TestSynthesisDelivery(unittest.TestCase):
         self.assertEqual(result["facts_ingested"], 2)
         self.assertTrue((bronze / ".brain-ingest" / "destination.json").exists())
 
+    def test_tombstoned_synthesis_does_not_block_the_meeting(self):
+        # Refutação de 07/09: apagar a síntese no portal deixava a reunião em erro para sempre.
+        bronze, metadata = self.native()
+        first = self.ingest(bronze, metadata, silver_text=SILVER, gold=GOLD)
+        key = next(k for k, r in self.client.requests.items() if r["envelope"]["fidelidade"] == "sintese")
+        self.client.states[key] = "tombstoned"
+        metadata = {**metadata, "zinom": first}
+        second = self.ingest(bronze, metadata, silver_text=SILVER, gold=GOLD)
+        self.assertEqual(second["status"], "tombstoned")
+        metadata = {**metadata, "zinom": second}
+        third = self.ingest(bronze, metadata, silver_text=SILVER, gold=GOLD)
+        self.assertEqual(third["status"], "tombstoned", third)
+        self.assertNotIn("error", {r["status"] for r in third["source"]["revisions"]})
+        # Gravação nova da mesma reunião ainda sobe.
+        write_json(bronze / ".jobs" / "native-2.json", {
+            "id": "native-2", "stage": "done", "transcript": "Segunda gravação",
+            "provider": "groq", "recorded_at": "2026-09-05T11:30:00-03:00"})
+        metadata = {**metadata, "zinom": third,
+                    "memory_recording_ids": ["capture.ogg", "capture-2.ogg"],
+                    "recordings": metadata["recordings"] + [{"id": "capture-2.ogg", "job_id": "native-2",
+                                                             "transcription_provider": "groq"}]}
+        self.ingest(bronze, metadata, silver_text=SILVER, gold=GOLD)
+        self.assertIn("Segunda gravação", [r["envelope"]["texto"] for r in self.client.requests.values()])
+        self.assertEqual(sum(r["envelope"]["fidelidade"] == "sintese"
+                             for r in self.client.requests.values()), 1,
+                         "origens novas não autorizam recriar síntese esquecida")
+
+    def test_forgotten_transcript_blocks_later_synthesis_but_not_new_recordings(self):
+        bronze, metadata = self.native()
+        first = self.ingest(bronze, metadata)
+        key = next(iter(self.client.requests))
+        self.client.states[key] = "tombstoned"
+        # A exclusão só é descoberta nesta chamada, quando o Silver fica pronto.
+        second = self.ingest(bronze, {**metadata, "zinom": first}, silver_text=SILVER, gold=GOLD)
+        self.assertEqual(second["status"], "tombstoned")
+        self.assertEqual(len(self.client.requests), 1, "síntese não pode recriar conteúdo esquecido")
+        metadata = {**metadata, "zinom": second}
+        self.assertFalse(bronze_needs_sync(
+            bronze, bronze.name, metadata, workspace="fixture-workspace",
+            endpoint=FakeMcp.endpoint, token=FakeMcp.token, silver_text=SILVER, gold=GOLD))
+        write_json(bronze / ".jobs" / "native-2.json", {
+            "id": "native-2", "stage": "done", "transcript": "Segunda gravação",
+            "provider": "groq", "recorded_at": "2026-09-05T11:30:00-03:00"})
+        metadata = {**metadata, "memory_recording_ids": ["capture.ogg", "capture-2.ogg"],
+                    "recordings": metadata["recordings"] + [{"id": "capture-2.ogg", "job_id": "native-2",
+                                                             "transcription_provider": "groq"}]}
+        third = self.ingest(bronze, metadata, silver_text=SILVER, gold=GOLD)
+        self.assertEqual(third["status"], "tombstoned")
+        sent = list(self.client.requests.values())
+        self.assertEqual([r["envelope"]["fidelidade"] for r in sent], ["projecao", "projecao"])
+        self.assertEqual(sent[-1]["envelope"]["texto"], "Segunda gravação")
+        self.assertEqual(third["facts_ingested"], 0)
+
     def test_legacy_meeting_without_notes_or_delivery_is_refused(self):
         bronze, metadata, _ = self.legacy()
         result = self.ingest(bronze, metadata)
@@ -210,3 +263,54 @@ class TestSynthesisDelivery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLegacySyncPath(unittest.TestCase):
+    """Reunião legada com síntese: a fila re-consulta a síntese e o sync não passa pela recuperação."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        from castanha.storage import MeetingStorage
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.storage = MeetingStorage(base_dir=Path(self.temp.name))
+        self.config = {"zinom": {"enabled": True, "bronze_ingest_enabled": True,
+                                  "workspace": "fixture-workspace", "token": FakeMcp.token,
+                                  "endpoint": FakeMcp.endpoint},
+                       "storage": {"bronze_dir": str(self.storage.bronze_dir)}}
+        for target in ("castanha.sync.load_config", "castanha.zinom_adapter.load_config"):
+            patcher = patch(target, side_effect=lambda: self.config)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = FakeMcp()
+        patcher = patch("castanha.zinom_adapter.ZinomMcpClient", return_value=self.client)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_pending_synthesis_is_requeried_and_settles(self):
+        from castanha.sync import pending_candidates, sync_meeting
+        slug = "legado"
+        bronze = self.storage.bronze_dir / slug
+        uploads = bronze / ".legacy-recovery" / "uploads"
+        uploads.mkdir(parents=True)
+        write_json(uploads / "abc.json", {"status": "ok", "request": {"envelope": {"source_id": "castanha:" + "f" * 64}}})
+        metadata = {**META, "slug": slug, "recordings": [{"id": "audio.ogg", "transcription_provider": "groq"}]}
+        write_json(bronze / "metadata.json", metadata)
+        (self.storage.silver_dir / f"{slug}.md").write_text(SILVER, encoding="utf-8")
+        write_json(self.storage.gold_dir / f"{slug}.json", GOLD)
+        # Primeira entrega (pelo retry) fica pendente no servidor.
+        self.client.default_state = "pending"
+        first = ingest_current_recordings(bronze, slug, metadata, self.client, workspace="fixture-workspace",
+                                          silver_text=SILVER, gold=GOLD)
+        self.assertEqual(first["status"], "pending")
+        self.storage.record_zinom_result(slug, first)
+        self.assertEqual([s for _, s in pending_candidates(self.storage)], [slug])
+        # Servidor concluiu: o sync consulta pela chave e fecha o recibo.
+        self.client.default_state = "completed"
+        result = sync_meeting(slug, self.storage)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result.get("facts_ingested"), 2)
+        self.assertEqual(pending_candidates(self.storage), [])
+        self.assertEqual(len(self.client.requests), 1, "só a síntese; a transcrição legada não é reenviada")
+        self.assertEqual(self.storage.delivery_projection(slug, {"status": "ok"})["status"], "ok",
+                         "com síntese, vale o recibo do metadata, não a projeção legada")

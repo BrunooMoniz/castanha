@@ -587,6 +587,7 @@ class CastanhaEngine:
         from castanha.summarizer import LlmUnavailable
         try:
             silver_content = self.summarizer.generate_silver(metadata, transcript)
+            silver_provider = self.summarizer.last_provider  # o Gold pode cair na reserva
             gold_data = self.summarizer.generate_gold(metadata, silver_content, transcript)
         except LlmUnavailable as exc:
             # Cota, rede ou provedor: a transcrição já está nos checkpoints e nada
@@ -605,7 +606,7 @@ class CastanhaEngine:
                 "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                 "problemas": errors + [t("engine.problem_summary_pending", exc=exc)]}}
         # Quem resumiu fica no Bronze antes do recibo: record_zinom_result relê o disco.
-        metadata["summary_provider"] = self.summarizer.last_provider
+        metadata["summary_provider"] = silver_provider
         write_json(bronze / "metadata.json", metadata)
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
@@ -829,6 +830,7 @@ class CastanhaEngine:
             meta.pop("summary_error", None)
             try:
                 silver_content = self.summarizer.generate_silver(meta, transcript)
+                silver_provider = self.summarizer.last_provider
                 gold_data = self.summarizer.generate_gold(meta, silver_content, transcript)
             except LlmUnavailable as exc:
                 # Transcrição já está no Bronze; a nota antiga (se houver) fica como está.
@@ -844,7 +846,7 @@ class CastanhaEngine:
                     "summary_status": "pending", "summary_error": str(exc),
                     "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                     "problemas": [t("engine.problem_summary_pending", exc=exc)]}}
-            meta["summary_provider"] = self.summarizer.last_provider
+            meta["summary_provider"] = silver_provider
             self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
             gold_path = self.storage.save_gold(slug, gold_data)

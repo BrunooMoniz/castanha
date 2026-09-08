@@ -108,7 +108,9 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     # Manifestos legados congelam inclusive metadata.json. Não passar pelo
     # escritor nativo: somente retomar uma recuperação já iniciada explicitamente.
     recovery = bronze / ".legacy-recovery"
-    if recovery.exists() or recovery.is_symlink():
+    # Legada que já ganhou síntese (.brain-ingest) é consultada pela ponte
+    # Bronze: a transcrição continua com o recibo da recuperação.
+    if (recovery.exists() or recovery.is_symlink()) and not (bronze / ".brain-ingest").exists():
         from castanha.legacy_recovery import resume_legacy_recovery
         return {"slug": slug, **resume_legacy_recovery(bronze, load_config().get("zinom", {}))}
     with meeting_lock(bronze):
@@ -200,7 +202,7 @@ def pending_candidates(storage: MeetingStorage):
         if not bronze.is_dir():
             continue
         recovery = bronze / ".legacy-recovery"
-        if recovery.exists() or recovery.is_symlink():
+        if (recovery.exists() or recovery.is_symlink()) and not (bronze / ".brain-ingest").exists():
             from castanha.legacy_recovery import legacy_recovery_pending
             if legacy_recovery_pending(bronze):
                 candidates.append(("", bronze.name))

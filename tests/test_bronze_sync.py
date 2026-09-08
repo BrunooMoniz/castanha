@@ -23,6 +23,7 @@ class FakeMcp:
         self.states = {}
         self.lose_response = False
         self.bronze = None
+        self.default_state = "completed"
 
     def connect(self):
         pass
@@ -47,7 +48,7 @@ class FakeMcp:
         if key not in self.requests:
             raise ZinomError("fixture", code="unknown_idempotency_key", tool=name)
         request = self.requests[key]
-        state = self.states.get(key, "completed")
+        state = self.states.get(key, self.default_state)
         job_id = list(self.requests).index(key) + 1
         return {"content": [{"type": "text", "text": json.dumps({
             "ok": True, "jobId": job_id, "revisionId": job_id,

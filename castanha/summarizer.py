@@ -253,12 +253,17 @@ def _ground_gold(data):
     fato agora cita a passagem e pode ser apagado por origem no Zinom, e ele
     descartava fatos legítimos sobre convidados e empresas ("Nora").
     """
+    def sem_citacao(value):
+        # A passagem citada pode dizer "os participantes decidiram"; o que
+        # não pode é o fato em si afirmar presença ou fala.
+        return {k: v for k, v in value.items() if k != "evidencia"} if isinstance(value, dict) else value
+
     result = {}
     for key in ("facts", "decisions", "action_items", "people_notes"):
         values = data.get(key, [])
         result[key] = [value for value in values
                        if isinstance(value, (dict, str))
-                       and not _PRESENCE.search(_grounding_text(json.dumps(value, ensure_ascii=False)))] if isinstance(values, list) else []
+                       and not _PRESENCE.search(_grounding_text(json.dumps(sem_citacao(value), ensure_ascii=False)))] if isinstance(values, list) else []
     return result
 
 
@@ -336,7 +341,7 @@ class HermesSshLlm:
         self._ssh(f"chmod 600 {upload} && mv {upload} {remote}/prompt.txt")
 
     def _launch(self, remote: str, provider: str, model: str) -> None:
-        script = (f"test -f {remote}/result.txt && exit 0; "
+        script = (f"if test -f {remote}/result.txt || test -f {remote}/exit.txt; then exit 0; fi; "
                   f"timeout --kill-after=30s {self.timeout_sec}s hermes chat -Q --oneshot --safe-mode -t none "
                   f"--source tool --query-file {remote}/prompt.txt --provider {shlex.quote(provider)} "
                   f"-m {shlex.quote(model)} --reasoning {shlex.quote(self.reasoning)} "
@@ -372,8 +377,11 @@ class HermesSshLlm:
         state = self._state(remote)
         if state == "UPLOAD":
             self._upload(prompt, remote)
-            self._launch(remote, provider, model)
             state = "RUNNING"
+        if state == "RUNNING":
+            # O prompt pode ter sobrevivido a uma queda antes do launch ou a
+            # um reboot. O flock preserva o worker vivo e retoma o órfão.
+            self._launch(remote, provider, model)
         deadline = self.clock() + self.timeout_sec
         while state == "RUNNING":
             if self.clock() >= deadline:
@@ -383,7 +391,14 @@ class HermesSshLlm:
         if state == "DONE":
             return self._answer(self._ssh(f"cat {remote}/result.txt"))
         if state == "FAILED":
-            raise _HermesJobFailed(self._failure(remote))
+            reason = self._failure(remote)
+            # Falha transitória (529, timeout) não pode pinar este prompt para
+            # sempre: limpa o job, e a próxima retomada sobe de novo.
+            try:
+                self._ssh(f"rm -f {remote}/exit.txt {remote}/result.part {remote}/prompt.txt")
+            except LlmUnavailable:
+                pass
+            raise _HermesJobFailed(reason)
         raise LlmUnavailable("SSH da VPS indisponível")
 
     def complete(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:

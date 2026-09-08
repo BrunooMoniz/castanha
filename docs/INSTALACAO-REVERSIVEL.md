@@ -1,4 +1,21 @@
-# Instalador com reversão, candidato em revisão
+# Atualização do checkout único
+
+No XPS consolidado, CLI e plugin apontam para `~/Projects/castanha` e o
+daemon roda em `castanha.service` do systemd do usuário. Após testes e revisão,
+aplique o commit local exato a partir da worktree de desenvolvimento:
+
+```sh
+python3 scripts/deploy-local.py ~/Projects/castanha SHA_COMPLETO
+```
+
+O script exige árvore limpa e captura ociosa, mantém os links existentes,
+atualiza por fast-forward e confere serviço, PID, checkout e resposta do CLI.
+Se a saúde falhar, restaura o commit anterior e reinicia o serviço.
+O SHA anterior fica em `~/.local/state/castanha/local-release.json` antes da
+troca. Gravações e configuração não são alteradas pelo instalador.
+O código privado de integração permanece local, com backup por bundle privado.
+
+## Histórico: instalador de transição entre worktrees
 
 A recuperação registra `restored_daemon` e `rollback_checking` antes de testar
 a saúde do daemon antigo reiniciado. Uma interrupção nesse teste pode ser
