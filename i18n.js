@@ -80,8 +80,8 @@ var STRINGS = {
   "note.no_audio": { "en": "no audio", "pt": "sem áudio" },
   "note.recordings_plural": { "en": "{n} recordings", "pt": "{n} gravações" },
   "note.reprocessing": { "en": "Reprocessing upload and transcription…", "pt": "Reprocessando upload e transcrição…" },
-  "note.upload_pending": { "en": "Upload/transcription pending: 󰑐 tries again", "pt": "Upload/transcrição pendente: 󰑐 tenta de novo" },
-  "note.transcription_pending": { "en": "Remote transcription is still processing: 󰑐 follows the same job", "pt": "Transcrição remota ainda em processamento: 󰑐 acompanha o mesmo job" },
+  "note.upload_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
+  "note.transcription_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
   "note.collapse_details": { "en": "Collapse meeting details", "pt": "Recolher detalhes da reunião" },
   "note.view_details": { "en": "View meeting details", "pt": "Ver detalhes da reunião" },
 

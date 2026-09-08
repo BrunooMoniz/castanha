@@ -243,6 +243,8 @@ class MeetingStorage:
                 "audio_status": meta_item.get("audio_status") or "ok",
                 "transcribed": meta_item.get("transcribed"),
                 "transcription_error": meta_item.get("transcription_error"),
+                "transcription_pending": meta_item.get("transcription_pending") is True,
+                "transcription_pending_reason": meta_item.get("transcription_pending_reason") or "",
                 "exists": True,
             })
         return recordings

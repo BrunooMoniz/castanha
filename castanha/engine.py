@@ -74,6 +74,10 @@ class CastanhaEngine:
 
         try:
             transcriber = get_transcriber(estimated_duration_sec=estimated_sec)
+        except TranscriptionPending as e:
+            # A configuração/worker que precisa ser retomado continua
+            # pendente; não é uma falha terminal nem autoriza perder o áudio.
+            return "", "pending", str(e)
         except Exception as e:
             # Sem Groq e sem VPS: falha declarada, e o áudio espera no Bronze.
             return "", "failed", str(e)
@@ -92,6 +96,8 @@ class CastanhaEngine:
             try:
                 trans_res = VpsSshTranscriber(host).transcribe(audio_path, mode=mode)
                 return trans_res.text, trans_res.provider, None
+            except TranscriptionPending as err2:
+                return "", "pending", str(err2)
             except Exception as err2:
                 # Vazio, e não a mensagem de erro: string não vazia ia para a
                 # LLM e virava um "resumo" fabricado em cima de um traceback.
@@ -596,7 +602,7 @@ class CastanhaEngine:
                         audio_levels=last_job.get("audio_levels", []),
                         processing_status="pending" if errors or pending_jobs else "complete")
         write_json(bronze / "metadata.json", metadata)
-        if (errors or pending_jobs) and (self._por_canal() or pending_jobs):
+        if (errors and self._por_canal()) or pending_jobs:
             # Canal recusado não pode gerar Silver/Gold parcial nem entrega nova.
             return {"status": "partial", "result": {
                 "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
@@ -608,19 +614,6 @@ class CastanhaEngine:
                 "transcription_pending_reason": metadata.get("transcription_pending_reason"),
                 "zinom": metadata.get("zinom") or {"status": "pending"},
                 "problemas": errors + pending_messages}}
-        if pending_jobs:
-            # Não gere Silver/Gold com uma transcrição que ainda não chegou.
-            # O Bronze e o job remoto permanecem intactos para a próxima rodada.
-            return {"status": "partial", "result": {
-                "slug": slug, "title": metadata["title"], "bronze_dir": str(bronze),
-                "silver_file": str(self.storage.silver_dir / f"{slug}.md"),
-                "gold_file": str(self.storage.gold_dir / f"{slug}.json"),
-                "audio_status": audio_status, "audio_diagnostico": metadata["audio_diagnostico"],
-                "transcription_provider": provider, "transcription_error": transcription_error,
-                "transcription_pending": True,
-                "transcription_pending_reason": metadata.get("transcription_pending_reason"),
-                "zinom": metadata.get("zinom") or {"status": "pending"},
-                "problemas": pending_messages}}
         from castanha.summarizer import LlmUnavailable
         try:
             silver_content = self.summarizer.generate_silver(metadata, transcript)
@@ -811,6 +804,8 @@ class CastanhaEngine:
                 try:
                     resultado = self._transcrever_por_canal(audio_path, self.storage.bronze_dir / slug, capture_mode=mode)
                     texto, provider, erro = resultado.text, resultado.provider, None
+                except TranscriptionPending as exc:
+                    texto, provider, erro = "", "pending", str(exc)
                 except Exception as exc:
                     texto, provider, erro = "", "failed", str(exc)
             else:
@@ -825,7 +820,8 @@ class CastanhaEngine:
                 else:
                     self.storage.append_transcript(slug, rec["filename"], texto)
                 self.storage.update_recording(slug, rec["filename"], transcribed=True,
-                                              transcription_error=None, audio_status=audio_status,
+                                              transcription_error=None, transcription_pending=False,
+                                              transcription_pending_reason=None, audio_status=audio_status,
                                               transcription_provider=provider,
                                               duration_seconds=dur)
                 if provider != "mock":
@@ -833,13 +829,18 @@ class CastanhaEngine:
                     novo_texto = True
             else:
                 motivo = erro or "transcrição vazia"
-                self.storage.update_recording(slug, rec["filename"], transcribed=False,
-                                              transcription_error=motivo, audio_status=audio_status,
-                                              transcription_provider=provider,
-                                              duration_seconds=dur)
                 if provider == "pending":
+                    self.storage.update_recording(
+                        slug, rec["filename"], transcribed=False,
+                        transcription_error=None, transcription_pending=True,
+                        transcription_pending_reason=motivo, audio_status=audio_status,
+                        transcription_provider="pending", duration_seconds=dur)
                     pendencias.append(f"{rec['filename']}: {motivo}")
                 else:
+                    self.storage.update_recording(
+                        slug, rec["filename"], transcribed=False,
+                        transcription_error=motivo, audio_status=audio_status,
+                        transcription_provider=provider, duration_seconds=dur)
                     erros.append(f"{rec['filename']}: {motivo}")
 
         meta = self.storage._read_bronze_metadata(slug)

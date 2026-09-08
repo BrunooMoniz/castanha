@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from castanha.audio import ChannelLevels
 from castanha.engine import CastanhaEngine
@@ -292,6 +292,21 @@ class TestDurableJobs(unittest.TestCase):
             provider.assert_not_called()
         self.assertEqual((self.engine.storage.bronze_dir / slug / 'transcript_raw.txt').read_text(), 'Decisão preservada')
 
+    def test_provider_selection_and_vps_fallback_keep_pending_state(self):
+        with patch('castanha.engine.get_transcriber', side_effect=TranscriptionPending('seleção aguardando')):
+            text, provider, error = self.engine._transcribe_with_fallback(self.source, 'mic_only', 1)
+        self.assertEqual((text, provider), ('', 'pending'))
+        self.assertIn('seleção aguardando', error)
+
+        primary = Mock()
+        primary.transcribe.side_effect = RuntimeError('provedor primário indisponível')
+        with patch('castanha.engine.get_transcriber', return_value=primary), \
+             patch('castanha.transcription.VpsSshTranscriber') as vps:
+            vps.return_value.transcribe.side_effect = TranscriptionPending('VPS aguardando')
+            text, provider, error = self.engine._transcribe_with_fallback(self.source, 'mic_only', 1)
+        self.assertEqual((text, provider), ('', 'pending'))
+        self.assertIn('VPS aguardando', error)
+
     def test_orphan_job_recovers_if_process_dies_before_metadata_publish(self):
         slug = self.crash()
         (self.engine.storage.bronze_dir / slug / 'metadata.json').unlink()
@@ -302,21 +317,78 @@ class TestDurableJobs(unittest.TestCase):
 
     def test_remote_pending_returns_promptly_and_is_retried(self):
         with patch('castanha.engine.get_transcriber') as provider:
-            provider.return_value.transcribe.side_effect = TranscriptionPending('Aguardando VPS')
+            provider.return_value.transcribe.side_effect = [
+                TranscriptionPending('Aguardando VPS, primeira consulta'),
+                TranscriptionPending('Aguardando VPS, segunda consulta'),
+                self.transcription(),
+            ]
             first = self.engine.stop_recording()
-        self.assertEqual(first['status'], 'partial')
-        slug = first['result']['slug']
-        metadata = self.engine.storage._read_bronze_metadata(slug)
-        self.assertEqual(metadata['processing_status'], 'pending')
-        self.assertEqual(metadata['transcription_provider'], 'pending')
-        self.assertIsNone(metadata['transcription_error'])
-        self.assertTrue(metadata['transcription_pending'])
-        self.assertIn('Aguardando VPS', metadata['transcription_pending_reason'])
-        self.assertTrue(first['result']['transcription_pending'])
-        with patch('castanha.engine.get_transcriber') as provider:
-            provider.return_value.transcribe.return_value = self.transcription()
-            sync_pending(storage=self.engine.storage)
-        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['processing_status'], 'complete')
+            self.assertEqual(first['status'], 'partial')
+            slug = first['result']['slug']
+            metadata = self.engine.storage._read_bronze_metadata(slug)
+            self.assertEqual(metadata['processing_status'], 'pending')
+            self.assertEqual(metadata['transcription_provider'], 'pending')
+            self.assertIsNone(metadata['transcription_error'])
+            self.assertTrue(metadata['transcription_pending'])
+            self.assertIn('Aguardando VPS', metadata['transcription_pending_reason'])
+            self.assertTrue(first['result']['transcription_pending'])
+            job_path = next((self.engine.storage.bronze_dir / slug / '.jobs').glob('*.json'))
+            first_job = json.loads(job_path.read_text())
+            original_path = Path(first_job['audio_path'])
+            original_bytes = original_path.read_bytes()
+
+            second = self.engine.process_pending(slug)
+            second_job = json.loads(job_path.read_text())
+            self.assertEqual(second['result']['transcription_provider'], 'pending')
+            self.assertTrue(second['result']['transcription_pending'])
+            self.assertEqual(second_job['id'], first_job['id'])
+            self.assertEqual(second_job['sha256'], first_job['sha256'])
+            self.assertEqual(original_path.read_bytes(), original_bytes)
+
+            third = self.engine.process_pending(slug)
+            self.assertEqual(third['result']['transcription_provider'], 'groq')
+            self.assertFalse(third['result'].get('transcription_pending', False))
+            final_job = json.loads(job_path.read_text())
+            self.assertEqual(final_job['id'], first_job['id'])
+            self.assertEqual(final_job['sha256'], first_job['sha256'])
+            self.assertEqual(original_path.read_bytes(), original_bytes)
+            self.assertEqual(provider.return_value.transcribe.call_count, 3)
+            self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['processing_status'], 'complete')
+
+    def test_legacy_retry_marks_recording_pending_until_provider_finishes(self):
+        slug = '2026-09-08_1200_legacy-pending'
+        bronze = self.engine.storage.bronze_dir / slug
+        bronze.mkdir(parents=True)
+        audio = bronze / 'audio.ogg'
+        audio.write_bytes(b'legacy-original')
+        self.engine.storage.write_bronze_metadata(slug, {
+            'slug': slug, 'title': 'Legacy', 'mode': 'mic_only',
+            'recordings': [{'id': 'audio.ogg', 'filename': 'audio.ogg', 'path': str(audio),
+                            'transcribed': False, 'duration_seconds': 1}],
+        })
+        original = audio.read_bytes()
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.summarizer, 'generate_silver', return_value='## Resumo\n\nFala'), \
+             patch.object(self.engine.summarizer, 'generate_gold', return_value={'facts': []}):
+            provider.return_value.transcribe.side_effect = [
+                TranscriptionPending('VPS ainda processando'), self.transcription()
+            ]
+            first = self.engine.reprocess_meeting(slug)
+            meta = self.engine.storage._read_bronze_metadata(slug)
+            rec = meta['recordings'][0]
+            self.assertEqual(first['result']['transcription_provider'], 'pending')
+            self.assertTrue(first['result']['transcription_pending'])
+            self.assertEqual(meta['transcription_provider'], 'pending')
+            self.assertIsNone(meta['transcription_error'])
+            self.assertEqual(rec['transcription_provider'], 'pending')
+            self.assertIsNone(rec['transcription_error'])
+            self.assertTrue(rec['transcription_pending'])
+            self.assertEqual(audio.read_bytes(), original)
+
+            second = self.engine.reprocess_meeting(slug)
+            self.assertEqual(second['result']['transcription_provider'], 'groq')
+            self.assertFalse(second['result']['transcription_pending'])
+            self.assertEqual(audio.read_bytes(), original)
 
     def test_mock_append_is_excluded_while_preserving_real_recording(self):
         with patch('castanha.engine.get_transcriber') as provider:
