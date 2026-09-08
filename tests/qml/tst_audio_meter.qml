@@ -20,12 +20,14 @@ TestCase {
     compare(AudioMeterLogic.clampPeak(2), 1)
   }
 
-  function test_logarithmic_levels() {
+  function test_quickshell_peak_levels() {
     var levels = "▁▂▃▄▅▆▇█"
     for (var i = 0; i < levels.length; ++i) {
-      var db = -60 + i * 60 / (levels.length - 1)
-      compare(AudioMeterLogic.levelChar(Math.pow(10, db / 20)), levels.charAt(i))
+      compare(AudioMeterLogic.levelChar(i / (levels.length - 1)), levels.charAt(i))
     }
+    // PwNodePeakMonitor exposes the cube root of PCM peak. Even -90 dB PCM
+    // therefore reaches about 0.0316 here and must still render as silence.
+    compare(AudioMeterLogic.levelChar(Math.pow(10, -90 / 60)), "▁")
     compare(AudioMeterLogic.levelChar(0), "▁")
     compare(AudioMeterLogic.levelChar(2), "█")
   }
@@ -43,7 +45,7 @@ TestCase {
     var samples = AudioMeterLogic.pushSample(original, 1)
     compare(original.length, 2)
     compare(samples.length, 5)
-    compare(AudioMeterLogic.render(samples), "▁▁▆▆█")
+    compare(AudioMeterLogic.render(samples), "▁▁▂▂█")
     for (var i = 0; i < 5; ++i) samples = AudioMeterLogic.pushSample(samples, 0)
     compare(AudioMeterLogic.render(samples), "▁▁▁▁▁")
     compare(AudioMeterLogic.render([0, 0.01, 0.1, 0.5, 1]).length, 5)

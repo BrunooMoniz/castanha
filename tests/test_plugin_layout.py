@@ -12,6 +12,30 @@ OMARCHY_SHELL = Path("/usr/share/omarchy/shell")
 
 
 class PluginLayoutTest(unittest.TestCase):
+    def test_panel_wires_meter_only_while_recording(self):
+        panel = (ROOT / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn('enabled: root.isRecording && !!root.micSource', panel)
+        self.assertIn(
+            'enabled: root.isRecording && root.mode === "dual" && !!root.systemSink',
+            panel,
+        )
+        self.assertIn(
+            'AudioMeterLogic.combinedPeak(\n'
+            '    micPeakMonitor.peak, systemPeakMonitor.peak, mode, micMuted)',
+            panel,
+        )
+        self.assertIn(
+            'if (isRecording) return glyph + "  " + formatTime(elapsedSeconds) + "  " + audioMeter.text',
+            panel,
+        )
+        self.assertIn(
+            'if (isPaused) return glyph + "  " + formatTime(elapsedSeconds)',
+            panel,
+        )
+        self.assertIn('onModeChanged: audioMeter.reset()', panel)
+        self.assertIn('onMicSourceChanged: audioMeter.reset()', panel)
+        self.assertIn('onSystemSinkChanged: audioMeter.reset()', panel)
+
     def test_audio_meter_compiles_with_real_pipewire_monitor(self):
         if not shutil.which("quickshell"):
             self.skipTest("quickshell não instalado")

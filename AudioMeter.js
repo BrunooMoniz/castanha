@@ -17,10 +17,7 @@ function combinedPeak(micPeak, systemPeak, mode, micMuted) {
 
 function levelChar(value) {
   var peak = clampPeak(value)
-  if (peak < 0.001) return LEVELS.charAt(0)
-  var db = 20 * Math.log(peak) / Math.LN10
-  var normalized = Math.max(0, Math.min(1, (db + 60) / 60))
-  return LEVELS.charAt(Math.round(normalized * (LEVELS.length - 1)))
+  return LEVELS.charAt(Math.round(peak * (LEVELS.length - 1)))
 }
 
 function pushSample(samples, peak) {
