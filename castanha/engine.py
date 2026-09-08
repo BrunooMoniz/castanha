@@ -31,8 +31,14 @@ from castanha.summarizer import MeetingSummarizer
 from castanha.transcription import get_transcriber
 from castanha.zinom_adapter import ZinomAdapter
 
+MICROPHONE_GLYPH = "󰍬"
+
 def notify(title: str, message: str, actions: Optional[list] = None, timeout: int = 5000) -> Optional[str]:
-    cmd = ["notify-send", "-a", "Castanha", "-i", "audio-input-microphone", title, message, "-t", str(timeout)]
+    # O ícone raster de audio-input-microphone fica quase preto em temas
+    # escuros. O shell do Omarchy colore este glyph com a cor do texto da
+    # notificação, mantendo contraste em temas claros e escuros.
+    cmd = ["notify-send", "-a", "Castanha", "-h", f"string:omarchy-glyph:{MICROPHONE_GLYPH}",
+           title, message, "-t", str(timeout)]
     if actions:
         for act_id, act_label in actions:
             cmd.extend(["-A", f"{act_id}={act_label}"])
