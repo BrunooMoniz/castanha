@@ -5,9 +5,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from castanha.audio import (AudioDeviceInfo, AudioRecorder, is_safe_capture_peak,
                             read_audio_peak)
+from castanha.daemon import CastanhaDaemon
+from castanha.state import StateManager
 
 
 class TestAudioPeakSidecar(unittest.TestCase):
@@ -62,6 +66,59 @@ class TestAudioPeakSidecar(unittest.TestCase):
             arbitrary.write_text("preservar", encoding="utf-8")
             self.assertFalse(is_safe_capture_peak(audio, arbitrary))
             self.assertTrue(arbitrary.exists())
+
+    def test_pico_atualiza_e_expira_enquanto_agenda_bloqueia(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_home = root / "state"
+            peak = root / "capture.peak"
+            peak.write_text("lavfi.astats.Overall.Peak_level=-18\n", encoding="utf-8")
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                daemon = CastanhaDaemon.__new__(CastanhaDaemon)
+                daemon.config = {"calendar": {"enabled": True, "feeds": [{"url": "blocked"}],
+                                                "zinom": {}, "poll_interval_sec": 0}}
+                daemon.state_mgr = StateManager()
+                daemon.running = True
+                daemon.notified_meeting_uids = set()
+                daemon.retry_scheduler = SimpleNamespace(tick=lambda **kwargs: None)
+                daemon._agenda_thread = None
+                daemon._agenda_result = None
+                daemon._agenda_lock = __import__("threading").Lock()
+                daemon.state_mgr.write({"status": "recording", "started_at": "2026-09-08T00:00:00",
+                                        "audio_peak_path": str(peak), "audio_peak": 0.0})
+                writes = []
+                original_write = daemon.state_mgr.write
+
+                def record_write(updates):
+                    writes.append(dict(updates))
+                    return original_write(updates)
+
+                daemon.state_mgr.write = record_write
+                release = __import__("threading").Event()
+                loops = [0]
+
+                def blocked(_config):
+                    release.wait()
+                    return []
+
+                def sleep(_interval):
+                    loops[0] += 1
+                    if loops[0] == 1:
+                        old = time.time() - 10
+                        os.utime(peak, (old, old))
+                    if loops[0] >= 2:
+                        daemon.running = False
+
+                with patch("castanha.daemon.collect_upcoming", side_effect=blocked), \
+                     patch("castanha.daemon.signal.signal"), \
+                     patch("castanha.daemon.time.sleep", side_effect=sleep):
+                    daemon.run()
+                release.set()
+                if daemon._agenda_thread:
+                    daemon._agenda_thread.join(timeout=1)
+                projected = [w["audio_peak"] for w in writes if "audio_peak" in w]
+                self.assertTrue(any(value > 0 for value in projected))
+                self.assertEqual(projected[-1], 0.0)
 
 
 if __name__ == "__main__":

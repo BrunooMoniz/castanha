@@ -20,6 +20,14 @@ TestCase {
     compare(AudioMeterLogic.clampPeak(2), 1)
   }
 
+  function test_expired_state_peak_is_not_rendered() {
+    var now = 1700000000000
+    compare(AudioMeterLogic.isFresh(1700000000, now, true), true)
+    compare(AudioMeterLogic.isFresh(1699999998.51, now, true), true)
+    compare(AudioMeterLogic.isFresh(1699999998.49, now + 20, true), false)
+    compare(AudioMeterLogic.isFresh(1700000000, now, false), false)
+  }
+
   function test_quickshell_peak_levels() {
     var levels = "▁▂▃▄▅▆▇█"
     for (var i = 0; i < levels.length; ++i) {

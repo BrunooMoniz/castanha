@@ -9,6 +9,14 @@ function clampPeak(value) {
   return Math.min(1, peak)
 }
 
+function isFresh(updatedAt, nowMs, recording) {
+  if (!recording) return false
+  var timestamp = Number(updatedAt)
+  var now = Number(nowMs)
+  return isFinite(timestamp) && timestamp > 0 && isFinite(now)
+    && (now / 1000 - timestamp) <= 1.5
+}
+
 function combinedPeak(micPeak, systemPeak, mode, micMuted) {
   var mic = micMuted ? 0 : clampPeak(micPeak)
   if (mode !== "dual") return mic
