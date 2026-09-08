@@ -3,6 +3,7 @@
 import datetime
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -269,3 +270,35 @@ class TestAgendaAviso(unittest.TestCase):
              patch("castanha.daemon.signal.signal"), patch("castanha.daemon.time.sleep", side_effect=para):
             daemon.run()
         self.assertEqual(StateManager().read()["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")
+
+    def test_agenda_lenta_nao_bloqueia_a_projecao_do_audio(self):
+        daemon, _ = self._daemon()
+        daemon.state_mgr.write({
+            "status": "recording",
+            "started_at": datetime.datetime.now().isoformat(),
+            "audio_peak_path": "/tmp/castanha_rec_1.peak",
+        })
+        release = threading.Event()
+        sleeps = 0
+
+        def slow_agenda(_config):
+            release.wait(timeout=1)
+            return []
+
+        def stop_after_two_ticks(_interval):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps >= 2:
+                daemon.running = False
+                release.set()
+
+        with patch("castanha.daemon.collect_upcoming", side_effect=slow_agenda), \
+             patch("castanha.daemon.read_audio_peak", return_value=0.8) as peak, \
+             patch("castanha.daemon.signal.signal"), \
+             patch("castanha.daemon.time.sleep", side_effect=stop_after_two_ticks):
+            daemon.run()
+        if daemon._agenda_thread:
+            daemon._agenda_thread.join(timeout=1)
+
+        self.assertGreaterEqual(peak.call_count, 2)
+        self.assertEqual(daemon.state_mgr.read()["audio_peak"], 0.8)

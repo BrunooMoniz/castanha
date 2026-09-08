@@ -14,6 +14,7 @@ import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 import "DeliveryStatus.js" as DeliveryStatus
+import "AudioMeter.js" as AudioMeterLogic
 import "i18n.js" as I18N
 
 Panel {
@@ -130,9 +131,14 @@ Panel {
     id: audioMeter
     recording: root.isRecording
     mode: root.mode
-    audioPeak: stateData && stateData.audio_peak ? Number(stateData.audio_peak) : 0
+    micSource: root.micSource
+    audioPeak: root.audioPeakFresh ? Number(stateData.audio_peak) : 0
     micMuted: root.micMuted
   }
+
+  readonly property double audioPeakUpdatedAt: stateData && stateData.audio_peak_updated_at
+    ? Number(stateData.audio_peak_updated_at) : 0
+  readonly property bool audioPeakFresh: AudioMeterLogic.isFresh(audioPeakUpdatedAt, nowMs, isRecording)
 
   // ----------------------------------------------------------- diagnósticos
   readonly property string lastAudioStatus: lastResult && lastResult.audio_status ? lastResult.audio_status : "ok"

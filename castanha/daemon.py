@@ -79,11 +79,65 @@ class CastanhaDaemon:
         self.engine = CastanhaEngine()
         self.running = True
         self.notified_meeting_uids: Set[str] = set()
+        self._agenda_thread = None
+        self._agenda_result = None
+        self._agenda_lock = threading.Lock()
         self.retry_scheduler = RetryScheduler(
             enabled=self.config.get("sync", {}).get("auto_retry_enabled", False))
 
     def stop(self, *args):
         self.running = False
+
+    def _start_agenda_refresh(self):
+        """Busca a agenda fora do loop que projeta o áudio e o estado."""
+        if self._agenda_thread and self._agenda_thread.is_alive():
+            return
+
+        def worker():
+            try:
+                result = (collect_upcoming(self.config), None)
+            except Exception as error:
+                result = ([], error)
+            with self._agenda_lock:
+                self._agenda_result = result
+
+        self._agenda_thread = threading.Thread(target=worker, name="castanha-agenda", daemon=True)
+        self._agenda_thread.start()
+
+    def _take_agenda_result(self):
+        with self._agenda_lock:
+            result = self._agenda_result
+            self._agenda_result = None
+            return result
+
+    def _apply_agenda_result(self, result):
+        if result is None:
+            return
+        proximas, error = result
+        try:
+            proxima = next_timed(proximas)
+            self.state_mgr.write({
+                "next_meeting": proxima.to_dict() if proxima else None,
+                "upcoming_meetings": [m.to_dict() for m in proximas],
+                "agenda_error": agenda_warning(self.config, error),
+            })
+            if proxima:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                inicio = proxima.start if proxima.start.tzinfo else proxima.start.replace(
+                    tzinfo=datetime.timezone.utc)
+                time_until = (inicio - now_utc).total_seconds()
+                notify_before_min = self.config.get("calendar", {}).get("notify_minutes_before", 2)
+                if (0 <= time_until <= (notify_before_min * 60)
+                        and proxima.uid not in self.notified_meeting_uids):
+                    self.notified_meeting_uids.add(proxima.uid)
+                    threading.Thread(
+                        target=self._trigger_meeting_alert,
+                        args=(proxima,), daemon=True,
+                        name=f"alert-{proxima.uid}",
+                    ).start()
+        except Exception as error:
+            print(t("daemon.calendar_error", error=error))
+            self.state_mgr.write({"agenda_error": agenda_warning(self.config, error)})
 
     def run(self):
         signal.signal(signal.SIGINT, self.stop)
@@ -102,6 +156,7 @@ class CastanhaDaemon:
         while self.running:
             now = time.time()
             state = self.state_mgr.read()
+            self._apply_agenda_result(self._take_agenda_result())
             self.retry_scheduler.tick(capture_status=state.get("status", "idle"),
                                       processing_pid=state.get("processing_pid"))
 
@@ -130,33 +185,12 @@ class CastanhaDaemon:
             # 2. Verificação periódica de calendário (iCal + contas Google do Zinom)
             if agenda_ligada and (now - last_calendar_check > poll_interval):
                 last_calendar_check = now
-                try:
-                    proximas = collect_upcoming(self.config)
-                    proxima = next_timed(proximas)
-                    self.state_mgr.write({
-                        "next_meeting": proxima.to_dict() if proxima else None,
-                        "upcoming_meetings": [m.to_dict() for m in proximas],
-                        "agenda_error": agenda_warning(self.config),
-                    })
-
-                    if proxima:
-                        next_m = proxima
-                        now_utc = datetime.datetime.now(datetime.timezone.utc)
-                        inicio = next_m.start if next_m.start.tzinfo else next_m.start.replace(
-                            tzinfo=datetime.timezone.utc)
-                        time_until = (inicio - now_utc).total_seconds()
-
-                        if 0 <= time_until <= (notify_before_min * 60) and next_m.uid not in self.notified_meeting_uids:
-                            self.notified_meeting_uids.add(next_m.uid)
-                            threading.Thread(
-                                target=self._trigger_meeting_alert,
-                                args=(next_m,),
-                                daemon=True,
-                                name=f"alert-{next_m.uid}",
-                            ).start()
-                except Exception as e:
-                    print(t("daemon.calendar_error", error=e))
-                    self.state_mgr.write({"agenda_error": agenda_warning(self.config, e)})
+                self._start_agenda_refresh()
+                # Mantém a semântica do ciclo imediato quando a fonte retorna
+                # rápido, mas nunca espera uma consulta bloqueada.
+                if self._agenda_thread:
+                    self._agenda_thread.join(timeout=0.02)
+                    self._apply_agenda_result(self._take_agenda_result())
 
             time.sleep(1)
 
