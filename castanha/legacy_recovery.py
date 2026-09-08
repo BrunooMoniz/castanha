@@ -66,7 +66,14 @@ def _source(bronze):
         raise BronzeIngestError("Provedor legado ausente, simulado ou desconhecido")
     if records[0].get("transcription_provider") in ("mock", "failed", "pending"):
         raise BronzeIngestError("Gravação legada inválida")
-    if (bronze / ".jobs").exists() or (bronze / ".brain-ingest").exists():
+    ingest = bronze / ".brain-ingest"
+    # Uma síntese recusada antes de validar a origem deixa só o lock vazio.
+    # Qualquer outro conteúdo continua sendo evidência de fluxo nativo.
+    has_ingest = ingest.is_symlink() or (ingest.exists() and (
+        not ingest.is_dir() or any(path.name != ".processing.lock" or
+                                  path.is_symlink() or not path.is_file() or path.stat().st_size
+                                  for path in ingest.iterdir())))
+    if (bronze / ".jobs").exists() or has_ingest:
         raise BronzeIngestError("Já existe fluxo nativo; recuperação legada não se aplica")
     audio = bronze / "audio.ogg"
     audio_fp = _fingerprint(audio)

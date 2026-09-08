@@ -287,6 +287,45 @@ class TestLegacySyncPath(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_failed_synthesis_attempt_does_not_strand_legacy_recovery(self):
+        import subprocess
+        from castanha.legacy_recovery import prepare_legacy_manifest, submit_legacy_recovery
+        from castanha.sync import pending_candidates, sync_meeting
+
+        slug = "legado-pendente"
+        bronze = self.storage.bronze_dir / slug
+        bronze.mkdir()
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=0.2", "-c:a", "libopus",
+                        str(bronze / "audio.ogg")], check=True, capture_output=True)
+        metadata = {**META, "slug": slug,
+                    "recordings": [{"id": "audio.ogg", "transcription_provider": "groq"}]}
+        write_json(bronze / "metadata.json", metadata)
+        (bronze / "transcript_raw.txt").write_text("Transcrição legada integral", encoding="utf-8")
+        original = (bronze / "metadata.json").read_bytes()
+        prepare_legacy_manifest(bronze)
+        self.client.default_state = "pending"
+        first = submit_legacy_recovery(bronze, self.client, workspace="fixture-workspace")
+        self.assertEqual(first["status"], "pending")
+        failed = ingest_current_recordings(bronze, slug, metadata, self.client,
+                                          workspace="fixture-workspace", silver_text=SILVER, gold=GOLD)
+        self.assertEqual(failed["status"], "error")
+        self.assertTrue((bronze / ".brain-ingest").is_dir())
+        self.assertFalse((bronze / ".brain-ingest" / "destination.json").exists())
+        self.assertEqual([s for _, s in pending_candidates(self.storage)], [slug])
+        self.client.default_state = "completed"
+        resumed = sync_meeting(slug, self.storage)
+        self.assertEqual(resumed["status"], "ok", resumed)
+        self.assertEqual((bronze / "metadata.json").read_bytes(), original)
+        self.assertEqual(pending_candidates(self.storage), [])
+        self.assertEqual(self.storage.delivery_projection(slug, failed)["status"], "ok")
+        self.assertEqual(len(self.client.requests), 1, "recuperação retoma o pedido já enviado")
+        # Um checkpoint sem destino não é resíduo vazio e continua bloqueado.
+        write_json(bronze / ".brain-ingest" / "checkpoint.json", {})
+        with self.assertRaises(BronzeIngestError):
+            submit_legacy_recovery(bronze, self.client, workspace="fixture-workspace")
+        self.assertEqual((bronze / "metadata.json").read_bytes(), original)
+
     def test_pending_synthesis_is_requeried_and_settles(self):
         from castanha.sync import pending_candidates, sync_meeting
         slug = "legado"
