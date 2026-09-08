@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,32 +61,39 @@ def _isolated_null_sink(name):
     if default_sink.returncode != 0:
         raise RuntimeError(default_sink.stdout)
 
-    loaded = _command_output([
-        "pactl", "load-module", "module-null-sink",
-        f"sink_name={name}",
-        "sink_properties=device.description=CastanhaPeakTest",
-        "rate=48000",
-        "channels=2",
-    ])
-    if loaded.returncode != 0:
-        raise RuntimeError(loaded.stdout)
-    module_id = loaded.stdout.strip()
+    module_ids = set()
     cleaned = False
+
+    def discover_module_ids():
+        modules = _command_output(["pactl", "list", "modules", "short"])
+        if modules.returncode != 0:
+            return None
+        expected_argument = f"sink_name={name}"
+        found = []
+        for line in modules.stdout.splitlines():
+            fields = line.split()
+            if (len(fields) >= 3 and fields[1] == "module-null-sink"
+                    and expected_argument in fields[2:]):
+                found.append(fields[0])
+        return found
 
     def cleanup():
         nonlocal cleaned
         if cleaned:
             return True
         for _ in range(3):
-            unloaded = _command_output(["pactl", "unload-module", module_id])
-            if unloaded.returncode == 0:
+            discovered = discover_module_ids()
+            if discovered is None:
+                time.sleep(0.1)
+                continue
+            targets = module_ids.union(discovered)
+            if not targets:
                 cleaned = True
                 return True
-            modules = _command_output(["pactl", "list", "modules", "short"])
-            if modules.returncode == 0 and not any(
-                line.split("\t", 1)[0] == module_id
-                for line in modules.stdout.splitlines()
-            ):
+            for target in targets:
+                _command_output(["pactl", "unload-module", target])
+            remaining = discover_module_ids()
+            if remaining == []:
                 cleaned = True
                 return True
             time.sleep(0.1)
@@ -105,6 +113,19 @@ def _isolated_null_sink(name):
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, cleanup_on_signal)
     try:
+        loaded = _command_output([
+            "pactl", "load-module", "module-null-sink",
+            f"sink_name={name}",
+            "sink_properties=device.description=CastanhaPeakTest",
+            "rate=48000",
+            "channels=2",
+        ])
+        if loaded.returncode != 0:
+            raise RuntimeError(loaded.stdout)
+        module_id = loaded.stdout.strip()
+        if not module_id:
+            raise RuntimeError("pactl não retornou o id do módulo PipeWire")
+        module_ids.add(module_id)
         yield default_sink.stdout.strip()
     finally:
         cleanup_succeeded = cleanup()
@@ -113,10 +134,34 @@ def _isolated_null_sink(name):
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         if not cleanup_succeeded:
-            raise RuntimeError(f"não foi possível descarregar o módulo PipeWire {module_id}")
+            raise RuntimeError(f"não foi possível descarregar o sink PipeWire {name}")
 
 
 class PluginLayoutTest(unittest.TestCase):
+    def test_uncertain_sink_creation_is_cleaned_up_by_name(self):
+        responses = iter([
+            subprocess.CompletedProcess([], 0, "default-sink\n"),
+            subprocess.CompletedProcess([], 124, "command timed out"),
+            subprocess.CompletedProcess(
+                [], 0,
+                "55\tmodule-null-sink\tsink_name=castanha_peak_fixture rate=48000\n",
+            ),
+            subprocess.CompletedProcess([], 0, ""),
+            subprocess.CompletedProcess([], 0, ""),
+        ])
+        commands = []
+
+        def fake_command(command, timeout=5):
+            commands.append(command)
+            return next(responses)
+
+        with mock.patch(f"{__name__}._command_output", side_effect=fake_command):
+            with self.assertRaisesRegex(RuntimeError, "command timed out"):
+                with _isolated_null_sink("castanha_peak_fixture"):
+                    self.fail("a criação incerta não pode chegar ao corpo do contexto")
+
+        self.assertIn(["pactl", "unload-module", "55"], commands)
+
     def test_tone_command_targets_the_isolated_sink(self):
         command = _tone_command("castanha_peak_fixture")
         device_index = command.index("-device")
