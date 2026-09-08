@@ -1,12 +1,13 @@
 """Contrato do medidor auxiliar: o pico vem da captura real, não do QML."""
 
 import os
+import signal
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from castanha.audio import (AudioDeviceInfo, AudioRecorder, is_safe_capture_peak,
                             read_audio_peak)
@@ -58,6 +59,31 @@ class TestAudioPeakSidecar(unittest.TestCase):
             self.assertIsNone(stopper.peak_path)
         finally:
             peak.unlink(missing_ok=True)
+
+    def test_pause_resume_conserva_o_sidecar_e_deixa_o_pico_expirar(self):
+        """Pausar congela a captura; o daemon então não deixa a barra presa."""
+        with tempfile.TemporaryDirectory() as directory:
+            peak = Path(directory) / "capture.peak"
+            peak.write_text("lavfi.astats.Overall.Peak_level=-18\n", encoding="utf-8")
+            recorder = AudioRecorder()
+            recorder.process = Mock(pid=4242, poll=Mock(return_value=None))
+            recorder.peak_path = peak
+
+            with patch("castanha.audio.os.getpgid", return_value=4242) as getpgid, \
+                    patch("castanha.audio.os.killpg") as killpg:
+                recorder.pause()
+                recorder.resume()
+
+            getpgid.assert_any_call(4242)
+            self.assertEqual(
+                [call.args for call in killpg.call_args_list],
+                [(4242, signal.SIGSTOP), (4242, signal.SIGCONT)],
+            )
+            self.assertTrue(peak.exists(), "pausa/retomada não pode apagar o sidecar")
+
+            old = time.time() - 10
+            os.utime(peak, (old, old))
+            self.assertIsNone(read_audio_peak(peak), "pico congelado deve expirar")
 
     def test_estado_nao_pode_apagar_caminho_arbitrario(self):
         with tempfile.TemporaryDirectory() as directory:
