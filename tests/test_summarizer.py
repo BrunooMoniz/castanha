@@ -586,6 +586,8 @@ class TestHermesNoSummarizer(unittest.TestCase):
         self.assertEqual(S.HermesSshLlm._answer("# Resumo\n\nDecidido.\n\n\nsession_id: 20260908_021756_3235f1\n"),
                          "# Resumo\n\nDecidido.")
         self.assertEqual(S.HermesSshLlm._answer('{"facts": []}\n\nsession_id: x\n'), '{"facts": []}')
+        # 07/09: o aviso da CLI sobre "-t none" vazou para o Silver e para o Zinom.
+        self.assertEqual(S.HermesSshLlm._answer("Warning: Unknown toolsets: none\n\n# Resumo\n\nsession_id: y\n"), "# Resumo")
 
     def test_gold_no_hermes_recebe_a_transcricao_inteira(self):
         s = self.summarizer()

@@ -273,8 +273,9 @@ HERMES_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                    "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"]
 HERMES_POLL_SEC = 5
 HERMES_JSON_INSTRUCTION = "Responda SOMENTE com o objeto JSON pedido, sem texto antes ou depois."
-# A CLI imprime "session_id: ..." antes OU depois da resposta (varia por versão).
-_SESSION_LINE = re.compile(r"^\s*session_id:[^\n]*\n?", re.M)
+# A CLI imprime "session_id: ..." antes OU depois da resposta (varia por versão),
+# e avisos como "Warning: Unknown toolsets: none" saem no stdout junto com ela.
+_SESSION_LINE = re.compile(r"^\s*(?:session_id:|Warning:)[^\n]*\n?", re.M)
 # Caminho ou coisa parecida com chave não entra em mensagem de produto.
 _UNSAFE_TOKEN = re.compile(r"\S*/\S*|[A-Za-z0-9_-]{32,}")
 
