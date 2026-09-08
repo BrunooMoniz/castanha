@@ -271,6 +271,22 @@ class TestAgendaAviso(unittest.TestCase):
             daemon.run()
         self.assertEqual(StateManager().read()["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")
 
+    def test_daemon_preserva_eventos_quando_a_atualizacao_falha(self):
+        from castanha.state import StateManager
+        daemon, _ = self._daemon()
+        anteriores = [{"uid": "existente", "title": "Reunião preservada"}]
+        daemon.state_mgr.write({
+            "next_meeting": anteriores[0],
+            "upcoming_meetings": anteriores,
+        })
+
+        daemon._apply_agenda_result(([], RuntimeError("HTTP 429: Too Many Requests")))
+
+        estado = StateManager().read()
+        self.assertEqual(estado["next_meeting"], anteriores[0])
+        self.assertEqual(estado["upcoming_meetings"], anteriores)
+        self.assertEqual(estado["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")
+
     def test_agenda_lenta_nao_bloqueia_a_projecao_do_audio(self):
         daemon, _ = self._daemon()
         daemon.state_mgr.write({

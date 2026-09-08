@@ -13,8 +13,9 @@ function isFresh(updatedAt, nowMs, recording) {
   if (!recording) return false
   var timestamp = Number(updatedAt)
   var now = Number(nowMs)
+  var age = now / 1000 - timestamp
   return isFinite(timestamp) && timestamp > 0 && isFinite(now)
-    && (now / 1000 - timestamp) <= 1.5
+    && age >= 0 && age <= 1.5
 }
 
 function combinedPeak(micPeak, systemPeak, mode, micMuted) {

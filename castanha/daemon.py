@@ -114,6 +114,12 @@ class CastanhaDaemon:
         if result is None:
             return
         proximas, error = result
+        if error is not None:
+            # Uma falha de atualização não invalida a última agenda conhecida.
+            # Preserva os eventos no painel e troca somente o aviso de saúde.
+            print(t("daemon.calendar_error", error=error))
+            self.state_mgr.write({"agenda_error": agenda_warning(self.config, error)})
+            return
         try:
             proxima = next_timed(proximas)
             self.state_mgr.write({

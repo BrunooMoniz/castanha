@@ -25,6 +25,7 @@ TestCase {
     compare(AudioMeterLogic.isFresh(1700000000, now, true), true)
     compare(AudioMeterLogic.isFresh(1699999998.51, now, true), true)
     compare(AudioMeterLogic.isFresh(1699999998.49, now + 20, true), false)
+    compare(AudioMeterLogic.isFresh(1700003600, now, true), false)
     compare(AudioMeterLogic.isFresh(1700000000, now, false), false)
   }
 
