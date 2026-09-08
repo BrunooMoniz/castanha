@@ -16,20 +16,35 @@ ROOT = Path(__file__).resolve().parents[1]
 OMARCHY_SHELL = Path("/usr/share/omarchy/shell")
 
 
-def _command_output(command):
-    return subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+def _command_output(command, timeout=5):
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return subprocess.CompletedProcess(command, 124, output + "command timed out")
+
+
+def _tone_command(sink_name):
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000:duration=2",
+        "-f", "pulse", "-device", sink_name, "castanha-peak-test",
+    ]
 
 
 def _castanha_is_idle():
     executable = shutil.which("castanha")
     if not executable:
-        return True
+        return False
     result = _command_output([executable, "status", "--json"])
     if result.returncode != 0:
         return False
@@ -60,9 +75,21 @@ def _isolated_null_sink(name):
     def cleanup():
         nonlocal cleaned
         if cleaned:
-            return
-        cleaned = True
-        _command_output(["pactl", "unload-module", module_id])
+            return True
+        for _ in range(3):
+            unloaded = _command_output(["pactl", "unload-module", module_id])
+            if unloaded.returncode == 0:
+                cleaned = True
+                return True
+            modules = _command_output(["pactl", "list", "modules", "short"])
+            if modules.returncode == 0 and not any(
+                line.split("\t", 1)[0] == module_id
+                for line in modules.stdout.splitlines()
+            ):
+                cleaned = True
+                return True
+            time.sleep(0.1)
+        return False
 
     previous_handlers = {}
 
@@ -80,13 +107,22 @@ def _isolated_null_sink(name):
     try:
         yield default_sink.stdout.strip()
     finally:
-        cleanup()
-        atexit.unregister(cleanup)
+        cleanup_succeeded = cleanup()
+        if cleanup_succeeded:
+            atexit.unregister(cleanup)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        if not cleanup_succeeded:
+            raise RuntimeError(f"não foi possível descarregar o módulo PipeWire {module_id}")
 
 
 class PluginLayoutTest(unittest.TestCase):
+    def test_tone_command_targets_the_isolated_sink(self):
+        command = _tone_command("castanha_peak_fixture")
+        device_index = command.index("-device")
+        self.assertEqual(command[device_index + 1], "castanha_peak_fixture")
+        self.assertEqual(command[-1], "castanha-peak-test")
+
     def test_panel_wires_meter_only_while_recording(self):
         panel = (ROOT / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn('RecordingAudioMeter {', panel)
@@ -136,11 +172,9 @@ class PluginLayoutTest(unittest.TestCase):
                 output = ""
                 try:
                     time.sleep(0.8)
-                    tone = _command_output([
-                        "ffmpeg", "-hide_banner", "-loglevel", "error",
-                        "-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000:duration=2",
-                        "-f", "pulse", sink_name,
-                    ])
+                    if not _castanha_is_idle():
+                        self.skipTest("Castanha deixou idle; smoke cancelado antes do tom")
+                    tone = _command_output(_tone_command(sink_name), timeout=5)
                     self.assertEqual(tone.returncode, 0, tone.stdout)
                     output, _ = shell.communicate(timeout=9)
                 finally:
