@@ -28,7 +28,10 @@ Substituto aberto e nativo do Granola: grava chamadas sem bot, separa áudio em 
 3. **Esteira Bronze -> Silver -> Gold**:
    - **Bronze**: Áudio original compactado em Opus + `metadata.json` + `transcript_raw.txt`.
    - **Silver**: Notas de reunião estruturadas em Markdown (YAML frontmatter, Resumo Executivo, Discussões, Decisões Tomadas e Ações).
-   - **Gold**: Fatos atômicos preservados no Bronze/Gold, pendentes de suporte a origem no servidor. A entrega atual publica somente a nota narrativa via `remember`.
+   - **Gold**: Fatos atômicos, cada um citando a passagem literal do Silver de onde saiu.
+   - **No Zinom**: a transcrição (Bronze) e o resumo (Silver, como documento de síntese) ficam
+     pesquisáveis; os fatos citados vão junto do Silver e o servidor confere cada passagem
+     (posição em bytes e hash) antes de gravar. Fato sem passagem literal é descartado.
    - O áudio entra no Bronze antes de qualquer transcrição. Se ela falhar (sem internet, Groq fora
      do ar), o painel mostra "tentar de novo" e `castanha retry` reprocessa só o que faltou, sem
      apagar nada. Reunião longa vai em fatias para a Groq e as notas saem em partes (uma por
@@ -156,7 +159,15 @@ O arquivo de configuração vive em `~/.config/castanha/config.json`:
     "groq_api_key": "sua-chave-groq"
   },
   "llm": {
-    "provider": "groq",
+    "provider": "hermes_ssh",
+    "hermes_ssh_host": "zinom-vps-2",
+    "hermes_models": [
+      {"provider": "anthropic", "model": "claude-opus-5"},
+      {"provider": "openai-codex", "model": "gpt-5.5"}
+    ],
+    "hermes_reasoning": "medium",
+    "hermes_timeout_sec": 900,
+    "fallback_provider": "groq",
     "api_key": "sua-chave-groq",
     "model": "openai/gpt-oss-120b"
   },
@@ -173,9 +184,22 @@ na VPS sem prender a conexão SSH; `castanha sync --all` consulta o resultado e
 retoma checkpoints. SCP tem limite de 30 segundos e cada SSH, 15 segundos.
 A VPS precisa de `flock`, `nohup` e do transcritor `/root/castanha-transcribe.py`.
 
-Uma nota pode estar entregue enquanto seus fatos continuam em `pending_lineage`.
-O Castanha não envia `brain_fact` até o servidor oferecer linhagem recuperável.
-Transcrições mock ficam nos jobs locais e são excluídas das notas reais.
-Notas longas são enviadas inteiras: eventual rejeição do servidor permanece erro
-pendente, sem truncamento silencioso. Consulte `docs/F5-ENTREGA.md` para instalação
-e reversão desta versão sem alterar a worktree XPS ativa.
+### Resumo (Silver e Gold): Hermes na VPS, Groq como reserva
+
+Com `"provider": "hermes_ssh"` (padrão), as notas e os fatos são gerados pela
+Hermes Agent CLI na VPS, com as assinaturas do próprio dono (Claude e Codex), na
+ordem de `hermes_models`: o próximo modelo só entra quando o anterior falhou de
+fato. A chamada roda com `--safe-mode -t none` (sem ferramentas, memória ou MCP):
+quem resume nunca escreve na memória. O prompt viaja só como arquivo, e cada
+pedido vira um job durável em `~/.local/state/castanha/llm/<hash>` na VPS: se o
+resumo passar de `hermes_timeout_sec`, a reunião fica com o resumo pendente e a
+retomada automática encontra o resultado pronto, sem rodar de novo. Só quando a
+cadeia inteira falha (ou o SSH está fora) o Castanha usa a Groq como reserva
+(`fallback_provider`; `""` desliga). `"provider": "groq"` continua valendo como
+primário, com o comportamento antigo (fatias por minuto). Quem resumiu fica em
+`summary_provider` no metadata da reunião.
+
+O Silver vai ao Zinom como documento de síntese, e os fatos Gold vão junto,
+cada um com a passagem literal que o sustenta; fato sem passagem é descartado
+e contado em `facts_descartados`. Transcrições mock ficam nos jobs locais e
+são excluídas das notas reais.
