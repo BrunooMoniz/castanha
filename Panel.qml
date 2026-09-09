@@ -358,9 +358,15 @@ Panel {
   }
 
   // ------------------------------------------------------------------ dados
+  // XDG_STATE_HOME antes de HOME, igual ao get_state_dir() do Python: com a
+  // variável definida, a CLI escrevia num acervo e o painel lia noutro — o
+  // painel mostrava o estado real da máquina mesmo apontado para um acervo
+  // de teste ou de demonstração.
+  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/castanha"
+
   FileView {
     id: stateFile
-    path: Quickshell.env("HOME") + "/.local/state/castanha/state.json"
+    path: root.stateDir + "/state.json"
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -537,6 +543,15 @@ Panel {
   }
 
   // ------------------------------------------------------------------ painel
+  // Geometria do card do popout, em coordenadas de tela. Só o gerador de
+  // capturas usa isto: fotografar a tela inteira arrastaria as janelas de
+  // trabalho (e os dados reais dentro delas) para uma imagem pública.
+  function cardGeometry() {
+    if (!panel || !root.opened) return null
+    return Qt.rect(panel.cardOrigin.x, panel.cardOrigin.y,
+                   panel.contentWidth, panel.contentHeight)
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: button

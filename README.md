@@ -2,229 +2,353 @@ English | [Português (Brasil)](README.pt-BR.md)
 
 # Castanha 🌰
 
-Executive assistant and smart meeting recorder for Linux and Omarchy.
+**Record your meetings on Linux without inviting a bot.** Castanha sits in your
+Omarchy bar, captures both sides of the call straight from PipeWire, and turns
+the recording into structured notes you can read, search and keep.
 
-An open, native replacement for Granola: it records calls without a bot, splits audio into two channels via PipeWire, syncs with Google Calendar, notifies you before the meeting, and turns raw transcripts into structured notes (Bronze, Silver and Gold), ready for **Zinom** and your **LLM Wiki**. English by default, Brazilian Portuguese when your locale is `pt_BR`.
+No participant sees a "Castanha has joined the meeting" banner, because nothing
+joins the meeting — the audio is captured on your own machine.
 
 <p align="center">
-  <img src="preview.png" alt="Castanha panel on Omarchy" width="480">
+  <img src="docs/images/panel.png" alt="The Castanha panel: next meeting, upcoming agenda and recent notes" width="380">
+  &nbsp;&nbsp;
+  <img src="docs/images/panel-recording.png" alt="Castanha recording: live timer, dual-channel capture and finish button" width="380">
+</p>
+
+<p align="center">
+  <em>Idle, with the agenda and recent notes (left) and mid-recording, with the
+  live timer (right). All data shown is simulated.</em>
 </p>
 
 ---
 
-## 🚀 Key Features
+## Start here: your first recording in 3 minutes
 
-1. **Bot-Free Capture via PipeWire**:
-   - Silently records calls on Google Meet, Teams, Zoom and WhatsApp Web/Desktop.
-   - **Dual Mode**: left channel (the user's microphone) and right channel (the remote participants' audio).
-   - **In-Person Mode**: records only the computer's microphone for in-person meetings.
-2. **Google Calendar Integration**:
-   - Direct sync via a private iCal feed or integration with the Zinom hub.
-   - Every event from your calendars (the primary one of each account and the ones you can edit, such as
-     a company group calendar), including all-day events and events without a call link;
-     whatever is not a meeting you hide in the panel (the whole series, in one go).
-   - Interactive popup 2 minutes before, with a button to join the call and a button to record.
-   - Automatic capture of attendees (names and emails), agenda and links.
-3. **Bronze -> Silver -> Gold Pipeline**:
-   - **Bronze**: original audio compressed to Opus + `metadata.json` + `transcript_raw.txt`.
-   - **Silver**: structured meeting notes in Markdown (YAML frontmatter, Executive Summary, Discussions, Decisions Made and Actions).
-   - **Gold**: atomic facts, each citing the verbatim passage of the Silver notes it came from.
-   - **In Zinom**: the transcript (Bronze) and the summary (Silver, as a synthesis document) are
-     searchable; the cited facts travel with the Silver and the server verifies each passage
-     (byte offsets and hash) before storing it. A fact without a verbatim passage is dropped.
-   - Audio lands in Bronze before any transcription. If transcription fails (no internet,
-     Groq down), the panel shows "try again" and `castanha retry` reprocesses only what was
-     missing, without deleting anything. A long meeting goes to Groq in slices and the notes
-     come out in parts (one per minute, on the free plan), so a 2-hour meeting takes a few
-     minutes.
-   - Without a Groq key and without a VPS, the transcription failure is declared. The mock
-     transcriber only comes in with `"provider": "mock"` in the config (or
-     `CASTANHA_MOCK_TRANSCRIBER=1`), for testing.
-4. **Native Omarchy Plugin (Quickshell)**:
-   - Discreet bar widget with live status (`● REC 00:14:20`).
-   - Popout panel with recording control, the next meeting and quick access to the notes.
-   - Global keyboard shortcut in Hyprland (`Super+Alt+R`).
-5. **Flexible Backend**:
-   - Runs 100% locally or sends heavy processing to a remote VPS.
-
----
-
-## 📦 Installation
-
-### Via the Omarchy Plugin Marketplace (Recommended)
+### 1. Install it
 
 ```bash
 omarchy plugin add https://github.com/BrunooMoniz/castanha --enable
 ~/.config/omarchy/plugins/io.github.brunoomoniz.castanha/setup
 ```
 
-### Manual Installation
+The `setup` step is what makes the `castanha` command available and creates
+your config file. It never overwrites an existing configuration.
+
+### 2. Put the icon on the bar
 
 ```bash
-git clone https://github.com/BrunooMoniz/castanha.git ~/.local/share/castanha
-cd ~/.local/share/castanha && ./install.sh
+omarchy bar put io.github.brunoomoniz.castanha
 ```
 
-To add the global shortcut in Hyprland (`~/.config/hypr/hyprland.conf`):
+A microphone icon appears in your bar. That is the whole UI.
+
+### 3. Record something
+
+Click the icon and press **Start recording** — or bind a key:
+
 ```ini
+# ~/.config/hypr/hyprland.conf
 bind = $mainMod ALT, R, exec, castanha toggle
 ```
 
----
+Talk for a minute, then press **Finish and save**. When it is done you have:
 
-## 🗑️ Removal
-
-To uninstall the plugin and the command from the machine:
-```bash
-rm -f ~/.local/bin/castanha
-omarchy plugin remove io.github.brunoomoniz.castanha
+```
+~/Notes/Meetings/
+├── bronze/2026-02-17_0900_weekly-product-sync/   # audio + raw transcript
+├── silver/2026-02-17_0900_weekly-product-sync.md # the readable note
+└── gold/2026-02-17_0900_weekly-product-sync.json # extracted facts
 ```
 
+Open the note with `castanha notes --open`. That's it — you are using Castanha.
+
+> **Works out of the box?** Recording, the timer, the notes list and the audio
+> diagnosis need nothing but FFmpeg and PipeWire. **Transcription and summaries
+> need a provider** — see [Turning speech into notes](#turning-speech-into-notes)
+> below. Until you configure one, Castanha keeps the audio safe in Bronze and
+> tells you the transcription is pending instead of pretending it worked.
+
 ---
 
-## 📋 System Requirements
+## What you actually get
 
-- **Omarchy** with omarchy-shell / Quickshell
-- **PipeWire** with the pulse module (`pactl`)
-- **FFmpeg** and **ffprobe**
-- **Python** 3.10 or higher
+**Both sides of the conversation, separated.** Castanha records your microphone
+on one channel and the remote participants' audio on the other, so the
+transcript can tell you apart from everyone else. Works with Google Meet,
+Teams, Zoom and WhatsApp — anything that plays audio through PipeWire. For
+in-person meetings, `castanha start --mic-only` records just the room.
+
+**Notes, not a wall of text.** The raw transcript is only the first stage:
+
+| Stage | What it is | Where it lands |
+|---|---|---|
+| **Bronze** | The evidence: Opus audio, `metadata.json`, raw transcript | `bronze/<slug>/` |
+| **Silver** | The note a human reads: summary, decisions, action items | `silver/<slug>.md` |
+| **Gold** | Atomic facts, each citing the verbatim passage it came from | `gold/<slug>.json` |
+
+A Gold fact without a supporting verbatim passage is **dropped**, not guessed —
+so nothing in the extracted facts is invented.
+
+**Nothing is lost when something breaks.** The audio reaches Bronze before any
+transcription is attempted. If your connection dies or the provider is down,
+the panel shows *"Transcription pending — tries again"* and the audio waits.
+`castanha retry` picks up exactly what was missing; it never deletes and never
+starts over.
+
+**It tells you when the audio was bad.** If your microphone was muted the whole
+call, the note says so instead of leaving you with a silent file and no
+explanation.
+
+**Your calendar, if you want it.** Point Castanha at a private iCal feed (or
+the Zinom hub) and the panel lists what's next, with a button to join the call
+and a button to record it. Two minutes before a meeting you get a popup. Fully
+optional — Castanha works fine as a manual recorder.
 
 ---
 
-## 🛠️ CLI Usage
+## Requirements
 
-```bash
-# Start recording a meeting
-castanha start
-castanha start --mic-only          # In-person mode (microphone only)
-castanha start --title "Team Sync"
+| | |
+|---|---|
+| **Omarchy** | with omarchy-shell / Quickshell |
+| **PipeWire** | with the pulse module (`pactl`) |
+| **FFmpeg** | plus `ffprobe` |
+| **Python** | 3.10 or newer |
 
-# Toggle recording (starts when idle, stops when recording)
-castanha toggle
+All four are already present on a standard Omarchy install. `setup` warns you
+about anything missing instead of failing halfway through.
 
-# Pause and resume
-castanha pause
-castanha resume
+---
 
-# Stop and process the notes
-castanha stop
+## Turning speech into notes
 
-# Resume pending jobs and deliveries, including recordings without notes
-castanha sync --all
-castanha sync --all --limit 20     # Limits the backlog, not just recent meetings
+Castanha does not ship a transcription service. You choose one, and the choice
+is explicit — it will never silently send your meetings somewhere you didn't
+configure.
 
-# Check status
-castanha status
-castanha status --json
+Edit `~/.config/castanha/config.json`:
 
-# Start the calendar and notification daemon
-castanha daemon --background
-castanha daemon --stop             # Stop the running daemon
-castanha daemon --status           # Whether a daemon is running, and which PID
-
-# List and open notes
-castanha notes
-castanha notes --open
-castanha notes <slug>              # Full details of one meeting
-
-# Second chance: transcribe again a recording that was left without notes
-# (no internet at stop time, Groq down, slow VPS)
-castanha retry                     # the latest pending one (nothing pending = does nothing)
-castanha retry <slug>              # a specific meeting; if already transcribed, only rebuilds the notes
-castanha retry --all               # all pending ones
-
-# Record a calendar event with its title, attendees and link
-castanha start --event <uid>
-
-# Append the recording to an existing meeting
-castanha start --meeting <slug>
-
-# Send an already-transcribed meeting to Zinom again
-castanha sync [slug]
-
-# Upcoming meetings from the Google accounts connected in Zinom
-castanha agenda
-castanha agenda refresh            # Hit the calendars now and update the state
-castanha agenda hide <uid>         # Stop showing an event (the whole series)
-castanha agenda unhide <uid>       # Show a hidden event again (--all shows everything again)
-castanha agenda hidden             # List what you asked not to show
-castanha refresh-agenda            # Refresh the agenda now across accounts and feeds
-
-# Delete a meeting's audio recording without deleting the notes
-castanha delete-recording <slug>
-
-# Manage a meeting's audio recordings
-castanha recordings list <slug>
-castanha recordings delete <slug> [file]
+```json
+{
+  "transcription": {
+    "provider": "groq",
+    "groq_api_key": "your-groq-key"
+  },
+  "llm": {
+    "provider": "groq",
+    "api_key": "your-groq-key",
+    "model": "openai/gpt-oss-120b"
+  }
+}
 ```
 
----
+That is the simplest working setup: [Groq](https://console.groq.com) transcribes
+with Whisper and writes the summary. A free key is enough to start; long
+meetings are sent in slices so a 2-hour call still completes.
 
-## ⚙️ Configuration
+**Prefer nothing leaving your machine?** Set `"provider": "vps_ssh"` and point
+`vps_ssh_host` at a box you control — Castanha runs Whisper there over SSH,
+resuming durable jobs instead of re-uploading. `deepgram` is also supported.
 
-The configuration file lives at `~/.config/castanha/config.json`:
+**Just testing?** `CASTANHA_MOCK_TRANSCRIBER=1` produces a fake transcript so
+you can see the pipeline end to end. It is opt-in on purpose and never mixes
+into real notes.
+
+Your config file holds API keys, so Castanha creates it as an owner-only
+`0600` file inside a `0700` directory, writes it atomically, and refuses to
+read it through a symlink.
+
+<details>
+<summary><strong>Full configuration reference</strong></summary>
 
 ```json
 {
   "storage": {
     "base_dir": "~/Notes/Meetings"
   },
+  "audio": {
+    "default_mode": "dual",
+    "bitrate": "64k",
+    "sample_rate": 48000,
+    "format": "ogg"
+  },
   "calendar": {
+    "enabled": true,
+    "notify_minutes_before": 2,
+    "auto_record": false,
     "feeds": [
       {
         "name": "My Calendar",
-        "url": "https://calendar.google.com/calendar/ical/your-email/private-xxx/basic.ics"
+        "url": "https://calendar.google.com/calendar/ical/.../basic.ics"
       }
     ]
   },
   "transcription": {
     "provider": "groq",
-    "groq_api_key": "your-groq-key"
+    "groq_api_key": "your-groq-key",
+    "language": "auto"
   },
   "llm": {
-    "provider": "hermes_ssh",
-    "hermes_ssh_host": "zinom-vps-2",
-    "hermes_models": [
-      {"provider": "anthropic", "model": "claude-opus-5"},
-      {"provider": "openai-codex", "model": "gpt-5.5"}
-    ],
-    "hermes_reasoning": "medium",
-    "hermes_timeout_sec": 900,
-    "fallback_provider": "groq",
+    "provider": "groq",
     "api_key": "your-groq-key",
     "model": "openai/gpt-oss-120b"
   },
   "zinom": {
-    "enabled": true,
+    "enabled": false,
     "endpoint": "https://zinom.ai/mcp",
-    "token": "your-bearer-token"
+    "token": ""
   }
 }
 ```
 
-Capture preserves the audio in Bronze before transcription. Remote jobs keep
-running on the VPS without holding the SSH connection; `castanha sync --all`
-checks the result and resumes checkpoints. SCP has a 30-second limit and each
-SSH command, 15 seconds. The VPS needs `flock`, `nohup` and the transcriber
-`/root/castanha-transcribe.py`.
+- `storage.base_dir` — where Bronze/Silver/Gold live.
+- `audio.default_mode` — `dual` (mic + call audio) or `mic_only` (in person).
+- `transcription.language` — `auto` detects PT/EN/mixed; or pin `"pt"`, `"en"`.
+- `calendar.auto_record` — start recording by itself when a meeting begins.
+- `zinom` — optional sync to the [Zinom](https://zinom.ai) hub, off by default.
 
-### Summaries (Silver and Gold): Hermes on the VPS, Groq as backup
+Remote transcription keeps running on the VPS without holding the SSH
+connection open; `castanha sync --all` collects finished results and resumes
+checkpoints. Who wrote each summary is recorded as `summary_provider` in the
+meeting metadata.
 
-With `"provider": "hermes_ssh"` (default), notes and facts are generated by the
-Hermes Agent CLI on the VPS using the owner's own subscriptions (Claude and
-Codex), in the order of `hermes_models`: the next model is tried only when the
-previous one actually failed. The call runs with `--safe-mode -t none` (no tools,
-memory or MCP): the summarizer can never write to memory. The prompt travels only
-as a file, and every request becomes a durable job under
-`~/.local/state/castanha/llm/<hash>` on the VPS: if a summary exceeds
-`hermes_timeout_sec` the meeting is left with a pending summary and the automatic
-retry picks up the finished result instead of running again. Only when the whole
-chain fails (or SSH is down) does Castanha fall back to Groq
-(`fallback_provider`; `""` disables it). `"provider": "groq"` still works as the
-primary, with the old per-minute chunking. Who wrote the summary is recorded in
-`summary_provider` in the meeting metadata.
+</details>
 
-The Silver goes to Zinom as a synthesis document and the Gold facts travel with
-it, each with the verbatim passage that supports it; a fact without a passage is
-dropped and counted in `facts_descartados`. Mock transcriptions stay in local jobs
-and are excluded from real notes.
+---
+
+## Everyday commands
+
+You never need the terminal — the panel covers the common path — but the CLI is
+the whole feature set.
+
+```bash
+castanha toggle              # start if idle, stop if recording (bind this)
+castanha start --mic-only    # in-person meeting
+castanha start --title "Team Sync"
+castanha pause / resume
+castanha stop                # stop and build the notes
+
+castanha notes               # list meetings
+castanha notes --open        # open the latest note
+castanha notes <slug>        # everything about one meeting
+
+castanha status              # what is happening right now (--json too)
+castanha retry               # second chance for a pending transcription
+castanha retry --all
+castanha sync --all          # resume pending jobs and deliveries
+```
+
+<details>
+<summary><strong>Calendar, renaming, cleanup and the daemon</strong></summary>
+
+```bash
+# Calendar
+castanha agenda                    # upcoming meetings
+castanha agenda refresh            # hit the calendars now
+castanha agenda hide <uid>         # stop showing an event (whole series)
+castanha agenda unhide <uid>       # show it again (--all restores everything)
+castanha agenda hidden             # what you asked to hide
+castanha start --event <uid>       # record with the event's title and attendees
+
+# The notification daemon (needed for calendar popups and auto-record)
+castanha daemon --background
+castanha daemon --status
+castanha daemon --stop
+
+# Renaming: the folder name is identity and never changes, only the title
+castanha rename current "Better Name"   # while recording
+castanha rename last "Better Name"
+castanha rename <slug> "Better Name"
+
+# Cleanup — deletions go to base_dir/.trash/, never rm -rf
+castanha delete-recording <slug>   # free space, keep the notes
+castanha delete-meeting <slug>     # remove the meeting (recoverable)
+castanha recordings list <slug>
+castanha recordings delete <slug> [file]
+
+# Append another recording to an existing meeting
+castanha start --meeting <slug>
+```
+
+</details>
+
+---
+
+## Uninstalling
+
+```bash
+rm -f ~/.local/bin/castanha
+omarchy plugin remove io.github.brunoomoniz.castanha
+```
+
+Your meetings in `~/Notes/Meetings` and your config in `~/.config/castanha` are
+**left alone** — removing the plugin never deletes your recordings. Delete
+those two directories yourself if you want them gone.
+
+---
+
+## Privacy and consent
+
+Castanha records audio on your machine. **Recording a conversation without
+telling the other participants is illegal in many places** — one-party versus
+two-party consent varies by country and by state. Castanha does not announce
+itself in the call, so telling people is your job, and you should do it.
+
+What leaves your computer, and only if you configure it: the audio goes to
+whichever transcription provider you set, and the transcript goes to whichever
+LLM provider you set. With `vps_ssh` that is a machine you own. With no
+provider configured, nothing is sent anywhere. Zinom sync is off by default.
+
+The screenshots in this README were generated from simulated data by
+`scripts/gerar-capturas.py`, which builds a throwaway `HOME` with invented
+meetings — no real meeting has ever appeared in them.
+
+---
+
+## Troubleshooting
+
+**The icon isn't on the bar.** `omarchy bar put io.github.brunoomoniz.castanha`,
+then `omarchy-shell shell rescanPlugins`. QML changes need a full
+`omarchy-restart-shell`.
+
+**`castanha: command not found`.** The `setup` step was skipped, or
+`~/.local/bin` is not on your `PATH`.
+
+**The recording is silent.** Check `castanha notes <slug>` — Castanha diagnoses
+the audio and will tell you if the microphone was muted at the system or
+keyboard level.
+
+**Notes never appear.** `castanha status` shows the current state and
+`castanha retry` retries a pending transcription. Your audio is already safe in
+`bronze/<slug>/`.
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/BrunooMoniz/castanha.git
+cd castanha && ./install.sh          # symlinks the plugin into Omarchy
+
+python3 -m unittest discover tests   # ⚠️ starts a REAL recording
+python3 -m unittest tests.test_storage tests.test_cli tests.test_plugin_layout
+python3 scripts/gerar-capturas.py    # regenerate the README screenshots
+```
+
+The full suite exercises the live capture path and will leave a real meeting in
+`~/Notes/Meetings`; prefer the specific modules while iterating. Panel tests
+need a Wayland compositor.
+
+Architecture and design notes live in [`docs/`](docs/). Bug reports and pull
+requests are welcome.
+
+---
+
+## License
+
+[MIT](LICENSE) — Bruno Moniz.
+
+**External dependencies:** FFmpeg/ffprobe (LGPL/GPL), PipeWire via `pactl`
+(MIT), Python 3 standard library (PSF), Quickshell/Qt at runtime (LGPL).
+Optional third-party services, used only when you configure them: Groq,
+Deepgram, Zinom. Castanha bundles none of them and ships no credentials.
