@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from castanha.config import load_config
+from castanha.secure_io import read_json_bounded
 
 @dataclass
 class Utterance:
@@ -188,7 +189,9 @@ class GroqTranscriber(BaseTranscriber):
         )
 
         with urllib.request.urlopen(req, timeout=180) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            # Corpo limitado antes do parse: um endpoint que responde um stream
+            # sem fim consumiria memória até derrubar o processo.
+            return read_json_bounded(resp)
 
     def _request_groq_with_retry(self, file_path: Path, attempts: int = GROQ_ATTEMPTS_PER_CHUNK) -> Dict[str, Any]:
         """Uma fatia, com nova tentativa em erro transitório (429, 5xx, rede).
@@ -343,7 +346,8 @@ class DeepgramTranscriber(BaseTranscriber):
         )
 
         with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            # Idem Groq: teto do lado de quem lê, sem confiar no Content-Length.
+            data = read_json_bounded(resp)
 
         # Extrai canais e falas
         results = data.get("results", {})
@@ -570,7 +574,11 @@ class VpsSshTranscriber(BaseTranscriber):
             try:
                 result = subprocess.run(["ssh", *opts, self.host, command],
                                         capture_output=True, text=True, timeout=15)
-            except subprocess.TimeoutExpired as exc:
+            # OSError junto do timeout: sem o binário `ssh` no PATH, o
+            # FileNotFoundError escapava como falha terminal e o retry
+            # declarava a transcrição perdida em vez de pendente, apagando a
+            # segunda chance de um áudio que está intacto no Bronze.
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 raise TranscriptionPending("SSH indisponível; job preservado para retomar") from exc
             if result.returncode != 0:
                 raise TranscriptionPending("SSH falhou; job preservado para retomar")
@@ -619,7 +627,7 @@ class VpsTranscriber(BaseTranscriber):
 
         req = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=300) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            data = read_json_bounded(resp)
 
         return TranscriptionResult(
             text=data.get("transcript", ""),

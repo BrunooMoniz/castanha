@@ -27,6 +27,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from castanha.config import load_config
+from castanha.secure_io import read_bounded
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "castanha", "version": "0.1.0"}
@@ -130,7 +131,7 @@ class ZinomMcpClient:
                 session = resp.headers.get("mcp-session-id")
                 if session:
                     self.session_id = session
-                raw = resp.read().decode("utf-8")
+                raw = read_bounded(resp).decode("utf-8", "replace")
                 content_type = resp.headers.get("Content-Type", "")
         except urllib.error.HTTPError as e:
             detalhe = _http_error_detail(e)

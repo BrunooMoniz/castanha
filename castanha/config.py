@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+from castanha.secure_io import (
+    InsecureConfigError,
+    read_private_json,
+    write_private_json,
+)
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "storage": {
         "base_dir": "~/Notes/Meetings",
@@ -111,22 +117,32 @@ def load_config() -> Dict[str, Any]:
     # mesmo processo (na suíte, o `provider: mock` de um teste vazava para o
     # outro).
     config = copy.deepcopy(DEFAULT_CONFIG)
-    if cfg_file.exists():
-        try:
-            with open(cfg_file, "r", encoding="utf-8") as f:
-                user_data = json.load(f)
-                # Merge recursivo simples
-                for section, vals in user_data.items():
-                    if isinstance(vals, dict) and section in config:
-                        config[section].update(vals)
-                    else:
-                        config[section] = vals
-        except Exception as e:
-            print(f"[Castanha] Erro ao ler config: {e}. Usando padrões.", file=sys.stderr)
+    try:
+        # Leitura por descritor, sem seguir symlink e com teto de bytes: o
+        # arquivo guarda chaves de Groq, Deepgram, VPS e Zinom, então um
+        # symlink plantado no caminho não pode virar fonte de config nem
+        # destino de escrita.
+        user_data = read_private_json(cfg_file)
+    except InsecureConfigError as e:
+        # Caminho inseguro não é "config ausente": seguir com os padrões
+        # esconderia que outra pessoa controla o arquivo de credenciais.
+        print(f"[Castanha] Configuração recusada por segurança: {e}", file=sys.stderr)
+        user_data = None
+    except Exception as e:
+        print(f"[Castanha] Erro ao ler config: {e}. Usando padrões.", file=sys.stderr)
+        user_data = None
+
+    if isinstance(user_data, dict):
+        # Merge recursivo simples
+        for section, vals in user_data.items():
+            if isinstance(vals, dict) and section in config:
+                config[section].update(vals)
+            else:
+                config[section] = vals
     return config
 
 def save_config(config_data: Dict[str, Any]) -> None:
-    cfg_dir = get_config_dir()
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    with open(get_config_file(), "w", encoding="utf-8") as f:
-        json.dump(config_data, f, indent=2, ensure_ascii=False)
+    # Publicação atômica como arquivo comum `0600` dentro de um diretório
+    # `0700`: nunca existe em disco uma janela em que o segredo esteja legível
+    # por outro usuário local.
+    write_private_json(get_config_file(), config_data)

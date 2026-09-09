@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 from castanha.config import get_state_dir, load_config
+from castanha.secure_io import read_json_bounded
 
 # O plano gratuito da Groq dá 8.000 tokens por MINUTO para o modelo de notas.
 # Uma reunião de 2h13 (05/09/2026) tem 23.454 tokens de transcrição: a chamada
@@ -491,7 +492,9 @@ class MeetingSummarizer:
             espera = float(2 ** tentativa)
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
+                    # Teto no corpo antes do parse: resposta sem fim da LLM
+                    # não pode virar consumo de memória ilimitado.
+                    res = read_json_bounded(resp)
                     content = res["choices"][0]["message"]["content"]
                     self.last_provider = "groq"
                     return content

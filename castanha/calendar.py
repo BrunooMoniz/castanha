@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from castanha.secure_io import read_text_bounded
+
 @dataclass
 class Attendee:
     name: str
@@ -188,7 +190,9 @@ def fetch_feed_events(feed_url: str) -> List[MeetingEvent]:
         if feed_url.startswith(("http://", "https://")):
             req = urllib.request.Request(feed_url, headers={"User-Agent": "Castanha-Omarchy/0.1.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                # Feed iCal remoto também entra limitado: um servidor hostil
+                # não escolhe quanta memória o Castanha usa.
+                text = read_text_bounded(resp)
         else:
             path = Path(feed_url).expanduser()
             if not path.exists():

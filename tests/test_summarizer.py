@@ -32,7 +32,10 @@ def _resposta(texto):
         status = 200
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def read(self): return json.dumps({"choices": [{"message": {"content": texto}}]}).encode("utf-8")
+        _corpo = io.BytesIO(json.dumps({"choices": [{"message": {"content": texto}}]}).encode("utf-8"))
+        headers: dict = {}
+        # read(amt) como no HTTPResponse real: a leitura limitada pede pedaços.
+        def read(self, amt=None): return self._corpo.read(amt) if amt else self._corpo.read()
     return R()
 
 

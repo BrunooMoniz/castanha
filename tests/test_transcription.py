@@ -405,8 +405,15 @@ class TestMimeDoArquivo(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def read(self):
-                return json.dumps({"text": "ok", "segments": [], "duration": 1}).encode("utf-8")
+            headers: dict = {}
+
+            def __init__(self):
+                self._corpo = io.BytesIO(
+                    json.dumps({"text": "ok", "segments": [], "duration": 1}).encode("utf-8"))
+
+            # read(amt) como no HTTPResponse real.
+            def read(self, amt=None):
+                return self._corpo.read(amt) if amt else self._corpo.read()
 
         def falso_urlopen(req, timeout=None):
             capturado["body"] = req.data

@@ -44,7 +44,13 @@ for dep in ffmpeg ffprobe pactl python3; do
     fi
 done
 
-mkdir -p "$bin_dir" "$config_dir" "$HOME/Notes/Meetings/bronze" "$HOME/Notes/Meetings/silver" "$HOME/Notes/Meetings/gold"
+mkdir -p "$bin_dir" "$HOME/Notes/Meetings/bronze" "$HOME/Notes/Meetings/silver" "$HOME/Notes/Meetings/gold"
+
+# O diretório de configuração guarda credenciais (Groq, Deepgram, VPS, Zinom),
+# então nasce e é reafirmado como 0700: sob umask 022 o mkdir daria 0755 e
+# qualquer outro usuário local poderia listar e ler o config.json.
+mkdir -p -m 700 "$config_dir"
+chmod 700 "$config_dir"
 
 # 1. Symlink CLI
 ln -sf "$root/bin/castanha" "$bin_dir/castanha"
@@ -53,9 +59,18 @@ chmod +x "$root/bin/castanha"
 t cli_installed "$bin_dir/castanha"
 
 # 2. Configuração padrão se não existir
-if [ ! -f "$config_dir/config.json" ]; then
-    cp "$root/config.example.json" "$config_dir/config.json"
+# -e e não -f: um symlink plantado em config.json redirecionaria a cópia (e as
+# credenciais que o usuário vai preencher) para fora do diretório dele.
+if [ ! -e "$config_dir/config.json" ]; then
+    # Cria vazio com 0600 ANTES de escrever: a cópia direta publicaria o
+    # arquivo com o modo do umask por uma janela em que ele já tem conteúdo.
+    (umask 077 && : > "$config_dir/config.json")
+    chmod 600 "$config_dir/config.json"
+    cat "$root/config.example.json" > "$config_dir/config.json"
     t config_created "$config_dir/config.json"
+elif [ -f "$config_dir/config.json" ] && [ ! -L "$config_dir/config.json" ]; then
+    # Instalação antiga pode ter deixado 0644 com chave dentro; fecha agora.
+    chmod 600 "$config_dir/config.json"
 fi
 
 echo ""
