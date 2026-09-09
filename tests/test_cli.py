@@ -151,6 +151,90 @@ with patch("castanha.engine.get_transcriber") as provider:
         self.assertFalse(details2["has_audio"])
         self.assertEqual(details2["audio_status"], "audio_apagado")
 
+    def test_cli_rename_and_delete_meeting(self):
+        slug = "2026-09-04_1300_nome-antigo"
+        m_bronze = self.bronze / slug
+        m_bronze.mkdir(parents=True, exist_ok=True)
+        (m_bronze / "audio.ogg").write_bytes(b"dummy audio data")
+        (m_bronze / "transcript_raw.txt").write_text("Transcrição.", encoding="utf-8")
+        (m_bronze / "metadata.json").write_text(json.dumps({
+            "title": "Nome Antigo",
+            "recorded_at": "2026-09-04T13:00:00",
+        }), encoding="utf-8")
+        (self.silver / f"{slug}.md").write_text(
+            '---\ntitle: "Nome Antigo"\n---\n\n# Nome Antigo\n\nCorpo.\n', encoding="utf-8")
+
+        # rename por slug: o título muda, a identidade não.
+        res = self._run_cli("rename", slug, "Nome Novo", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["title"], "Nome Novo")
+        self.assertEqual(data["previous_title"], "Nome Antigo")
+        self.assertTrue((self.bronze / slug).is_dir())
+
+        detalhes = json.loads(self._run_cli("notes", slug, "--json").stdout)
+        self.assertEqual(detalhes["title"], "Nome Novo")
+        self.assertIn('title: "Nome Novo"', (self.silver / f"{slug}.md").read_text(encoding="utf-8"))
+
+        # rename last resolve para a mais recente.
+        res_last = self._run_cli("rename", "last", "Pelo Atalho", "--json")
+        self.assertEqual(res_last.returncode, 0, res_last.stderr)
+        self.assertEqual(json.loads(res_last.stdout)["slug"], slug)
+
+        # Nome vazio é recusado, e nada é reescrito.
+        res_vazio = self._run_cli("rename", slug, "   ", "--json")
+        self.assertEqual(res_vazio.returncode, 1)
+        self.assertEqual(json.loads(self._run_cli("notes", slug, "--json").stdout)["title"],
+                         "Pelo Atalho")
+
+        # delete-meeting move tudo para a lixeira recuperável.
+        res_del = self._run_cli("delete-meeting", slug, "--json")
+        self.assertEqual(res_del.returncode, 0, res_del.stderr)
+        del_data = json.loads(res_del.stdout)
+        self.assertEqual(del_data["status"], "ok")
+        self.assertFalse((self.bronze / slug).exists())
+        self.assertFalse((self.silver / f"{slug}.md").exists())
+        lixeira = Path(del_data["trash_dir"])
+        self.assertTrue((lixeira / "bronze" / "audio.ogg").exists())
+        self.assertTrue((lixeira / "silver.md").exists())
+
+        # A reunião sai da listagem, e apagar de novo falha declarando o motivo.
+        self.assertEqual(json.loads(self._run_cli("notes", "--json").stdout)["notes"], [])
+        self.assertEqual(self._run_cli("delete-meeting", slug, "--json").returncode, 1)
+
+    def test_cli_rename_current_recording_without_touching_the_notes(self):
+        """Renomear a gravação em curso escreve no estado, que é onde o nome está.
+
+        O painel deixa configurar o nome durante a gravação; o Bronze só nasce
+        no stop, e é o current_meeting.title que ele vai carregar.
+        """
+        estado_dir = self.temp_dir / "state" / "castanha"
+        estado_dir.mkdir(parents=True, exist_ok=True)
+        estado = estado_dir / "state.json"
+
+        # Sem gravação em curso, não há o que renomear.
+        estado.write_text(json.dumps({"status": "idle"}), encoding="utf-8")
+        res_idle = self._run_cli("rename", "current", "Qualquer", "--json")
+        self.assertEqual(res_idle.returncode, 1)
+        self.assertEqual(json.loads(res_idle.stdout)["status"], "error")
+
+        estado.write_text(json.dumps({
+            "status": "recording",
+            "started_at": "2026-09-04T14:00:00",
+            "current_meeting": {"title": "Reunião Avulsa", "attendees": []},
+        }), encoding="utf-8")
+
+        res = self._run_cli("rename", "current", "Conversa com a Nora", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout)["title"], "Conversa com a Nora")
+
+        depois = json.loads(estado.read_text(encoding="utf-8"))
+        self.assertEqual(depois["current_meeting"]["title"], "Conversa com a Nora")
+        # O resto do estado da captura é preservado.
+        self.assertEqual(depois["status"], "recording")
+        self.assertEqual(depois["started_at"], "2026-09-04T14:00:00")
+
     def test_agenda_refresh_cli(self):
         res = self._run_cli("agenda", "refresh", "--json")
         self.assertEqual(res.returncode, 0)

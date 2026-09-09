@@ -39,6 +39,17 @@ var STRINGS = {
   "btn.notes": { "en": "Notes", "pt": "Notas" },
   "btn.transcript": { "en": "Transcript", "pt": "Transcrição" },
   "btn.folder": { "en": "Folder", "pt": "Pasta" },
+  "btn.rename": { "en": "Rename", "pt": "Renomear" },
+  "btn.save_name": { "en": "Save name", "pt": "Salvar nome" },
+  "btn.delete_meeting": { "en": "Delete meeting", "pt": "Apagar reunião" },
+  "btn.delete_meeting_confirm": { "en": "Click again to delete", "pt": "Clique de novo para apagar" },
+  "btn.cancel": { "en": "Cancel", "pt": "Cancelar" },
+
+  "field.adhoc_name": { "en": "Name this recording (optional)", "pt": "Nome desta gravação (opcional)" },
+  "field.rename_current": { "en": "Name of the recording in progress", "pt": "Nome da gravação em curso" },
+  "field.new_name": { "en": "New name", "pt": "Novo nome" },
+
+  "panel.meeting_name": { "en": "MEETING NAME", "pt": "NOME DA REUNIÃO" },
 
   "panel.current_meeting": { "en": "CURRENT MEETING", "pt": "REUNIÃO ATUAL" },
   "panel.adhoc_recording": { "en": "Ad-hoc recording", "pt": "Gravação avulsa" },

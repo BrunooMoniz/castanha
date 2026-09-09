@@ -246,6 +246,79 @@ def cmd_delete_recording(args):
         sys.exit(1)
 
 
+def cmd_rename(args):
+    """Renomeia uma reunião gravada, ou a que está sendo gravada agora."""
+    storage = MeetingStorage()
+    titulo = (args.title or "").strip()
+    em_json = getattr(args, "json", False)
+
+    def sair(res, codigo=0):
+        if em_json:
+            print(json.dumps(res, ensure_ascii=False))
+        sys.exit(codigo)
+
+    slug = args.slug
+    if slug in ("current", "atual"):
+        # Gravação em curso: o título mora no estado, e é ele que vira o nome
+        # da nota quando o stop escrever o Bronze.
+        state_mgr = StateManager()
+        estado = state_mgr.read()
+        if estado.get("status") not in ("recording", "paused"):
+            print(t("cli.rename.no_recording"), file=sys.stderr)
+            sair({"status": "error", "message": t("cli.rename.no_recording")}, 1)
+        if not titulo:
+            print(t("storage.rename.empty_title"), file=sys.stderr)
+            sair({"status": "error", "message": t("storage.rename.empty_title")}, 1)
+        atual = dict(estado.get("current_meeting") or {})
+        anterior = atual.get("title") or ""
+        atual["title"] = titulo
+        state_mgr.write({"current_meeting": atual})
+        # A captura já pode ter pasta Bronze (job durável): o metadata acompanha.
+        alvo = estado.get("capture_slug") or estado.get("target_meeting_slug")
+        if alvo:
+            storage.rename_meeting(alvo, titulo)
+        if not em_json:
+            print(t("cli.rename.current", title=titulo))
+        sair({"status": "ok", "title": titulo, "previous_title": anterior, "slug": alvo or ""})
+
+    if slug in ("last", "latest"):
+        recentes = storage.list_recent_meetings(limit=1)
+        if not recentes:
+            print(t("cli.none_found"), file=sys.stderr)
+            sair({"status": "error", "message": t("cli.none_found")}, 1)
+        slug = recentes[0]["slug"]
+
+    res = storage.rename_meeting(slug, titulo)
+    if res.get("status") != "ok":
+        print(t("cli.erro", message=res.get("message")), file=sys.stderr)
+        sair(res, 1)
+    if not em_json:
+        print(t("cli.rename.ok", previous=res.get("previous_title") or slug,
+                title=res["title"], slug=slug))
+    sair(res)
+
+
+def cmd_delete_meeting(args):
+    """Manda a reunião inteira para a lixeira do acervo."""
+    storage = MeetingStorage()
+    slug = args.slug
+    if slug in ("last", "latest"):
+        recentes = storage.list_recent_meetings(limit=1)
+        if not recentes:
+            print(t("cli.none_found"), file=sys.stderr)
+            sys.exit(1)
+        slug = recentes[0]["slug"]
+
+    res = storage.delete_meeting(slug)
+    if getattr(args, "json", False):
+        print(json.dumps(res, ensure_ascii=False))
+    elif res.get("status") == "ok":
+        print(t("cli.delete_meeting.ok", slug=slug, dir=res["trash_dir"]))
+    else:
+        print(t("cli.erro", message=res.get("message")), file=sys.stderr)
+    sys.exit(0 if res.get("status") == "ok" else 1)
+
+
 def cmd_recordings_list(args):
     storage = MeetingStorage()
     recs = storage.list_meeting_recordings(args.slug)
@@ -570,6 +643,19 @@ def main():
     p_del.add_argument("arquivo", nargs="?", default=None, help=t("cli.help.arquivo"))
     p_del.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_del.set_defaults(func=cmd_delete_recording)
+
+    # Rename / Delete meeting
+    p_rename = subparsers.add_parser("rename", help=t("cli.help.rename"))
+    p_rename.add_argument("slug", help=t("cli.help.slug_last"))
+    p_rename.add_argument("title", help=t("cli.help.rename_title"))
+    p_rename.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_rename.set_defaults(func=cmd_rename)
+
+    p_del_meeting = subparsers.add_parser("delete-meeting", aliases=["del-meeting"],
+                                          help=t("cli.help.delete_meeting"))
+    p_del_meeting.add_argument("slug", help=t("cli.help.slug_last"))
+    p_del_meeting.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_del_meeting.set_defaults(func=cmd_delete_meeting)
 
     # Recordings (subcomando)
     p_recs = subparsers.add_parser("recordings", help=t("cli.help.recordings"))

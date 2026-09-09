@@ -349,6 +349,86 @@ class MeetingStorage:
             "remaining_count": len(remaining),
         }
 
+    def _slug_seguro(self, slug: str) -> bool:
+        return bool(slug) and isinstance(slug, str) and slug not in (".", "..") \
+            and "/" not in slug and "\\" not in slug
+
+    def rename_meeting(self, slug: str, novo_titulo: str) -> Dict[str, Any]:
+        """Troca o título de exibição da reunião. O slug é a identidade e não muda.
+
+        Renomear a pasta quebraria o recibo do Zinom, o job durável e a ligação
+        Bronze/Silver/Gold. O que o painel mostra é o title, e é ele que muda —
+        no metadata, no frontmatter do Silver e no seu primeiro cabeçalho.
+        """
+        titulo = (novo_titulo or "").strip()
+        if not self._slug_seguro(slug):
+            return {"status": "error", "message": t("storage.rename.bad_slug", slug=slug)}
+        if not titulo:
+            return {"status": "error", "message": t("storage.rename.empty_title")}
+
+        bronze = self.bronze_dir / slug
+        silver = self.silver_dir / f"{slug}.md"
+        if not bronze.exists() and not silver.exists():
+            return {"status": "error", "message": t("storage.meeting_not_found", slug=slug)}
+
+        anterior = ""
+        if bronze.exists():
+            meta = self._read_bronze_metadata(slug)
+            anterior = meta.get("title") or ""
+            meta["title"] = titulo
+            self.write_bronze_metadata(slug, meta)
+
+        if silver.exists():
+            try:
+                conteudo = silver.read_text(encoding="utf-8")
+                if not anterior:
+                    m = re.search(r'^title:\s*"?(.*?)"?\s*$', conteudo, re.MULTILINE)
+                    anterior = m.group(1) if m else ""
+                conteudo = re.sub(r'^title:\s*.*$', f'title: "{titulo}"', conteudo,
+                                  count=1, flags=re.MULTILINE)
+                conteudo = re.sub(r'^#\s+.*$', f"# {titulo}", conteudo,
+                                  count=1, flags=re.MULTILINE)
+                atomic_write(silver, conteudo)
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        gold = self.gold_dir / f"{slug}.json"
+        if gold.exists():
+            try:
+                dados = json.loads(gold.read_text(encoding="utf-8"))
+                if isinstance(dados, dict) and "title" in dados:
+                    dados["title"] = titulo
+                    write_json(gold, dados)
+            except Exception:
+                pass
+
+        return {"status": "ok", "slug": slug, "title": titulo, "previous_title": anterior}
+
+    def delete_meeting(self, slug: str) -> Dict[str, Any]:
+        """Manda a reunião inteira para a lixeira do acervo, sem apagar de vez.
+
+        Nada de rm -rf: o que sai daqui é recuperável em base_dir/.trash, e a
+        próxima leitura do estado já não conta a reunião como última entrega.
+        """
+        if not self._slug_seguro(slug):
+            return {"status": "error", "message": t("storage.rename.bad_slug", slug=slug)}
+
+        bronze = self.bronze_dir / slug
+        silver = self.silver_dir / f"{slug}.md"
+        gold = self.gold_dir / f"{slug}.json"
+        if not bronze.exists() and not silver.exists():
+            return {"status": "error", "message": t("storage.meeting_not_found", slug=slug)}
+
+        destino = self.base_dir / ".trash" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{slug}"
+        destino.mkdir(parents=True, exist_ok=True)
+        movidos = []
+        for origem, nome in ((bronze, "bronze"), (silver, "silver.md"), (gold, "gold.json")):
+            if origem.exists():
+                shutil.move(str(origem), str(destino / nome))
+                movidos.append(nome)
+
+        return {"status": "ok", "slug": slug, "trash_dir": str(destino), "moved": movidos}
+
     def save_silver(
         self,
         slug: str,

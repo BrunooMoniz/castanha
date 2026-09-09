@@ -76,6 +76,34 @@ Panel {
     root.expandedNoteSlug = (root.expandedNoteSlug === slug) ? "" : String(slug || "")
   }
 
+  // Menu de contexto (botão direito) de uma nota: renomear e apagar.
+  // Um por vez, e o "apagar" só arma depois de um primeiro clique.
+  property string contextSlug: ""
+  property string renamingSlug: ""
+  property string deleteArmedSlug: ""
+
+  function openContext(slug) {
+    var s = String(slug || "")
+    if (root.contextSlug === s) { root.closeContext(); return }
+    root.contextSlug = s
+    root.renamingSlug = ""
+    root.deleteArmedSlug = ""
+  }
+
+  function closeContext() {
+    root.contextSlug = ""
+    root.renamingSlug = ""
+    root.deleteArmedSlug = ""
+  }
+
+  // Nome da gravação avulsa: pode ser digitado antes de começar, e trocado
+  // enquanto grava. O painel não inventa título nenhum quando está vazio.
+  property string adhocTitle: ""
+  property bool editingCurrent: false
+
+  // Enquanto um campo de texto tem o foco, as teclas são dele e não do painel.
+  property bool textEditing: false
+
 
   readonly property string mode: stateData && stateData.mode ? stateData.mode : "dual"
   readonly property string modeLabel: mode === "mic_only" ? I18N.t("mode.mic_only", lang) : I18N.t("mode.dual", lang)
@@ -198,6 +226,11 @@ Panel {
 
   function run(cmd) { if (root.bar) root.bar.run(cmd) }
 
+  // Altura natural do conteúdo do painel. Serve ao layout (o Flickable) e é o
+  // que prova, no teste de QML, que uma seção realmente renderizou em vez de
+  // só existir como estado.
+  property real contentNaturalHeight: 0
+
   function openPath(path) {
     if (!path) return
     root.run("xdg-open '" + String(path).replace(/'/g, "'\\''") + "'")
@@ -263,9 +296,65 @@ Panel {
     return note && note.audio_diagnostico ? String(note.audio_diagnostico) : ""
   }
 
+  function shellQuote(text) { return "'" + String(text || "").replace(/'/g, "'\\''") + "'" }
+
   function toggleRecording() {
-    run(root.isBusy ? "castanha stop" : "castanha start")
+    if (root.isBusy) {
+      run("castanha stop")
+    } else {
+      // Gravação avulsa com nome escolhido antes de começar; sem nome, o
+      // comportamento é o de sempre (agenda ou "Reunião Avulsa").
+      var titulo = String(root.adhocTitle || "").trim()
+      run(titulo === "" ? "castanha start" : "castanha start --title=" + shellQuote(titulo))
+      root.adhocTitle = ""
+    }
     root.close()
+  }
+
+  Process {
+    id: renameProcess
+    running: false
+    onExited: {
+      root.refreshNotes()
+      stateFile.reload()
+    }
+  }
+
+  // Renomear é sobre o título que aparece: o slug é a identidade da reunião e
+  // não muda, senão o recibo do Zinom e o job durável perdem o alvo.
+  function renameMeeting(slug, titulo) {
+    var t = String(titulo || "").trim()
+    if (!slug || t === "" || renameProcess.running) return
+    renameProcess.command = ["castanha", "rename", String(slug), t]
+    renameProcess.running = true
+    root.closeContext()
+  }
+
+  // A gravação em curso ainda não tem nota: o nome vive no estado até o stop.
+  function renameCurrent(titulo) {
+    var t = String(titulo || "").trim()
+    if (t === "" || renameProcess.running) return
+    renameProcess.command = ["castanha", "rename", "current", t]
+    renameProcess.running = true
+    root.editingCurrent = false
+  }
+
+  Process {
+    id: deleteMeetingProcess
+    running: false
+    onExited: {
+      root.refreshNotes()
+      stateFile.reload()
+    }
+  }
+
+  // Vai para base_dir/.trash, não para o nada: erro de clique é recuperável.
+  function deleteMeeting(slug) {
+    if (!slug || deleteMeetingProcess.running) return
+    deleteMeetingProcess.command = ["castanha", "delete-meeting", String(slug)]
+    deleteMeetingProcess.running = true
+    if (root.expandedNoteSlug === slug) root.expandedNoteSlug = ""
+    root.closeContext()
   }
 
   // ------------------------------------------------------------------ dados
@@ -402,6 +491,10 @@ Panel {
   onOpenedChanged: if (opened) {
     stateFile.reload()
     refreshNotes()
+  } else {
+    root.closeContext()
+    root.editingCurrent = false
+    root.textEditing = false
   }
 
   // Relê SEMPRE, e não só com o painel aberto. O estado é escrito de forma
@@ -457,9 +550,15 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Enquanto um campo de nome está em edição, as teclas são dele: sem isto,
+      // digitar "x" no nome apagava a reunião e "j" rolava o painel.
+      blocked: root.textEditing
 
       onActivateRequested: root.toggleRecording()
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.contextSlug !== "") { root.closeContext(); return }
+        root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Flickable {
@@ -474,6 +573,9 @@ Panel {
           id: column
           width: parent.width
           spacing: Style.space(12)
+
+          onImplicitHeightChanged: root.contentNaturalHeight = implicitHeight
+          Component.onCompleted: root.contentNaturalHeight = implicitHeight
 
         // ---------- Hero ----------
         PanelHero {
@@ -558,6 +660,61 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
               anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+        }
+
+        // ---------- Nome da gravação ----------
+        // Antes de começar: escolhe o nome da avulsa. Durante: corrige o nome
+        // que a nota vai receber quando o stop escrever o Bronze.
+        Column {
+          width: parent.width
+          visible: !root.isProcessing
+          spacing: Style.space(3)
+
+          PanelSectionHeader {
+            width: parent.width
+            text: I18N.t("panel.meeting_name", root.lang)
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          TextField {
+            id: nomeField
+            width: parent.width
+            foreground: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            verticalPadding: Style.space(5)
+            placeholderText: root.isBusy ? I18N.t("field.rename_current", root.lang)
+                                         : I18N.t("field.adhoc_name", root.lang)
+
+            // Sem binding em `text`: digitar quebraria o binding e o campo
+            // deixaria de acompanhar o estado. Quem manda é a atribuição
+            // explícita nas transições, e o rascunho vive em adhocTitle.
+            function sincronizar() {
+              if (activeFocus) return
+              text = root.isBusy && root.currentMeeting && root.currentMeeting.title
+                     ? String(root.currentMeeting.title) : root.adhocTitle
+            }
+
+            Component.onCompleted: sincronizar()
+            onActiveFocusChanged: {
+              root.textEditing = activeFocus
+              if (!activeFocus) sincronizar()
+            }
+            onTextChanged: if (!root.isBusy) root.adhocTitle = text
+            onAccepted: {
+              if (root.isBusy) root.renameCurrent(text)
+              else root.toggleRecording()
+            }
+            Keys.onEscapePressed: { focus = false; root.textEditing = false }
+
+            Connections {
+              target: root
+              function onStatusChanged() { nomeField.sincronizar() }
+              function onCurrentMeetingChanged() { nomeField.sincronizar() }
+              function onOpenedChanged() { if (root.opened) nomeField.sincronizar() }
             }
           }
         }
@@ -1068,6 +1225,9 @@ Panel {
     property var note: null
 
     readonly property bool aberta: !!note && root.expandedNoteSlug === note.slug
+    readonly property bool noMenu: !!note && root.contextSlug === note.slug
+    readonly property bool renomeando: !!note && root.renamingSlug === note.slug
+    readonly property bool apagarArmado: !!note && root.deleteArmedSlug === note.slug
     readonly property bool comProblema: !!(note && note.audio_status && note.audio_status !== "ok"
                                            && note.audio_status !== "desconhecido"
                                            && note.audio_status !== "audio_apagado")
@@ -1098,7 +1258,7 @@ Panel {
       Rectangle {
         anchors.fill: parent
         radius: Style.cornerRadius
-        color: noteHover.containsMouse || noteRow.aberta
+        color: noteHover.containsMouse || noteRow.aberta || noteRow.noMenu
                ? root.alpha(root.foreground, 0.06) : "transparent"
       }
 
@@ -1254,13 +1414,101 @@ Panel {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: root.toggleExpandedNote(noteRow.note ? noteRow.note.slug : "")
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: function(mouse) {
+          var slug = noteRow.note ? noteRow.note.slug : ""
+          if (mouse.button === Qt.RightButton) root.openContext(slug)
+          else root.toggleExpandedNote(slug)
+        }
       }
 
       PanelToolTip {
-        visible: noteHover.containsMouse
+        visible: noteHover.containsMouse && !noteRow.noMenu
         text: noteRow.aberta ? I18N.t("note.collapse_details", root.lang) : I18N.t("note.view_details", root.lang)
         fontFamily: root.fontFamily
+      }
+    }
+
+    // ---- menu de contexto (botão direito) -------------------------------
+    // Duas ações e nada mais: renomear escreve no lugar, e apagar pede um
+    // segundo clique antes de mover a reunião para a lixeira.
+    Column {
+      id: noteMenu
+      visible: noteRow.noMenu
+      width: noteRow.width - Style.space(18)
+      x: Style.space(12)
+      topPadding: Style.space(4)
+      bottomPadding: Style.space(8)
+      spacing: Style.space(5)
+
+      TextField {
+        id: renomearField
+        visible: noteRow.renomeando
+        width: parent.width
+        foreground: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        verticalPadding: Style.space(4)
+        placeholderText: I18N.t("field.new_name", root.lang)
+
+        onVisibleChanged: if (visible) {
+          text = noteRow.note && noteRow.note.title ? String(noteRow.note.title) : ""
+          Qt.callLater(function() { renomearField.forceActiveFocus(); renomearField.selectAll() })
+        }
+        onActiveFocusChanged: root.textEditing = activeFocus
+        onAccepted: root.renameMeeting(noteRow.note ? noteRow.note.slug : "", text)
+        Keys.onEscapePressed: { root.textEditing = false; root.renamingSlug = "" }
+      }
+
+      PanelActionFlow {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Button {
+          visible: !noteRow.renomeando
+          text: I18N.t("btn.rename", root.lang)
+          iconText: "󰏫"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          onClicked: root.renamingSlug = noteRow.note ? noteRow.note.slug : ""
+        }
+
+        Button {
+          visible: noteRow.renomeando
+          text: I18N.t("btn.save_name", root.lang)
+          iconText: "󰄬"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: true
+          onClicked: root.renameMeeting(noteRow.note ? noteRow.note.slug : "", renomearField.text)
+        }
+
+        Button {
+          text: noteRow.apagarArmado ? I18N.t("btn.delete_meeting_confirm", root.lang)
+                                     : I18N.t("btn.delete_meeting", root.lang)
+          iconText: "󰆴"
+          foreground: noteRow.apagarArmado ? root.contrasting(root.urgent) : root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          bordered: noteRow.apagarArmado
+          enabled: !deleteMeetingProcess.running
+          onClicked: {
+            var slug = noteRow.note ? noteRow.note.slug : ""
+            if (noteRow.apagarArmado) root.deleteMeeting(slug)
+            else root.deleteArmedSlug = slug
+          }
+        }
+
+        Button {
+          text: I18N.t("btn.cancel", root.lang)
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.closeContext()
+        }
       }
     }
 

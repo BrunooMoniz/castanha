@@ -345,6 +345,19 @@ STRINGS = {
         "en": " ({count} recording(s))",
         "pt": " ({count} gravação/ões)",
     },
+    # Storage: renomear / apagar reunião
+    "storage.rename.bad_slug": {
+        "en": "Invalid meeting identifier: '{slug}'.",
+        "pt": "Identificador de reunião inválido: '{slug}'.",
+    },
+    "storage.rename.empty_title": {
+        "en": "The new name cannot be empty.",
+        "pt": "O novo nome não pode ser vazio.",
+    },
+    "storage.meeting_not_found": {
+        "en": "Meeting '{slug}' not found.",
+        "pt": "Reunião '{slug}' não encontrada.",
+    },
     # CLI: delete-recording
     "cli.none_found": {
         "en": "No meeting found.",
@@ -361,6 +374,35 @@ STRINGS = {
     "cli.delete.preserved": {
         "en": "   Silver notes, transcript and Zinom data were preserved.",
         "pt": "   As notas em Silver, transcrição e dados no Zinom foram preservados.",
+    },
+    # CLI: rename / delete-meeting
+    "cli.rename.ok": {
+        "en": "✏️ '{previous}' is now '{title}' ({slug}).",
+        "pt": "✏️ '{previous}' agora é '{title}' ({slug}).",
+    },
+    "cli.rename.current": {
+        "en": "✏️ Current recording renamed to '{title}'.",
+        "pt": "✏️ Gravação em curso renomeada para '{title}'.",
+    },
+    "cli.rename.no_recording": {
+        "en": "No recording in progress to rename.",
+        "pt": "Nenhuma gravação em andamento para renomear.",
+    },
+    "cli.delete_meeting.ok": {
+        "en": "🗑️ Meeting '{slug}' moved to the trash: {dir}",
+        "pt": "🗑️ Reunião '{slug}' movida para a lixeira: {dir}",
+    },
+    "cli.help.rename": {
+        "en": "Rename a meeting (slug, 'last' or 'current' for the live recording)",
+        "pt": "Renomeia uma reunião (slug, 'last' ou 'current' para a gravação em curso)",
+    },
+    "cli.help.rename_title": {
+        "en": "New meeting name",
+        "pt": "Novo nome da reunião",
+    },
+    "cli.help.delete_meeting": {
+        "en": "Move a whole meeting (audio, notes and transcript) to the trash",
+        "pt": "Move a reunião inteira (áudio, notas e transcrição) para a lixeira",
     },
     # CLI: recordings
     "cli.recordings.none": {

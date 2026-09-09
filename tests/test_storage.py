@@ -68,6 +68,85 @@ class TestStorage(unittest.TestCase):
         slug3 = self.storage.create_meeting_slug("Alinhamento")
         self.assertEqual(slug3, f"{slug1}-3")
 
+    def test_rename_keeps_slug_and_rewrites_title_everywhere(self):
+        """Renomear é sobre o título, nunca sobre o slug.
+
+        O slug é a identidade que o recibo do Zinom, o job durável e o par
+        Bronze/Silver/Gold usam para se achar. Mover a pasta órfã tudo isso.
+        """
+        slug = "2026-09-04_1500_nome-antigo"
+        fake_audio = self.temp_dir / "sample.ogg"
+        fake_audio.write_bytes(b"audio")
+        self.storage.save_bronze(slug=slug, audio_source_path=fake_audio,
+                                 metadata={"title": "Nome Antigo", "recorded_at": "2026-09-04T15:00:00"},
+                                 raw_transcript="texto")
+        self.storage.save_silver(slug=slug, markdown_content=(
+            '---\ntitle: "Nome Antigo"\ndate: "2026-09-04T15:00:00"\n---\n\n'
+            "# Nome Antigo\n\n## 📌 Resumo Executivo\nCorpo da nota.\n"))
+        self.storage.save_gold(slug=slug, gold_data={"title": "Nome Antigo", "facts": []})
+
+        res = self.storage.rename_meeting(slug, "  Nome Novo  ")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["title"], "Nome Novo")
+        self.assertEqual(res["previous_title"], "Nome Antigo")
+        self.assertEqual(res["slug"], slug)
+
+        # A pasta e o arquivo continuam com o slug original.
+        self.assertTrue((self.storage.bronze_dir / slug).is_dir())
+        self.assertTrue((self.storage.silver_dir / f"{slug}.md").exists())
+
+        m = self.storage.get_meeting(slug)
+        self.assertEqual(m["title"], "Nome Novo")
+
+        silver = (self.storage.silver_dir / f"{slug}.md").read_text(encoding="utf-8")
+        self.assertIn('title: "Nome Novo"', silver)
+        self.assertIn("# Nome Novo", silver)
+        self.assertNotIn("Nome Antigo", silver)
+        # Só o primeiro título e o primeiro cabeçalho: o corpo não é reescrito.
+        self.assertIn("Corpo da nota.", silver)
+        self.assertIn("## 📌 Resumo Executivo", silver)
+
+        gold = json.loads((self.storage.gold_dir / f"{slug}.json").read_text(encoding="utf-8"))
+        self.assertEqual(gold["title"], "Nome Novo")
+
+    def test_rename_refuses_empty_title_and_unknown_meeting(self):
+        slug = "2026-09-04_1600_reuniao"
+        (self.storage.bronze_dir / slug).mkdir(parents=True)
+        self.assertEqual(self.storage.rename_meeting(slug, "   ")["status"], "error")
+        self.assertEqual(self.storage.rename_meeting("nao-existe", "X")["status"], "error")
+        # Travessia de caminho não vira renomeação em outra pasta.
+        self.assertEqual(self.storage.rename_meeting("../evasao", "X")["status"], "error")
+
+    def test_delete_meeting_moves_everything_to_recoverable_trash(self):
+        slug = "2026-09-04_1700_para-apagar"
+        fake_audio = self.temp_dir / "sample.ogg"
+        fake_audio.write_bytes(b"audio")
+        self.storage.save_bronze(slug=slug, audio_source_path=fake_audio,
+                                 metadata={"title": "Para Apagar"}, raw_transcript="texto")
+        self.storage.save_silver(slug=slug, markdown_content="# Para Apagar\n")
+        self.storage.save_gold(slug=slug, gold_data={"facts": []})
+
+        res = self.storage.delete_meeting(slug)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(sorted(res["moved"]), ["bronze", "gold.json", "silver.md"])
+
+        # Sumiu do acervo...
+        self.assertFalse((self.storage.bronze_dir / slug).exists())
+        self.assertFalse((self.storage.silver_dir / f"{slug}.md").exists())
+        self.assertFalse((self.storage.gold_dir / f"{slug}.json").exists())
+        self.assertIsNone(self.storage.get_meeting(slug))
+        self.assertEqual(self.storage.list_recent_meetings(limit=5), [])
+
+        # ...mas nada foi destruído: um clique errado é recuperável.
+        lixeira = Path(res["trash_dir"])
+        self.assertTrue((lixeira / "bronze" / "audio.ogg").exists())
+        self.assertTrue((lixeira / "bronze" / "transcript_raw.txt").exists())
+        self.assertEqual((lixeira / "silver.md").read_text(encoding="utf-8"), "# Para Apagar\n")
+
+        # Apagar de novo não explode nem cria pasta vazia de lixeira.
+        self.assertEqual(self.storage.delete_meeting(slug)["status"], "error")
+        self.assertEqual(self.storage.delete_meeting("../evasao")["status"], "error")
+
     def test_multiple_recordings_and_deletion(self):
         slug = "2026-09-04_1100_planejamento"
         fake_audio1 = self.temp_dir / "sample1.ogg"
