@@ -33,6 +33,8 @@ LLM_MAX_WAIT_SEC = 180.0
 # Espaço conservador para entrada, saída e overhead da janela de 8k TPM.
 GROQ_INPUT_CHARS = 12000
 GROQ_COMPLETION_TOKENS = 2048
+GROQ_GOLD_INPUT_CHARS = 8000
+GROQ_GOLD_COMPLETION_TOKENS = 4096
 
 _LIMITE_RE = re.compile(r"Limit\s+(\d+).*?Requested\s+(\d+)", re.S)
 
@@ -542,6 +544,12 @@ class MeetingSummarizer:
     def _provider_in_use(self):
         return self._effective_provider or self.provider
 
+    def _groq_gold_budget(self, system_prompt):
+        # GPT-OSS compartilha a saída entre raciocínio e resposta. O Gold
+        # precisa de espaço para concluir o JSON, mesmo com poucos fatos.
+        return system_prompt == GOLD_SYSTEM_PROMPT and self.model in (
+            "openai/gpt-oss-20b", "openai/gpt-oss-120b")
+
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         if self._provider_in_use() == "hermes_ssh":
             try:
@@ -569,7 +577,9 @@ class MeetingSummarizer:
 
     def _call_groq(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         input_chars = len(system_prompt) + len(user_prompt)
-        if input_chars > GROQ_INPUT_CHARS:
+        gold_budget = self._groq_gold_budget(system_prompt)
+        input_limit = GROQ_GOLD_INPUT_CHARS if gold_budget else GROQ_INPUT_CHARS
+        if input_chars > input_limit:
             # Antes do HTTP: não gastar quota enviando uma reunião inteira que
             # já sabemos exceder o orçamento do provedor efetivo.
             raise LlmTooLarge(LLM_DEFAULT_TPM, int(input_chars / CHARS_PER_TOKEN) + 1,
@@ -582,8 +592,10 @@ class MeetingSummarizer:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
-            "max_completion_tokens": GROQ_COMPLETION_TOKENS,
+            "max_completion_tokens": GROQ_GOLD_COMPLETION_TOKENS if gold_budget else GROQ_COMPLETION_TOKENS,
         }
+        if gold_budget:
+            payload["reasoning_effort"] = "low"
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -828,7 +840,8 @@ attendees:
         # e não precisa consumir novamente a quota limitada da reserva.
         if not notes.strip() and self._requires_summary():
             raise LlmInvalidResponse("Notas vazias para extração de fatos; síntese pendente")
-        part_chars = GROQ_INPUT_CHARS - len(GOLD_SYSTEM_PROMPT) - len(header) - 256
+        input_limit = GROQ_GOLD_INPUT_CHARS if self._groq_gold_budget(GOLD_SYSTEM_PROMPT) else GROQ_INPUT_CHARS
+        part_chars = input_limit - len(GOLD_SYSTEM_PROMPT) - len(header) - 256
         merged = {"facts": [], "decisions": [], "action_items": [], "people_notes": []}
         seen = {key: set() for key in merged}
         def extract(part, depth=0):
@@ -863,18 +876,22 @@ attendees:
         header = f"""Metadados da Reunião:
 {json.dumps(meta_enxuta, indent=2, ensure_ascii=False, sort_keys=True)}
 """
+        # IDs, canais e estado de entrega já vivem nos checkpoints e não são
+        # fonte de fatos. A reserva precisa só de título/data para contexto.
+        groq_meta = {key: metadata[key] for key in ("title", "recorded_at") if key in metadata}
+        groq_header = "Metadados da Reunião:\n" + json.dumps(groq_meta, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
         if raw_transcript.strip():
             using_groq = self._provider_in_use() == "groq"
             try:
                 if using_groq:
-                    return self._gold_from_notes(header, notas)
+                    return self._gold_from_notes(groq_header, notas)
                 return self._gold_response(f"{header}\nNotas Silver:\n{notas}\n\nTranscrição:\n{raw_transcript}\n")
             except LlmTooLarge as e:
                 # A reserva pode ter sido selecionada durante a primeira
                 # chamada. Recalcule o pedido usando seu orçamento real.
                 if not using_groq and self._provider_in_use() == "groq":
                     try:
-                        return self._gold_from_notes(header, notas)
+                        return self._gold_from_notes(groq_header, notas)
                     except LlmTooLarge as retry:
                         raise LlmUnavailable("Extração de fatos excede o limite da LLM; síntese pendente") from retry
                 raise LlmUnavailable("Extração de fatos excede o limite da LLM; síntese pendente") from e

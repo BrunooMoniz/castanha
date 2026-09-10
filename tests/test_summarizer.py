@@ -898,7 +898,8 @@ class TestGroqDurableFallback(unittest.TestCase):
         self.assertIn(transcript, silver)
         self.assertEqual(gold, json.loads(self.valid))
         self.assertTrue(requests)
-        self.assertTrue(all(p["max_completion_tokens"] == 2048 for p in requests))
+        self.assertTrue(all(p["max_completion_tokens"] == (4096 if p["messages"][0]["content"] == S.GOLD_SYSTEM_PROMPT else 2048)
+                            for p in requests))
         self.assertTrue(all(sum(len(m["content"]) for m in p["messages"]) <= S.GROQ_INPUT_CHARS for p in requests))
         self.assertFalse(any(transcript in p["messages"][1]["content"] for p in requests))
 
@@ -1033,6 +1034,56 @@ class TestGroqDurableFallback(unittest.TestCase):
             with self.assertRaisesRegex(S.LlmUnavailable, "síntese pendente"):
                 self.s.generate_gold(self.meta, "Nota. " * 2000, "Transcrição")
         self.assertLessEqual(http.call_count, 4)
+
+    def test_gold_oss_uses_low_reasoning_more_output_and_compact_context(self):
+        self.s._effective_provider = "groq"
+        self.meta.update(origin_id="fixture-origin-not-a-fact", processing_status="pending",
+                         calendar_event={"attendees": [{"name": "Fixture guest"}]})
+        requests = []
+        def http(request, timeout=None):
+            payload = json.loads(request.data)
+            requests.append(payload)
+            return _resposta(self.valid)
+        notes = "".join(f"Nota {i}: contexto sintético preservado.\n" for i in range(400))
+        with patch.object(S.urllib.request, "urlopen", side_effect=http):
+            self.s.generate_gold(self.meta, notes, "Transcrição")
+        self.assertGreater(len(requests), 1)
+        for payload in requests:
+            self.assertEqual(payload["reasoning_effort"], "low")
+            self.assertEqual(payload["max_completion_tokens"], 4096)
+            self.assertLessEqual(sum(len(m["content"]) for m in payload["messages"]), 8000)
+            prompt = payload["messages"][1]["content"]
+            header = prompt.split("\nNotas Silver:\n", 1)[0].split("Metadados da Reunião:\n", 1)[1]
+            self.assertEqual(json.loads(header), {"title": self.meta["title"], "recorded_at": self.meta["recorded_at"]})
+
+    def test_silver_payload_reuses_pre_gold_budget_cache_identity(self):
+        import hashlib
+        from castanha.secure_io import write_private_json
+        self.s._effective_provider = "groq"
+        # Payload publicado antes desta correção, incluindo o limite original.
+        payload = {"model": self.s.model, "messages": [
+            {"role": "system", "content": S.PARTIAL_SYSTEM_PROMPT},
+            {"role": "user", "content": "Parte sintética preservada"}],
+            "temperature": 0.2, "max_completion_tokens": 2048}
+        identity = hashlib.sha256(json.dumps({"version": 1, "provider": "groq",
+            "url": "https://api.groq.com/openai/v1/chat/completions",
+            "credential_scope": hashlib.sha256(self.s.api_key.encode()).hexdigest(), "request": payload},
+            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        path = Path(self.temp.name) / "castanha/llm/groq" / f"{identity}.json"
+        write_private_json(path, {"identity": identity, "content": "Resumo anterior válido"})
+        before = path.read_bytes()
+        with patch.object(S.urllib.request, "urlopen") as http:
+            self.assertEqual(self.s._call_llm(S.PARTIAL_SYSTEM_PROMPT, "Parte sintética preservada"), "Resumo anterior válido")
+            http.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_gold_budget_does_not_send_oss_parameter_to_other_models(self):
+        self.s.model = "fixture/non-oss-model"
+        with patch.object(S.urllib.request, "urlopen", return_value=_resposta(self.valid)) as http:
+            self.s._call_groq(S.GOLD_SYSTEM_PROMPT, "Notas", json_mode=True)
+        payload = json.loads(http.call_args.args[0].data)
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertEqual(payload["max_completion_tokens"], 2048)
 
 
 if __name__ == "__main__":
