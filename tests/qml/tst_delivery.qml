@@ -4,6 +4,28 @@ import "../../DeliveryStatus.js" as DeliveryStatus
 
 TestCase {
   name: "DeliveryStatus"
+  function test_uploaded_audio_uses_current_note_without_mutating_errors() {
+    var note = {slug: "today", processing_status: "pending", transcription_pending: true,
+      transcription_pending_reason: "capture-id: Transcrição remota em andamento; execute castanha sync --all para retomar",
+      problemas: ["Aviso de áudio"], zinom: {}}
+    verify(DeliveryStatus.uploadComplete(note))
+    compare(DeliveryStatus.transcriptionLine(note, "pt"), "Áudio enviado · transcrição pendente")
+    compare(note.problemas[0], "Aviso de áudio")
+    verify(DeliveryStatus.zinomNeedsSync(note))
+  }
+
+  function test_running_is_not_upload_failure_or_delivery_success() {
+    var failed = {transcription_pending: true, transcription_pending_reason: "SCP falhou"}
+    verify(!DeliveryStatus.uploadComplete(failed))
+    compare(DeliveryStatus.transcriptionLine(failed, "pt"), "Transcrição pendente: 󰑐 tenta de novo")
+    var running = {transcription_pending: true, transcription_pending_reason: "Transcrição remota em andamento; retomar"}
+    compare(DeliveryStatus.transcriptionLine(running, "en"), "Audio uploaded · transcription pending")
+    running.transcription_pending = false
+    verify(!DeliveryStatus.uploadComplete(running))
+    compare(DeliveryStatus.uploadComplete(null), false)
+    var completed = DeliveryStatus.projectedLastResult(running, [])
+    verify(!DeliveryStatus.uploadComplete(completed))
+  }
   function test_status_data() {
     return [
       { tag: "deleted", value: {status: "tombstoned", remember_id: "old-id"}, expected: "Excluído no Zinom" },

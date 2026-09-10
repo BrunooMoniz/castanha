@@ -12,6 +12,15 @@ function projectedLastResult(last, notes) {
   return last
 }
 
+function uploadComplete(note) {
+  return !!note && note.transcription_pending === true
+    && String(note.transcription_pending_reason || "").indexOf("Transcrição remota em andamento;") >= 0
+}
+
+function transcriptionLine(note, lang) {
+  return I18N.t(uploadComplete(note) ? "note.upload_complete" : "note.transcription_pending", lang || "en")
+}
+
 function zinomNeedsSync(note) {
   if (!note) return false
   var z = note.zinom || {}
@@ -32,6 +41,7 @@ function zinomLine(result, lang) {
   var L = lang || "en"
   if (!result) return ""
   var terminal = result.zinom && (result.zinom.status === "tombstoned" || result.zinom.status === "superseded")
+  if (uploadComplete(result) && !terminal) return transcriptionLine(result, L)
   if (result.summary_status === "pending" && !terminal) {
     // Transcrição salva; o resumo volta sozinho na próxima tentativa.
     var porque = String(result.summary_error || "")

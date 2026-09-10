@@ -54,6 +54,14 @@ Panel {
   readonly property var currentMeeting: stateData ? stateData.current_meeting : null
   readonly property var nextMeeting: stateData ? stateData.next_meeting : null
   readonly property var lastResult: DeliveryStatus.projectedLastResult(stateData ? stateData.last_result : null, recentNotes)
+  readonly property bool editingNotes: root.textEditing || root.editingCurrent
+    || root.renamingSlug !== "" || root.contextSlug !== ""
+
+  IpcHandler {
+    enabled: root.manageIpc
+    target: "castanha-view"
+    function health(): string { return "uploaded-audio-pending-v1" }
+  }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
 
   // A agenda vem do daemon, que a busca nas contas Google conectadas no Zinom.
@@ -380,11 +388,13 @@ Panel {
 
   Process {
     id: notesProcess
+    objectName: "castanhaNotesProcess"
     running: false
     command: ["castanha", "notes", "--json", "--limit", "6"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.editingNotes) return
         try {
           var data = JSON.parse(text)
           root.recentNotes = data.notes || []
@@ -396,6 +406,13 @@ Panel {
   }
 
   function refreshNotes() { if (!notesProcess.running) notesProcess.running = true }
+
+  Timer {
+    interval: 10000
+    running: root.opened
+    repeat: true
+    onTriggered: if (!root.editingNotes) root.refreshNotes()
+  }
 
   property string syncingSlug: ""
 
@@ -1255,6 +1272,7 @@ Panel {
                                          summary_status: note && note.summary_status ? note.summary_status : "",
                                          summary_error: note && note.summary_error ? note.summary_error : "" })
     readonly property bool precisaRetry: !!note && !!note.can_retry
+    readonly property bool transcrevendo: DeliveryStatus.uploadComplete(note)
     readonly property bool reprocessando: !!note && root.retryingSlug === note.slug
     readonly property bool precisaSync: DeliveryStatus.zinomNeedsSync(note) && !precisaRetry
     readonly property bool sincronizando: !!note && root.syncingSlug === note.slug
@@ -1334,7 +1352,8 @@ Panel {
               opacity: noteRow.precisaRetry && (noteHover.containsMouse || noteRow.reprocessando) ? 1 : 0
               enabled: opacity > 0 && !noteRow.reprocessando
               iconText: "󰑐"
-              tooltipText: noteRow.reprocessando ? I18N.t("tooltip.reprocessing", root.lang) : I18N.t("tooltip.retry_upload", root.lang)
+              tooltipText: noteRow.reprocessando ? I18N.t("tooltip.reprocessing", root.lang)
+                : I18N.t("tooltip.retry_upload", root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1388,9 +1407,9 @@ Panel {
           width: parent.width
           visible: noteRow.precisaRetry && !noteRow.aberta
           text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang)
-                : noteRow.note.transcription_pending ? "󰑐  " + I18N.t("note.transcription_pending", root.lang)
+                : noteRow.note.transcription_pending ? "󰑐  " + DeliveryStatus.transcriptionLine(noteRow.note, root.lang)
                 : "󰀦  " + I18N.t("note.upload_pending", root.lang)
-          color: root.urgent
+          color: noteRow.transcrevendo || noteRow.reprocessando ? root.dim : root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1577,7 +1596,7 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: !!(noteRow.note && noteRow.note.transcription_pending)
-        text: "󰑐  " + I18N.t("note.transcription_pending", root.lang)
+        text: "󰑐  " + DeliveryStatus.transcriptionLine(noteRow.note, root.lang)
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1588,8 +1607,10 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: !!(noteRow.note && noteRow.note.audio_diagnostico && noteRow.note.audio_status !== "ok")
-        text: "󰀦  " + root.audioDiag(noteRow.note)
-        color: noteRow.note && noteRow.note.audio_status === "audio_apagado" ? root.dim : root.urgent
+        text: noteRow.note && noteRow.note.audio_status === "desconhecido"
+          ? I18N.t("note.audio_check_pending", root.lang) : "󰀦  " + root.audioDiag(noteRow.note)
+        color: noteRow.note && (noteRow.note.audio_status === "audio_apagado"
+          || noteRow.note.audio_status === "desconhecido") ? root.dim : root.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap

@@ -132,13 +132,44 @@ ShellRoot {
         root.medir(function(comCampo) {
           root.checar(comCampo > comMenu, "campo de renomear nao renderizou: " + comMenu + " -> " + comCampo)
 
-          // Fechar o painel desarma o menu: reabrir não volta armado.
-          castanha.close()
-          root.checar(castanha.contextSlug === "" && castanha.renamingSlug === "",
-                      "fechar o painel nao desarmou o menu")
-          root.terminar()
+          root.checar(castanha.editingNotes, "edicao nao protege a lista contra refresh")
+          var originalNotes = castanha.recentNotes
+          // A resposta da CLI em voo também deve preservar a edição aberta.
+          root.refreshAndWait(function(depoisRefresh) {
+            root.checar(castanha.recentNotes === originalNotes, "refresh recriou linhas durante edicao")
+            root.checar(castanha.contextSlug === slug && castanha.renamingSlug === slug,
+                        "refresh perdeu menu ou edicao")
+            castanha.close()
+            root.checar(castanha.contextSlug === "" && castanha.renamingSlug === "",
+                        "fechar o painel nao desarmou o menu")
+            root.refreshAndWait(function() {
+              root.checar(castanha.recentNotes !== originalNotes && castanha.recentNotes.length > 0,
+                          "controle positivo: refresh fora da edicao nao atualizou a lista")
+              root.terminar()
+            })
+          })
         })
       })
     })
+  }
+
+  function refreshAndWait(callback) {
+    var loader = null
+    for (var i = 0; i < castanha.data.length; i++) {
+      if (castanha.data[i].objectName === "castanhaNotesProcess") loader = castanha.data[i]
+    }
+    if (!loader) {
+      root.falhas.push("Process real da CLI nao encontrado")
+      root.terminar()
+      return
+    }
+    var completed = function(code, status) {
+      loader.exited.disconnect(completed)
+      root.checar(code === 0 && !loader.running, "CLI de refresh falhou ou nao terminou")
+      root.medir(callback)
+    }
+    loader.exited.connect(completed)
+    castanha.refreshNotes()
+    root.checar(loader.running, "refresh nao iniciou a CLI real")
   }
 }

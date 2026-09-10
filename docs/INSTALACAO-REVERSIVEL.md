@@ -15,6 +15,20 @@ O SHA anterior fica em `~/.local/state/castanha/local-release.json` antes da
 troca. Gravações e configuração não são alteradas pelo instalador.
 O código privado de integração permanece local, com backup por bundle privado.
 
+## Atualização restrita ao painel durante captura
+
+`scripts/deploy-ui.py CHECKOUT SHA_COMPLETO` aceita exclusivamente os arquivos
+de interface permitidos, seus testes, documentação e o próprio instalador.
+Mudança em backend, CLI, configuração ou manifesto é recusada, inclusive se
+aparecer como renomeação. Exige checkout limpo e fast-forward.
+
+Risco AMARELO. Antes da troca, registra o SHA anterior e recusa comandos do
+Castanha ainda ligados ao processo do painel. Não para daemon nem FFmpeg.
+Depois, exige o marcador IPC da interface nova, preservação das identidades
+dos processos e crescimento do arquivo de áudio quando há captura ativa.
+Falha reverte somente código; falha da reversão fica explícita no journal.
+O recibo `local-release.json` continua registrando o checkout instalado.
+
 ## Histórico: instalador de transição entre worktrees
 
 A recuperação registra `restored_daemon` e `rollback_checking` antes de testar

@@ -35,7 +35,7 @@ var STRINGS = {
   "btn.play_recording": { "en": "Play recording", "pt": "Ouvir gravação" },
   "btn.delete_recording": { "en": "Delete this audio (keeps notes and transcript)", "pt": "Apagar este áudio (mantém notas e transcrição)" },
   "btn.reprocessing": { "en": "Reprocessing…", "pt": "Reprocessando…" },
-  "btn.retry": { "en": "Retry upload/transcription", "pt": "Tentar upload/transcrição de novo" },
+  "btn.retry": { "en": "Resume processing", "pt": "Retomar processamento" },
   "btn.notes": { "en": "Notes", "pt": "Notas" },
   "btn.transcript": { "en": "Transcript", "pt": "Transcrição" },
   "btn.folder": { "en": "Folder", "pt": "Pasta" },
@@ -72,8 +72,8 @@ var STRINGS = {
   "meeting.default_title": { "en": "Meeting", "pt": "Reunião" },
 
   "tooltip.view_meeting_details": { "en": "View meeting details", "pt": "Ver os detalhes da reunião" },
-  "tooltip.reprocessing": { "en": "Reprocessing upload/transcription…", "pt": "Reprocessando upload/transcrição…" },
-  "tooltip.retry_upload": { "en": "Retry upload and transcription", "pt": "Tentar upload e transcrição novamente" },
+  "tooltip.reprocessing": { "en": "Resuming processing…", "pt": "Retomando processamento…" },
+  "tooltip.retry_upload": { "en": "Resume processing", "pt": "Retomar processamento" },
 
   "count.participants_one": { "en": "{n} participant", "pt": "{n} participante" },
   "count.participants_many": { "en": "{n} participants", "pt": "{n} participantes" },
@@ -90,7 +90,9 @@ var STRINGS = {
 
   "note.no_audio": { "en": "no audio", "pt": "sem áudio" },
   "note.recordings_plural": { "en": "{n} recordings", "pt": "{n} gravações" },
-  "note.reprocessing": { "en": "Reprocessing upload and transcription…", "pt": "Reprocessando upload e transcrição…" },
+  "note.reprocessing": { "en": "Resuming processing…", "pt": "Retomando processamento…" },
+  "note.upload_complete": { "en": "Audio uploaded · transcription pending", "pt": "Áudio enviado · transcrição pendente" },
+  "note.audio_check_pending": { "en": "Audio diagnosis pending", "pt": "Diagnóstico de áudio pendente" },
   "note.upload_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
   "note.transcription_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
   "note.collapse_details": { "en": "Collapse meeting details", "pt": "Recolher detalhes da reunião" },
