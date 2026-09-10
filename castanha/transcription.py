@@ -81,6 +81,11 @@ VPS_MIN_TIMEOUT_SEC = 1800
 VPS_MAX_TIMEOUT_SEC = 3 * 3600
 
 
+def _vps_upload_timeout(size_bytes: int) -> int:
+    """Até 30 min, com margem para links de 256 KiB/s e 15 s de conexão."""
+    return min(1800, max(30, 15 + (size_bytes + 262143) // 262144))
+
+
 def _retry_after_seconds(err: Any) -> Optional[float]:
     """O Retry-After do 429 da Groq, em segundos, quando vier."""
     try:
@@ -514,13 +519,29 @@ class VpsSshTranscriber(BaseTranscriber):
                 raise TranscriptionPending("Contrato do worker VPS incompatível; envio pendente")
             if output == "UPLOAD":
                 upload = f"{remote}/upload-{uuid.uuid4().hex}.flac"
+                upload_timeout = _vps_upload_timeout(audio_path.stat().st_size)
+                upload_error = None
+                cause = None
                 try:
                     result = subprocess.run(["scp", *opts, str(audio_path), f"{self.host}:{upload}"],
-                                            capture_output=True, text=True, timeout=30)
-                except (subprocess.TimeoutExpired, OSError) as exc:
-                    raise TranscriptionPending("SCP indisponível; original preservado para retomar") from exc
-                if result.returncode != 0:
-                    raise TranscriptionPending("SCP falhou; original preservado para retomar")
+                                            capture_output=True, text=True, timeout=upload_timeout)
+                    if result.returncode != 0:
+                        upload_error = "SCP falhou"
+                except subprocess.TimeoutExpired as exc:
+                    cause = exc
+                    upload_error = f"Upload excedeu {upload_timeout} s"
+                except OSError as exc:
+                    cause = exc
+                    upload_error = "SCP indisponível"
+                if upload_error:
+                    # Só o temporário desta tentativa. Nunca áudio publicado,
+                    # manifesto, resultado ou arquivo de outra execução.
+                    try:
+                        ssh(f"rm -f -- {upload}")
+                    except TranscriptionPending:
+                        upload_error += "; limpeza do upload parcial pendente"
+                    raise TranscriptionPending(
+                        upload_error + "; original preservado para retomar") from cause
                 ssh(f"mv {upload} {remote}/audio.flac")
             request = {**identity, "request_sha256": request_id,
                        "audio": {"path": f"{remote}/audio.flac", "mime_type": "audio/flac",

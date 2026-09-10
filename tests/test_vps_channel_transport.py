@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from castanha.transcription import TranscriptionPending, VpsSshTranscriber, audio_mime
+from castanha.transcription import TranscriptionPending, VpsSshTranscriber, audio_mime, _vps_upload_timeout
 
 
 # Valores exclusivamente sintéticos para testar protocolo; não aprovam produção.
@@ -242,6 +242,88 @@ class VpsChannelTransportTests(unittest.TestCase):
         self.submit()
         self.remote.completed()
         self.assertEqual(VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only').text, 'fala')
+
+    def test_long_upload_gets_time_for_the_transferred_file_size(self):
+        # Reproduz a reunião de 70 minutos sem guardar áudio pessoal na suíte.
+        # A transferência simulada precisa de 110 s e falharia com o teto de 30 s.
+        from types import SimpleNamespace
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            if path == self.source:
+                return SimpleNamespace(st_size=153_000_000)
+            return real_stat(path, *args, **kwargs)
+
+        def slow_upload(args, **kwargs):
+            if args[0] == 'scp' and kwargs['timeout'] < 110:
+                raise subprocess.TimeoutExpired('scp', kwargs['timeout'])
+            return self.remote(args, **kwargs)
+
+        with patch.object(Path, 'stat', stat), \
+             patch('castanha.transcription.subprocess.run', side_effect=slow_upload):
+            self.submit()
+        self.remote.completed()
+        self.assertEqual(next(self.remote.root.rglob('audio.flac')).read_bytes(), self.original)
+        self.assertEqual(VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only').text, 'fala')
+        self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 1)
+
+    def test_upload_budget_stays_bounded(self):
+        self.assertEqual(_vps_upload_timeout(1000), 30)
+        self.assertGreater(_vps_upload_timeout(153_000_000), 110)
+        self.assertLessEqual(_vps_upload_timeout(153_000_000), 1800)
+        self.assertEqual(_vps_upload_timeout(10**12), 1800)
+
+    def test_failed_upload_removes_only_its_own_partial_and_can_retry(self):
+        def interrupted(args, **kwargs):
+            if args[0] == 'scp':
+                target = self.remote.root / args[-1].split(':', 1)[1]
+                target.write_bytes(self.original[:100])
+                (target.parent / 'upload-another-attempt.flac').write_bytes(b'keep')
+                raise subprocess.TimeoutExpired('scp', kwargs['timeout'])
+            return self.remote(args, **kwargs)
+
+        with patch('castanha.transcription.subprocess.run', side_effect=interrupted):
+            with self.assertRaisesRegex(TranscriptionPending, 'Upload excedeu 30 s'):
+                VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only')
+        partials = list(self.remote.root.rglob('upload-*.flac'))
+        self.assertEqual([p.name for p in partials], ['upload-another-attempt.flac'])
+        self.assertEqual(partials[0].read_bytes(), b'keep')
+        self.assertFalse(list(self.remote.root.rglob('audio.flac')))
+        self.assertFalse(list(self.remote.root.rglob('request.json')))
+        self.assertEqual(self.source.read_bytes(), self.original)
+        self.submit()
+        self.remote.completed()
+        self.assertEqual(VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only').text, 'fala')
+
+    def test_failed_partial_cleanup_is_reported_without_losing_original(self):
+        def unavailable(args, **kwargs):
+            if args[0] == 'scp' or (args[0] == 'ssh' and 'rm -f --' in args[-1]):
+                raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+            return self.remote(args, **kwargs)
+
+        with patch('castanha.transcription.subprocess.run', side_effect=unavailable):
+            with self.assertRaisesRegex(TranscriptionPending, 'limpeza do upload parcial pendente'):
+                VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only')
+        self.assertEqual(self.source.read_bytes(), self.original)
+        self.assertFalse(list(self.remote.root.rglob('audio.flac')))
+        self.assertFalse(list(self.remote.root.rglob('request.json')))
+        self.assertFalse(any('mv ' in args[-1] for args, _ in self.remote.calls))
+
+    def test_scp_nonzero_exit_cleans_partial_without_publishing(self):
+        def failed(args, **kwargs):
+            if args[0] == 'scp':
+                target = self.remote.root / args[-1].split(':', 1)[1]
+                target.write_bytes(self.original[:100])
+                return subprocess.CompletedProcess(args, 1, '', 'connection lost')
+            return self.remote(args, **kwargs)
+
+        with patch('castanha.transcription.subprocess.run', side_effect=failed):
+            with self.assertRaisesRegex(TranscriptionPending, 'SCP falhou'):
+                VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(self.source, 'mic_only')
+        self.assertFalse(list(self.remote.root.rglob('upload-*.flac')))
+        self.assertFalse(list(self.remote.root.rglob('audio.flac')))
+        self.assertFalse(list(self.remote.root.rglob('request.json')))
+        self.assertEqual(self.source.read_bytes(), self.original)
 
     def test_worker_timeout_keeps_remote_audio_and_retry_restarts_same_job(self):
         self.remote.settings.write_text(json.dumps({'delay': 3, 'exit_code': 7}))

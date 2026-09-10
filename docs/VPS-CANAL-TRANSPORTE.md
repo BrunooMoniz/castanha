@@ -95,7 +95,12 @@ originais. Resultado concluído é lido sem conversão nem reescrita. Execução
 ou retry do worker antigo ficam `pending_worker_contract`, sem SCP ou lançamento,
 até F5W atestar suporte explícito a Ogg original no v2. Compatibilidade do
 armazenamento não autoriza usar o ASR antigo.
-SCP tem teto de 30 s e cada SSH, 15 s. `nohup` libera a conexão; `flock` evita
+SCP reserva 15 s de conexão mais o tempo para transferir o arquivo a 256 KiB/s,
+com piso de 30 s e teto de 30 min; cada SSH continua limitado a 15 s. Isso evita
+abortar sistematicamente os FLACs de reuniões longas. Timeout e saída não zero
+removem somente o temporário exclusivo daquela tentativa; falha da limpeza
+também aparece como pendência. Originais, áudio já publicado, resultados e
+temporários antigos não são apagados. `nohup` libera a conexão; `flock` evita
 execuções simultâneas do mesmo job. O timeout do worker mantém a faixa de
 30 minutos a 3 horas. Timeout preserva áudio, manifesto e job para retomada.
 

@@ -314,12 +314,15 @@ class TestVpsTimeout(unittest.TestCase):
         from castanha.transcription import VpsSshTranscriber
         self.remote.fail_transport = "scp"
         with patch("castanha.transcription.subprocess.run", side_effect=self.remote):
-            with self.assertRaisesRegex(RuntimeError, "SCP indisponível"):
+            with self.assertRaisesRegex(RuntimeError, "Upload excedeu 30 s"):
                 VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
         commands = [cmd for cmd, _ in self.remote.calls]
-        self.assertEqual([kw["timeout"] for _, kw in self.remote.calls], [15, 15, 30])
+        self.assertEqual([kw["timeout"] for _, kw in self.remote.calls], [15, 15, 30, 15])
         self.assertEqual(self.audio.read_bytes(), self.original)
-        self.assertFalse(any("pkill" in " ".join(cmd) or "rm -f" in " ".join(cmd) for cmd in commands))
+        uploaded_path = commands[2][-1].split(":", 1)[1]
+        self.assertRegex(uploaded_path, r"/upload-[a-f0-9]{32}\.flac$")
+        self.assertEqual(commands[3][-1], f"rm -f -- {uploaded_path}")
+        self.assertFalse(any("pkill" in " ".join(cmd) for cmd in commands))
 
     def test_erro_remoto_preserva_job_para_nova_tentativa(self):
         from castanha.transcription import VpsSshTranscriber
