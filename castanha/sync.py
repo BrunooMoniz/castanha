@@ -36,7 +36,8 @@ def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
         return True
     if z.get("status") in ("tombstoned", "superseded"):
         return False
-    if metadata.get("processing_status") == "pending":
+    if (metadata.get("processing_status") == "pending" or metadata.get("transcription_pending") is True
+            or metadata.get("summary_status") == "pending"):
         return True
     if z.get("status") == "skipped":
         # Legado: skipped sem motivo representava descarte deliberado.
@@ -134,6 +135,14 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
             result = engine._process_pending_locked(slug)["result"]
             _reconcile_finished_capture_locked(slug, storage, engine.state_mgr)
             return {"slug": slug, **result["zinom"]}
+        if not jobs and (metadata.get("transcription_pending") is True or metadata.get("summary_status") == "pending"):
+            from castanha.engine import CastanhaEngine
+            engine = CastanhaEngine()
+            engine.storage = storage
+            resumed = engine._reprocess_legacy_locked(slug)
+            if "result" not in resumed:
+                return {"slug": slug, "status": "error", "errors": [resumed.get("message", "Retomada indisponível")]}
+            return {"slug": slug, **resumed["result"]["zinom"]}
         if jobs:
             if _finalizer_status(StateManager().read(), slug) == "protected":
                 from castanha.i18n import t
@@ -189,7 +198,11 @@ def _sync_meeting_locked(slug: str, storage: Optional[MeetingStorage] = None) ->
             metadata["audio_status"] = st
             metadata["audio_diagnostico"] = audio_status_message(st)
 
-    silver = silver_file.read_text(encoding="utf-8") if silver_file.exists() else ""
+    try:
+        silver = silver_file.read_text(encoding="utf-8") if silver_file.exists() else ""
+    except (OSError, UnicodeError) as exc:
+        return {"slug": slug, "status": "error",
+                "errors": [f"Não foi possível ler a nota Silver ({type(exc).__name__}); arquivos preservados"]}
     gold = _read_json(gold_file)
 
     anterior = (metadata.get("zinom") or {}).get("remember_id")
@@ -242,10 +255,17 @@ def pending_candidates(storage: MeetingStorage):
                 isinstance(source, dict) and source.get("transport") == "bronze"):
             from castanha.bronze_ingest import bronze_needs_sync
             silver_file = storage.silver_dir / f"{bronze.name}.md"
+            try:
+                silver = silver_file.read_text(encoding="utf-8") if silver_file.exists() else ""
+            except (OSError, UnicodeError):
+                # A execução reportará a falha desta nota, mantendo o restante
+                # da fila acessível e os bytes originais intactos.
+                candidates.append(("", bronze.name))
+                continue
             bronze_pending = bronze_needs_sync(bronze, bronze.name, metadata,
                 workspace=z_cfg.get("workspace"), account_id=z_cfg.get("account_id"),
                 endpoint=z_cfg.get("endpoint", "https://zinom.ai/mcp"), token=z_cfg.get("token", ""),
-                silver_text=silver_file.read_text(encoding="utf-8") if silver_file.exists() else "",
+                silver_text=silver,
                 gold=_read_json(storage.gold_dir / f"{bronze.name}.json"))
         if meeting_needs_sync(metadata) or unfinished or bronze_pending:
             synced_at = delivery.get("synced_at")

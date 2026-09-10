@@ -41,6 +41,10 @@ class LlmUnavailable(Exception):
     """
 
 
+class LlmInvalidResponse(LlmUnavailable):
+    """Extração inválida permanece pendente, sem acionar outro provedor."""
+
+
 class LlmTooLarge(Exception):
     """A Groq recusou a mensagem por tamanho (413). Traz o limite e o pedido, se ela disse."""
 
@@ -82,7 +86,7 @@ def _dividir_texto(texto: str, max_chars: int) -> List[str]:
 
 def _extrair_json(texto: str) -> Optional[Dict[str, Any]]:
     """O objeto JSON da resposta, mesmo com cerca de código ou prosa em volta."""
-    if not texto or not texto.strip():
+    if not isinstance(texto, str) or not texto.strip():
         return None
     candidatos = [texto.strip()]
     cerca = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", texto, re.S)
@@ -99,6 +103,44 @@ def _extrair_json(texto: str) -> Optional[Dict[str, Any]]:
         if isinstance(dados, dict):
             return dados
     return None
+
+
+def _valid_gold(data):
+    """Valida o envelope antes dos filtros, que podem legitimamente esvaziá-lo.
+
+    Coleções omitidas e itens textuais legados continuam aceitos. Um objeto
+    sem nenhuma coleção, ou tipos incorretos, não comprova extração concluída.
+    A conferência das citações continua no adaptador de entrega.
+    """
+    fields = {
+        "facts": ("subject", "predicate", "object", "evidencia"),
+        "decisions": ("decision", "evidencia"),
+        "action_items": ("task", "assignee", "deadline", "evidencia"),
+        "people_notes": ("name", "note"),
+    }
+    required = {"facts": ("subject", "predicate", "object"), "decisions": ("decision",),
+                "action_items": ("task",), "people_notes": ("name", "note")}
+    if not isinstance(data, dict) or not any(key in data for key in fields):
+        return False
+    for key, names in fields.items():
+        values = data.get(key, [])
+        if not isinstance(values, list):
+            return False
+        for value in values:
+            if isinstance(value, str):
+                continue
+            if not isinstance(value, dict):
+                return False
+            if any(name not in value for name in required[key]):
+                return False
+            for name in names:
+                if name not in value:
+                    continue
+                if value[name] is None and name in ("assignee", "deadline"):
+                    continue
+                if not isinstance(value[name], str):
+                    return False
+    return True
 
 
 PARTIAL_SYSTEM_PROMPT = """Você recebe UMA PARTE de uma transcrição longa de reunião, em ordem.
@@ -278,6 +320,7 @@ def _ground_gold(data):
 HERMES_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                    "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1"]
 HERMES_POLL_SEC = 5
+HERMES_LOCAL_WAIT_SEC = 20
 HERMES_JSON_INSTRUCTION = "Responda SOMENTE com o objeto JSON pedido, sem texto antes ou depois."
 # A CLI imprime "session_id: ..." antes OU depois da resposta (varia por versão),
 # e avisos como "Warning: Unknown toolsets: none" saem no stdout junto com ela.
@@ -292,6 +335,10 @@ class HermesInProgress(LlmUnavailable):
 
 class _HermesJobFailed(Exception):
     """Um modelo da cadeia falhou de fato; o próximo pode tentar."""
+
+
+class _HermesInvalidResponse(_HermesJobFailed):
+    """Saída persistida exige um reparo com identidade diferente."""
 
 
 class HermesSshLlm:
@@ -367,7 +414,7 @@ class HermesSshLlm:
     def _answer(text: str) -> str:
         answer = _SESSION_LINE.sub("", text).strip()
         if not answer:
-            raise _HermesJobFailed("resposta vazia")
+            raise _HermesInvalidResponse("resposta vazia")
         return answer
 
     def _run(self, provider: str, model: str, prompt: str) -> str:
@@ -383,7 +430,9 @@ class HermesSshLlm:
             # O prompt pode ter sobrevivido a uma queda antes do launch ou a
             # um reboot. O flock preserva o worker vivo e retoma o órfão.
             self._launch(remote, provider, model)
-        deadline = self.clock() + self.timeout_sec
+        # O worker remoto tem seu próprio timeout; a fila local deve poder
+        # atender outra reunião enquanto ele trabalha.
+        deadline = self.clock() + min(self.timeout_sec, HERMES_LOCAL_WAIT_SEC)
         while state == "RUNNING":
             if self.clock() >= deadline:
                 raise HermesInProgress("Resumo ainda em andamento na VPS; retomada automática")
@@ -415,7 +464,26 @@ class HermesSshLlm:
         for entry in self.models:
             provider, model = entry["provider"], entry["model"]
             try:
-                answer = self._run(provider, model, prompt)
+                for repair in range(2):
+                    # Uma identidade fixa de reparo, sem apagar o resultado
+                    # original nem criar outro job a cada retomada.
+                    candidate = prompt if repair == 0 else prompt + (
+                        "\n[castanha-output-repair-v1]\n"
+                        "A tentativa anterior não produziu uma resposta válida. "
+                        "Refaça integralmente a tarefa usando as fontes acima. "
+                        "Não devolva resposta vazia. "
+                        + ("Devolva o objeto JSON com as coleções solicitadas em listas."
+                           if json_mode else "Devolva as notas solicitadas.") + "\n")
+                    try:
+                        answer = self._run(provider, model, candidate)
+                        if json_mode and not _valid_gold(_extrair_json(answer)):
+                            raise _HermesInvalidResponse("estrutura de fatos inválida")
+                        break
+                    except _HermesInvalidResponse as exc:
+                        if repair:
+                            raise LlmInvalidResponse(
+                                "Resposta da síntese inválida após reparo; revisão necessária, "
+                                "transcrição preservada") from exc
             except _HermesJobFailed as exc:
                 print(f"[Castanha] Hermes {provider}/{model} falhou ({exc}); tentando o próximo modelo",
                       file=sys.stderr)
@@ -447,6 +515,8 @@ class MeetingSummarizer:
             except HermesInProgress:
                 # Job vivo na VPS: a retomada acha o resultado. Trocar por Groq
                 # agora jogaria fora o resumo melhor que está quase pronto.
+                raise
+            except LlmInvalidResponse:
                 raise
             except LlmUnavailable as exc:
                 if self.fallback_provider != "groq" or not self.api_key:
@@ -540,6 +610,9 @@ class MeetingSummarizer:
         raise LlmUnavailable(f"{ultimo}, {LLM_ATTEMPTS} tentativas")
 
     # ------------------------------------------------------------ partes
+    def _requires_summary(self):
+        return self.provider != "groq" or bool(self.api_key)
+
     def _tamanho_da_parte(self, texto: str, erro: LlmTooLarge) -> int:
         """Quantos caracteres cabem numa chamada, pelo que a Groq disse no 413."""
         limite = erro.limit or LLM_DEFAULT_TPM
@@ -560,7 +633,7 @@ class MeetingSummarizer:
                 if tentativa >= 2:
                     return ""
                 return self._silver_em_partes(title, cabecalho, raw_transcript, max(2000, part_chars // 2), tentativa + 1)
-            if not saida.strip():
+            if not isinstance(saida, str) or not saida.strip():
                 return ""
             parciais.append(f"### Parte {i} de {n}\n{saida.strip()}")
 
@@ -569,7 +642,7 @@ class MeetingSummarizer:
             final = self._call_llm(COMBINE_SYSTEM_PROMPT, f"{cabecalho}\n{juntas}\n")
         except LlmTooLarge:
             final = ""
-        if not final.strip():
+        if not isinstance(final, str) or not final.strip():
             # A consolidação não coube ou falhou: as parciais já são nota útil.
             final = f"# {title}\n\n## 📌 Resumo Executivo\nReunião longa, resumida em {n} partes abaixo.\n\n{juntas}"
         return final.strip() + f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}\n"
@@ -601,7 +674,7 @@ Transcrição Bruta:
             try:
                 narrativa = llm_output = self._call_llm(
                     SILVER_NOTES_SYSTEM_PROMPT if sem_transcricao else SILVER_SYSTEM_PROMPT, prompt)
-                if sem_transcricao and narrativa.strip():
+                if sem_transcricao and isinstance(narrativa, str) and narrativa.strip():
                     llm_output = narrativa.strip() + f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}\n"
             except LlmTooLarge as e:
                 print(f"[Castanha] Transcrição grande para uma chamada ({e}); resumindo em partes...", file=sys.stderr)
@@ -609,7 +682,9 @@ Transcrição Bruta:
 
         # Sem LLM configurada não existe resumo. O template abaixo diz isso em vez
         # de inventar "decisões tomadas" que ninguém tomou.
-        if not llm_output:
+        if not isinstance(llm_output, str) or not llm_output.strip():
+            if raw_transcript.strip() and self._requires_summary():
+                raise LlmInvalidResponse("Resumo vazio; síntese pendente, transcrição preservada")
             motivo = (
                 "a gravação não tem áudio para resumir"
                 if not raw_transcript.strip()
@@ -661,9 +736,13 @@ attendees:
         # O Silver carrega a transcrição inteira no fim; para os fatos bastam as
         # notas, senão uma reunião longa estoura o limite de novo.
         notas = re.split(r"\n## 📝 Transcrição", silver_content, maxsplit=1)[0]
-        meta_enxuta = {k: v for k, v in metadata.items() if k not in ("audio_levels", "recordings", "zinom")}
+        # Estado de execução não é fonte da reunião. Incluí-lo mudaria o hash
+        # do pedido ao marcar pending e criaria novos jobs a cada retomada.
+        transient = {"audio_levels", "recordings", "zinom", "processing_status",
+                     "summary_status", "summary_error", "summary_provider"}
+        meta_enxuta = {k: v for k, v in metadata.items() if k not in transient}
         prompt = f"""Metadados da Reunião:
-{json.dumps(meta_enxuta, indent=2, ensure_ascii=False)}
+{json.dumps(meta_enxuta, indent=2, ensure_ascii=False, sort_keys=True)}
 
 Notas Silver:
 {notas}
@@ -676,17 +755,19 @@ Transcrição:
         if raw_transcript.strip():
             try:
                 llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
-                if not llm_output:
+                if not _valid_gold(_extrair_json(llm_output)):
                     # O modo JSON da Groq recusa a resposta inteira quando o
                     # modelo tropeça ("json_validate_failed", visto em 05/09
                     # numa reunião de 2h). Sem o modo, o texto vem e o JSON
                     # sai dele.
                     llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=False)
             except LlmTooLarge as e:
-                print(f"[Castanha] Fatos: mensagem grande demais ({e}). Fica o fallback estruturado.", file=sys.stderr)
+                raise LlmUnavailable("Extração de fatos excede o limite da LLM; síntese pendente") from e
         dados = _extrair_json(llm_output)
-        if isinstance(dados, dict):
+        if _valid_gold(dados):
             return _ground_gold(dados)
 
+        if raw_transcript.strip() and self._requires_summary():
+            raise LlmInvalidResponse("Extração de fatos inválida; síntese pendente, transcrição preservada")
         # Convite não prova presença. Sem extração, não há fatos duráveis.
         return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}

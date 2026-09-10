@@ -317,11 +317,11 @@ class TestVpsTimeout(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Upload excedeu 30 s"):
                 VpsSshTranscriber("host-teste", self.contract).transcribe(self.audio, "mic_only")
         commands = [cmd for cmd, _ in self.remote.calls]
-        self.assertEqual([kw["timeout"] for _, kw in self.remote.calls], [15, 15, 30, 15])
+        self.assertEqual([kw["timeout"] for _, kw in self.remote.calls], [15, 15, 15, 30, 15])
         self.assertEqual(self.audio.read_bytes(), self.original)
-        uploaded_path = commands[2][-1].split(":", 1)[1]
+        uploaded_path = commands[3][-1].split(":", 1)[1]
         self.assertRegex(uploaded_path, r"/upload-[a-f0-9]{32}\.flac$")
-        self.assertEqual(commands[3][-1], f"rm -f -- {uploaded_path}")
+        self.assertEqual(commands[4][-1], f"rm -f -- {uploaded_path}")
         self.assertFalse(any("pkill" in " ".join(cmd) for cmd in commands))
 
     def test_erro_remoto_preserva_job_para_nova_tentativa(self):
@@ -356,8 +356,8 @@ class TestVpsTimeout(unittest.TestCase):
         self.assertTrue(all(kw["timeout"] == (30 if cmd[0] == "scp" else 15)
                             for cmd, kw in self.remote.calls))
         launched = next(cmd[-1] for cmd in commands if "nohup" in cmd[-1])
-        self.assertIn(f"timeout --kill-after=30s {VPS_MAX_TIMEOUT_SEC}s", launched)
-        self.assertIn("flock -n", launched)
+        self.assertIn(f"--run-job --timeout-seconds {VPS_MAX_TIMEOUT_SEC}", launched)
+        self.assertNotIn("timeout --kill-after", launched)
 
     def test_reuniao_curta_fica_no_minimo_e_resultado_e_reutilizado(self):
         from castanha.transcription import VPS_MIN_TIMEOUT_SEC, VpsSshTranscriber
@@ -373,7 +373,7 @@ class TestVpsTimeout(unittest.TestCase):
                             for cmd, kw in self.remote.calls))
         launched = [cmd[-1] for cmd in commands if "nohup" in cmd[-1]]
         self.assertEqual(len(launched), 1)
-        self.assertIn(f"timeout --kill-after=30s {VPS_MIN_TIMEOUT_SEC}s", launched[0])
+        self.assertIn(f"--run-job --timeout-seconds {VPS_MIN_TIMEOUT_SEC}", launched[0])
         self.assertEqual(res.text, "ok")
         self.assertEqual((self.remote.root / "count").read_text().splitlines(), ["started"])
         self.assertEqual(self.audio.read_bytes(), self.original)

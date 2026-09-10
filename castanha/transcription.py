@@ -517,6 +517,12 @@ class VpsSshTranscriber(BaseTranscriber):
                 raise TranscriptionPending("Worker VPS sem contrato válido; envio pendente") from exc
             if json.dumps(attested, sort_keys=True, allow_nan=False) != json.dumps(contract, sort_keys=True):
                 raise TranscriptionPending("Contrato do worker VPS incompatível; envio pendente")
+            try:
+                runner = _vps_json(ssh(f"{worker} --describe-runner"))
+            except (ValueError, TypeError) as exc:
+                raise TranscriptionPending("Worker VPS sem fila durável compatível; envio pendente") from exc
+            if runner != {"runner": "queue-timeout-v1"}:
+                raise TranscriptionPending("Worker VPS sem fila durável compatível; envio pendente")
             if output == "UPLOAD":
                 upload = f"{remote}/upload-{uuid.uuid4().hex}.flac"
                 upload_timeout = _vps_upload_timeout(audio_path.stat().st_size)
@@ -551,11 +557,11 @@ class VpsSshTranscriber(BaseTranscriber):
                 f"&& chmod 600 {remote}/request.part && mv {remote}/request.part {remote}/request.json")
             duration = probe_duration_seconds(audio_path) or 600
             worker_timeout = int(min(max(VPS_MIN_TIMEOUT_SEC, duration * 2.5), VPS_MAX_TIMEOUT_SEC))
-            script = (f"test -f {remote}/result.json && exit 0; "
-                      f"timeout --kill-after=30s {worker_timeout}s {worker} --request {remote}/request.json "
-                      f"> {remote}/result.part && mv {remote}/result.part {remote}/result.json")
-            ssh(f"umask 077; nohup flock -n {remote}/job.lock sh -c {shlex.quote(script)} "
-                f">{remote}/worker.log 2>&1 </dev/null &")
+            # O supervisor mantém job.lock e só inicia o prazo após conseguir
+            # asr.lock. Esperar na fila não consome o orçamento da transcrição.
+            ssh(f"umask 077; nohup {worker} --request {remote}/request.json "
+                f"--run-job --timeout-seconds {worker_timeout} "
+                f">>{remote}/worker.log 2>&1 </dev/null &")
             raise TranscriptionPending("Transcrição remota em andamento; execute castanha sync --all para retomar")
         try:
             data = _vps_json(output)

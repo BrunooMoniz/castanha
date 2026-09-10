@@ -37,11 +37,14 @@ class LocalVps:
         self.settings.write_text(json.dumps({'delay': .15, 'exit_code': 0}))
         self.set_reply(reply or {'text': 'fala', 'segments': [{'start': .1, 'end': .9, 'text': 'fala'}]})
         self.worker.write_text('''#!/usr/bin/python3
-import json, pathlib, stat, sys, time
+import fcntl, json, pathlib, stat, sys, time
 root = pathlib.Path(__file__).parent
 contract = json.loads((root / 'contract.json').read_text())
 if sys.argv[1:] == ['--describe-contract']:
     print(json.dumps(contract))
+    sys.exit(0)
+if sys.argv[1:] == ['--describe-runner']:
+    print(json.dumps({'runner': 'queue-timeout-v1'}))
     sys.exit(0)
 request = None
 if sys.argv[1] == '--request':
@@ -49,6 +52,14 @@ if sys.argv[1] == '--request':
     assert path.is_file() and not path.is_symlink()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     request = json.loads(path.read_text())
+    if '--run-job' in sys.argv:
+        lock = (path.parent / 'job.lock').open('a')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(0)
+        if (path.parent / 'result.json').exists():
+            sys.exit(0)
     assert request['contract'] == contract
     assert request['audio']['sample_rate'] == 16000
     assert request['audio']['channels'] == 1
@@ -63,7 +74,12 @@ reply = json.loads((root / 'reply.json').read_text())
 if request and isinstance(reply, dict):
     reply.setdefault('request_sha256', request['request_sha256'])
     reply.setdefault('contract', contract)
-print(json.dumps(reply))
+if '--run-job' in sys.argv:
+    part = path.parent / 'result.part'
+    part.write_text(json.dumps(reply))
+    part.replace(path.parent / 'result.json')
+else:
+    print(json.dumps(reply))
 ''')
         self.worker.chmod(0o700)
 
@@ -82,7 +98,7 @@ print(json.dumps(reply))
         command = args[-1].replace('/root/castanha-transcribe-v2.py', str(self.worker))
         command = command.replace('/root/castanha-transcribe.py', str(self.worker))
         result = self.run(['sh', '-c', command], cwd=self.root, **kwargs)
-        if self.lose_reply and 'nohup flock' in command:
+        if self.lose_reply and 'nohup ' in command:
             self.lose_reply = False
             raise subprocess.TimeoutExpired('ssh', 15)
         return result
@@ -122,12 +138,13 @@ class VpsChannelTransportTests(unittest.TestCase):
         self.submit()
         self.remote.completed()
         calls = self.remote.calls
-        self.assertEqual(len(calls), 6)
-        self.assertTrue(calls[2][0][-1].endswith('.flac'))
-        self.assertIn('audio.flac', calls[3][0][-1])
-        self.assertIn('request.json', calls[5][0][-1])
-        self.assertIn('nohup flock -n', calls[5][0][-1])
-        self.assertEqual([kw['timeout'] for _, kw in calls], [15, 15, 30, 15, 15, 15])
+        self.assertEqual(len(calls), 7)
+        self.assertTrue(calls[3][0][-1].endswith('.flac'))
+        self.assertIn('audio.flac', calls[4][0][-1])
+        self.assertIn('request.json', calls[6][0][-1])
+        self.assertIn('--run-job --timeout-seconds', calls[6][0][-1])
+        self.assertNotIn('timeout --kill-after', calls[6][0][-1])
+        self.assertEqual([kw['timeout'] for _, kw in calls], [15, 15, 15, 30, 15, 15, 15])
         uploaded = next(self.remote.root.rglob('audio.flac'))
         manifest = json.loads((uploaded.parent / 'request.json').read_text())
         self.assertEqual(manifest['namespace'], 'flac-mono-v1')

@@ -376,6 +376,8 @@ class TestLegacySyncPath(unittest.TestCase):
         first = ingest_current_recordings(bronze, slug, metadata, self.client, workspace="fixture-workspace",
                                           silver_text=SILVER, gold=GOLD)
         self.assertEqual(first["status"], "pending")
+        self.assertEqual(first["facts_ingested"], 0, "envio aceito ainda não confirma ingestão")
+        self.assertEqual(first["facts_status"], "pending")
         self.storage.record_zinom_result(slug, first)
         self.assertEqual([s for _, s in pending_candidates(self.storage)], [slug])
         # Servidor concluiu: o sync consulta pela chave e fecha o recibo.

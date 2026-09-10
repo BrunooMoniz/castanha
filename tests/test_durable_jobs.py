@@ -399,6 +399,103 @@ class TestDurableJobs(unittest.TestCase):
             self.assertEqual(transcribe_channels.call_count, 3)
             self.assertEqual(audio.read_bytes(), original)
 
+    def test_legacy_partial_transcription_does_not_publish_or_replace_existing_receipt(self):
+        slug = '2026-09-08_1200_legacy-partial'
+        bronze = self.engine.storage.bronze_dir / slug
+        bronze.mkdir(parents=True)
+        audio_paths = [bronze / 'audio-1.ogg', bronze / 'audio-2.ogg']
+        for path in audio_paths:
+            path.write_bytes(path.name.encode())
+        previous_receipt = {'status': 'ok', 'remember_id': 'conversation:old'}
+        self.engine.config['transcription']['por_canal'] = True
+        self.engine.storage.write_bronze_metadata(slug, {
+            'slug': slug, 'title': 'Legacy', 'mode': 'mic_only', 'zinom': previous_receipt,
+            'recordings': [{'id': p.name, 'filename': p.name, 'path': str(p),
+                            'transcribed': False, 'duration_seconds': 1} for p in audio_paths],
+        })
+        silver = self.engine.storage.silver_dir / f'{slug}.md'
+        gold = self.engine.storage.gold_dir / f'{slug}.json'
+        silver.write_text('Nota entregue anteriormente')
+        gold.write_text('{"facts": []}')
+        originals = {p: p.read_bytes() for p in [*audio_paths, silver, gold]}
+        with patch.object(self.engine, '_transcrever_por_canal', side_effect=[
+                self.transcription('Primeira origem'), TranscriptionPending('Segunda origem na VPS')]) as transcribe, \
+             patch.object(self.engine.summarizer, 'generate_silver') as summarize, \
+             patch.object(self.engine.zinom, 'ingest_meeting') as ingest:
+            result = self.engine.reprocess_meeting(slug)
+            self.assertEqual(result['result']['zinom']['status'], 'pending')
+            self.assertIn('Segunda origem na VPS', result['result']['zinom']['reason'])
+            self.assertEqual(transcribe.call_count, 2)
+            summarize.assert_not_called()
+            ingest.assert_not_called()
+        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['zinom'], previous_receipt)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        self.assertIn('Primeira origem', self.engine.storage.read_transcript(slug))
+        # Uma instância nova da fila automática também retoma a origem pendente,
+        # em vez de reenviar a nota antiga e zerar o backoff.
+        from castanha.retry import drain_queue
+        config_path = self.root / 'config/castanha/config.json'
+        config = json.loads(config_path.read_text())
+        config['transcription']['por_canal'] = True
+        config_path.write_text(json.dumps(config))
+        with patch('castanha.engine.CastanhaEngine._transcrever_por_canal',
+                   side_effect=TranscriptionPending('Segunda origem na VPS')) as transcribe, \
+             patch('castanha.summarizer.MeetingSummarizer.generate_silver') as summarize, \
+             patch('castanha.zinom_adapter.ZinomAdapter.ingest_meeting') as ingest:
+            queued = drain_queue(self.engine.storage, now=1000)
+            self.assertEqual([r['status'] for r in queued], ['pending'])
+            transcribe.assert_called_once()
+            summarize.assert_not_called()
+            ingest.assert_not_called()
+            self.assertEqual(drain_queue(self.engine.storage, now=1001), [])
+        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['zinom'], previous_receipt)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        with patch.object(self.engine, '_transcrever_por_canal', return_value=self.transcription('Segunda origem')) as transcribe, \
+             patch.object(self.engine.summarizer, 'generate_silver', return_value='Resumo integral') as summarize, \
+             patch.object(self.engine.summarizer, 'generate_gold', return_value={'facts': []}), \
+             patch.object(self.engine.zinom, 'ingest_meeting', return_value=previous_receipt) as ingest:
+            resumed = self.engine.reprocess_meeting(slug)
+            self.assertFalse(resumed['result']['transcription_pending'])
+            self.assertEqual(transcribe.call_count, 1)
+            self.assertIn('Primeira origem', summarize.call_args.args[1])
+            self.assertIn('Segunda origem', summarize.call_args.args[1])
+            ingest.assert_called_once()
+
+    def test_legacy_summary_pending_sync_resumes_summary_without_retranscribing(self):
+        from castanha.summarizer import LlmUnavailable
+        slug = '2026-09-08_1200_legacy-summary'
+        bronze = self.engine.storage.bronze_dir / slug
+        bronze.mkdir(parents=True)
+        audio = bronze / 'audio.ogg'
+        audio.write_bytes(b'legacy-original')
+        (bronze / 'transcript_raw.txt').write_text('Texto completo já transcrito')
+        previous = {'status': 'ok', 'remember_id': 'conversation:old'}
+        self.engine.storage.write_bronze_metadata(slug, {
+            'slug': slug, 'title': 'Legacy', 'mode': 'mic_only', 'zinom': previous,
+            'summary_status': 'pending', 'transcription_provider': 'groq',
+            'recordings': [{'id': audio.name, 'filename': audio.name, 'path': str(audio),
+                            'transcribed': True, 'transcription_provider': 'groq', 'duration_seconds': 1}],
+        })
+        with patch('castanha.engine.get_transcriber') as transcribe, \
+             patch('castanha.summarizer.MeetingSummarizer.generate_silver',
+                   side_effect=LlmUnavailable('Resumo remoto em andamento')), \
+             patch('castanha.zinom_adapter.ZinomAdapter.ingest_meeting') as ingest:
+            result = sync_meeting(slug, self.engine.storage)
+            self.assertEqual(result['status'], 'pending')
+            transcribe.assert_not_called()
+            ingest.assert_not_called()
+        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['zinom'], previous)
+        with patch('castanha.engine.get_transcriber') as transcribe, \
+             patch('castanha.summarizer.MeetingSummarizer.generate_silver', return_value='Resumo completo'), \
+             patch('castanha.summarizer.MeetingSummarizer.generate_gold', return_value={'facts': []}), \
+             patch('castanha.zinom_adapter.ZinomAdapter.ingest_meeting', return_value=previous) as ingest:
+            resumed = sync_meeting(slug, self.engine.storage)
+            self.assertEqual(resumed['status'], 'ok')
+            transcribe.assert_not_called()
+            ingest.assert_called_once()
+        self.assertNotIn('summary_status', self.engine.storage._read_bronze_metadata(slug))
+        self.assertEqual(audio.read_bytes(), b'legacy-original')
+
     def test_mock_append_is_excluded_while_preserving_real_recording(self):
         with patch('castanha.engine.get_transcriber') as provider:
             provider.return_value.transcribe.return_value = self.transcription()
@@ -706,7 +803,8 @@ class TestDurableJobs(unittest.TestCase):
         self.assertEqual(note['processing_status'], 'pending')
         # Retomada: LLM voltou. Nenhuma nova transcrição; resumo, Gold e entrega acontecem.
         with patch('castanha.engine.get_transcriber') as provider, \
-             patch.object(MeetingSummarizer, '_call_llm', return_value='# Resumo\n\nDecisão preservada.'):
+             patch.object(MeetingSummarizer, '_call_llm', side_effect=lambda *args, **kwargs:
+                          '{"facts": []}' if kwargs.get('json_mode') else '# Resumo\n\nDecisão preservada.'):
             sync_meeting(slug, self.engine.storage)
             provider.assert_not_called()
         meta = self.engine.storage._read_bronze_metadata(slug)
@@ -764,6 +862,35 @@ class TestDurableJobs(unittest.TestCase):
             provider.return_value.transcribe.return_value = self.transcription()
             slug = self.engine.stop_recording()['result']['slug']
         self.assertIn(slug, [s for _, s in pending_candidates(self.engine.storage)])
+
+    def test_pending_transcription_after_append_preserves_old_receipt_and_retry_backoff(self):
+        from castanha.retry import drain_queue
+        delivered = {'status': 'ok', 'remember_id': 'r-1', 'note_status': 'ok', 'facts_status': 'none'}
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.zinom, 'ingest_meeting', return_value=delivered):
+            provider.return_value.transcribe.return_value = self.transcription()
+            slug = self.engine.stop_recording()['result']['slug']
+        receipt_before = self.engine.storage._read_bronze_metadata(slug)['zinom']
+        bronze = self.engine.storage.bronze_dir / slug
+        originals = {p: p.read_bytes() for p in bronze.glob('*.ogg')}
+        self.engine.state_mgr.write({'status': 'recording', 'audio_path': str(self.source),
+                                     'target_meeting_slug': slug, 'current_meeting': {'title': 'Fixture'}})
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch.object(self.engine.zinom, 'ingest_meeting') as ingest:
+            provider.return_value.transcribe.side_effect = TranscriptionPending('VPS em andamento')
+            result = self.engine.stop_recording()
+            self.assertEqual(result['result']['zinom']['status'], 'pending')
+            self.assertIn('VPS em andamento', result['result']['zinom']['reason'])
+            self.assertTrue(result['result']['transcription_pending'])
+            first = drain_queue(self.engine.storage, now=1000)
+            self.assertEqual([r['status'] for r in first], ['pending'])
+            retry = json.loads((bronze / '.sync-retry.json').read_text())
+            self.assertEqual(retry['attempts'], 1)
+            self.assertGreater(retry['next_attempt_at'], 1000)
+            self.assertEqual(drain_queue(self.engine.storage, now=1001), [])
+            ingest.assert_not_called()
+        self.assertEqual(self.engine.storage._read_bronze_metadata(slug)['zinom'], receipt_before)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
 
 
 class TestRemoteJob(unittest.TestCase):
@@ -830,7 +957,10 @@ class TestRemoteJob(unittest.TestCase):
         self.assertEqual(sum(args[0] == 'scp' for args, _ in commands), 1)
         self.assertTrue(all(kwargs['timeout'] == (30 if args[0] == 'scp' else 15)
                             for args, kwargs in commands))
-        self.assertTrue(any('nohup flock -n' in args[-1] for args, _ in commands))
+        launches = [args[-1] for args, _ in commands if '--run-job' in args[-1]]
+        self.assertTrue(launches)
+        self.assertTrue(all('--timeout-seconds 1800' in command for command in launches))
+        self.assertTrue(all('timeout --kill-after' not in command for command in launches))
         self.assertEqual(self.audio.read_bytes(), self.original)
 
     def test_missing_configuration_never_selects_mock(self):
@@ -841,6 +971,12 @@ class TestRemoteJob(unittest.TestCase):
 
 
 class TestMemoryCheckpoints(unittest.TestCase):
+    def setUp(self):
+        patcher = patch('castanha.zinom_adapter.load_config', return_value={
+            'zinom': {'bronze_ingest_enabled': False}})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_tombstone_stops_facts_as_well_as_replacement_note(self):
         adapter = ZinomAdapter()
         adapter.enabled, adapter.token = True, 'fixture'

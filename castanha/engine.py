@@ -640,7 +640,10 @@ class CastanhaEngine:
                 "transcription_provider": provider, "transcription_error": transcription_error,
                 "transcription_pending": bool(pending_jobs),
                 "transcription_pending_reason": metadata.get("transcription_pending_reason"),
-                "zinom": metadata.get("zinom") or {"status": "pending"},
+                # O recibo anterior continua no Bronze, mas não comprova que a
+                # gravação atual terminou. A fila precisa manter seu backoff.
+                "zinom": {"status": "pending", "reason": t(
+                    "engine.problem_transcription_pending", errors="; ".join(errors + pending_messages))},
                 "problemas": errors + pending_messages}}
         from castanha.summarizer import LlmUnavailable
         try:
@@ -892,14 +895,19 @@ class CastanhaEngine:
         meta["transcription_error"] = "; ".join(erros) if erros else None
         meta["transcription_pending"] = bool(pendencias)
         meta["transcription_pending_reason"] = "; ".join(pendencias) or None
+        meta["processing_status"] = "pending" if pendencias or erros else "complete"
         self.storage.write_bronze_metadata(slug, meta)
 
         silver_path = self.storage.silver_dir / f"{slug}.md"
         gold_path = self.storage.gold_dir / f"{slug}.json"
         zinom_status: Dict[str, Any] = meta.get("zinom") or {}
+        if pendencias:
+            zinom_status = {"status": "pending", "reason": t(
+                "engine.problem_transcription_pending", errors="; ".join(pendencias))}
         # Nota nova só com texto novo, ou quando nada estava pendente (aí o
-        # pedido é refazer as notas). Falhar de novo não mexe na nota que existe.
-        refazer_notas = transcript.strip() and (novo_texto or not pendentes)
+        # pedido é refazer as notas). Uma origem ainda pendente não pode gerar
+        # síntese parcial nem substituir a nota e o recibo já existentes.
+        refazer_notas = transcript.strip() and (novo_texto or not pendentes) and not pendencias
         if refazer_notas:
             # 4. Silver, 5. Gold, 6. Zinom (editando a nota anterior, se houver)
             from castanha.summarizer import LlmUnavailable
@@ -911,7 +919,7 @@ class CastanhaEngine:
                 gold_data = self.summarizer.generate_gold(meta, silver_content, transcript)
             except LlmUnavailable as exc:
                 # Transcrição já está no Bronze; a nota antiga (se houver) fica como está.
-                meta.update(summary_status="pending", summary_error=str(exc))
+                meta.update(processing_status="pending", summary_status="pending", summary_error=str(exc))
                 self.storage.write_bronze_metadata(slug, meta)
                 return {"status": "partial", "result": {
                     "slug": slug, "title": title, "bronze_dir": str(bronze_dir),

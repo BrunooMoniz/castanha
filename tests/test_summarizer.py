@@ -243,8 +243,8 @@ class TestReuniaoLonga(unittest.TestCase):
 
     def test_erro_de_llm_nao_vira_resumo_inventado(self):
         with patch.object(MeetingSummarizer, "_call_llm", return_value=""):
-            silver = self.s.generate_silver(self._meta(), "Fala. Fala.")
-        self.assertIn("Sem resumo", silver)
+            with self.assertRaisesRegex(S.LlmUnavailable, "Resumo vazio"):
+                self.s.generate_silver(self._meta(), "Fala. Fala.")
 
 
 class TestCalendarGrounding(unittest.TestCase):
@@ -380,6 +380,8 @@ class FakeVps:
         if "nohup flock" in command:
             m = re.search(r"--provider (\S+) -m (\S+) --reasoning (\S+)", command)
             job["outcome"] = self.outcomes[f"{m.group(1)}/{m.group(2)}"]
+            if callable(job["outcome"]):
+                job["outcome"] = job["outcome"](job["prompt"])
             job.update(stage="RUNNING", launch=command)
             return _proc(0)
         if command == f"cat {remote}/result.txt":
@@ -409,7 +411,7 @@ class TestHermesSshLlm(unittest.TestCase):
         shutil.rmtree(self.temp, ignore_errors=True)
 
     def clock(self):
-        self.now += 100.0
+        self.now += 5.0
         return self.now
 
     def hermes(self, timeout_sec=900):
@@ -693,6 +695,175 @@ class TestHermesNoSummarizer(unittest.TestCase):
         with patch.object(s, "_call_llm", side_effect=lambda sp, up, json_mode=False: prompts.append(up) or '{"facts": []}'):
             s.generate_gold(self._meta(), "# Nora\n\nnota", longa)
         self.assertIn(longa.strip(), prompts[0])
+
+
+class TestSynthesisReliability(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        env = patch.dict(os.environ, {"XDG_STATE_HOME": self.temp.name, "GROQ_API_KEY": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        with patch.object(S, "load_config", return_value={"llm": {
+                "provider": "hermes_ssh", "hermes_ssh_host": "vps-fixture",
+                "hermes_models": MODELOS, "fallback_provider": "groq", "api_key": "fixture"}}):
+            self.s = MeetingSummarizer()
+        self.s.hermes.sleep = lambda _: None
+        self.s.hermes.clock = itertools.count().__next__
+        self.meta = {"title": "Fixture", "recorded_at": "2026-09-10T10:00:00-03:00"}
+        self.valid = '{"facts": [], "decisions": [], "action_items": [], "people_notes": []}'
+
+    def test_invalid_gold_never_becomes_successful_empty_extraction(self):
+        invalid = [None, "", "   ", "Tente novamente", "[]", "{}", '{"error": "failed"}',
+                   '{"facts": null}', '{"facts": {}}', '{"decisions": "erro"}',
+                   '{"facts": [7]}', '{"facts": [{}]}', '{"facts": [{"subject": []}]}',
+                   '{"action_items": [{"task": "x", "assignee": false}]}']
+        for reply in invalid:
+            with self.subTest(reply=reply), patch.object(self.s, "_call_llm", return_value=reply) as call:
+                with self.assertRaisesRegex(S.LlmInvalidResponse, "Extração de fatos inválida"):
+                    self.s.generate_gold(self.meta, "Notas sintéticas", "Transcrição sintética")
+                self.assertEqual(call.call_count, 2)
+
+    def test_legitimate_empty_gold_is_successful_and_does_not_retry(self):
+        with patch.object(self.s, "_call_llm", return_value=self.valid) as call:
+            self.assertEqual(self.s.generate_gold(self.meta, "Notas", "Conversa informal"), json.loads(self.valid))
+        self.assertEqual(call.call_count, 1)
+
+    def test_oversize_gold_remains_pending(self):
+        with patch.object(self.s, "_call_llm", side_effect=S.LlmTooLarge()):
+            with self.assertRaisesRegex(S.LlmUnavailable, "limite"):
+                self.s.generate_gold(self.meta, "Notas", "Transcrição")
+
+    def test_empty_silver_requires_explicit_pending_with_configured_provider(self):
+        for reply in ("", " \n", None, []):
+            with self.subTest(reply=reply), patch.object(self.s, "_call_llm", return_value=reply):
+                with self.assertRaisesRegex(S.LlmInvalidResponse, "Resumo vazio"):
+                    self.s.generate_silver(self.meta, "Transcrição preservada")
+
+    def test_template_still_allowed_without_provider_or_transcript(self):
+        self.s.provider, self.s.api_key = "groq", ""
+        with patch.object(self.s, "_call_llm", return_value=""):
+            self.assertIn("Sem resumo", self.s.generate_silver(self.meta, "Transcrição"))
+            self.assertEqual(self.s.generate_gold(self.meta, "Notas", "Transcrição"), json.loads(self.valid))
+        self.s.provider = "hermes_ssh"
+        with patch.object(self.s, "_call_llm") as call:
+            self.assertIn("Sem resumo", self.s.generate_silver(self.meta, ""))
+            self.assertEqual(self.s.generate_gold(self.meta, "Notas", ""), json.loads(self.valid))
+            call.assert_not_called()
+
+    def test_gold_request_identity_survives_pending_metadata_and_key_order(self):
+        calls = []
+        with patch.object(self.s, "_call_llm", side_effect=lambda sp, up, json_mode: calls.append(up) or self.valid):
+            self.s.generate_gold(self.meta, "Notas", "Transcrição")
+            pending = dict(reversed(list(self.meta.items())))
+            pending.update(processing_status="pending", summary_status="pending", summary_error="em andamento",
+                           summary_provider="hermes:fixture", zinom={"status": "pending"})
+            self.s.generate_gold(pending, "Notas", "Transcrição")
+        self.assertEqual(calls[0], calls[1])
+
+    def test_cached_invalid_gold_repairs_once_and_reuses_both_jobs(self):
+        original = "Falha na extração."
+        vps = FakeVps({"anthropic/claude-opus-5": lambda prompt: (
+            "done", self.valid if "[castanha-output-repair-v1]" in prompt else original)})
+        with patch.object(S.subprocess, "run", vps), patch.object(self.s, "_call_groq") as groq:
+            for _ in range(3):
+                self.assertEqual(self.s.generate_gold(self.meta, "Notas", "Transcrição"), json.loads(self.valid))
+            groq.assert_not_called()
+        self.assertEqual(len(vps.jobs), 2)
+        self.assertEqual([job["outcome"][1] for job in vps.jobs.values()], [original, self.valid])
+        self.assertEqual(sum(argv[0] == "scp" for argv in vps.argv), 2)
+        self.assertEqual(sum("nohup flock" in argv[-1] for argv in vps.argv), 2)
+        self.assertFalse(any("rm -f" in argv[-1] for argv in vps.argv))
+
+    def test_invalid_repair_is_bounded_across_retries_without_groq_or_model_switch(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("done", '{"facts": null}')})
+        with patch.object(S.subprocess, "run", vps), patch.object(self.s, "_call_groq") as groq:
+            for _ in range(3):
+                with self.assertRaisesRegex(S.LlmInvalidResponse, "após reparo; revisão necessária"):
+                    self.s.generate_gold(self.meta, "Notas", "Transcrição")
+            groq.assert_not_called()
+        self.assertEqual(len(vps.jobs), 2)
+        self.assertEqual(sum(argv[0] == "scp" for argv in vps.argv), 2)
+        self.assertFalse(any("openai-codex" in argv[-1] for argv in vps.argv))
+
+    def test_session_only_cached_silver_repairs_without_losing_original(self):
+        vps = FakeVps({"anthropic/claude-opus-5": lambda prompt: (
+            "done", "# Notas sintéticas" if "[castanha-output-repair-v1]" in prompt else "session_id: fixture")})
+        with patch.object(S.subprocess, "run", vps):
+            for _ in range(2):
+                silver = self.s.generate_silver(self.meta, "Transcrição preservada")
+                self.assertIn("# Notas sintéticas", silver)
+                self.assertIn("Transcrição preservada", silver)
+                self.assertNotIn("Sem resumo", silver)
+        self.assertEqual(len(vps.jobs), 2)
+        self.assertEqual(next(iter(vps.jobs.values()))["outcome"][1], "session_id: fixture")
+
+    def test_repair_running_yields_local_queue_without_restarting_worker(self):
+        vps = FakeVps({"anthropic/claude-opus-5": ("done", "Invalid response")})
+        with patch.object(S.subprocess, "run", vps):
+            # Persist only the original failed extraction, then simulate a slow repair.
+            original_run = self.s.hermes._run
+            def run(provider, model, prompt):
+                if "[castanha-output-repair-v1]" in prompt:
+                    vps.polls = 1000
+                    vps.outcomes["anthropic/claude-opus-5"] = ("done", self.valid)
+                return original_run(provider, model, prompt)
+            with patch.object(self.s.hermes, "_run", side_effect=run):
+                with self.assertRaises(S.HermesInProgress):
+                    self.s.generate_gold(self.meta, "Notas", "Transcrição")
+            self.assertEqual(len(vps.jobs), 2)
+            repair = list(vps.jobs.values())[1]
+            self.assertIn("timeout --kill-after=30s 900s hermes", repair["launch"])
+            self.assertLess(repair["polls"], 25)
+            repair["stage"] = "DONE"
+            self.assertEqual(self.s.generate_gold(self.meta, "Notas", "Transcrição"), json.loads(self.valid))
+        self.assertEqual(sum("nohup flock" in argv[-1] for argv in vps.argv), 2)
+        self.assertEqual(sum(argv[0] == "scp" for argv in vps.argv), 2)
+
+    def _engine_failure_and_recovery(self, failed_stage):
+        # Exercita captura/checkpoint/fila reais, só provedores são sintéticos.
+        from tests import test_durable_jobs
+        from castanha.sync import sync_meeting
+        case = test_durable_jobs.TestDurableJobs()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.engine.summarizer.api_key = "fixture"
+        original = case.source.read_bytes()
+        def invalid(system_prompt, user_prompt, json_mode=False):
+            if failed_stage == "silver":
+                return ""
+            return "Falha na extração" if system_prompt == S.GOLD_SYSTEM_PROMPT else "# Notas sintéticas"
+        with patch("castanha.engine.get_transcriber") as provider, \
+             patch.object(case.engine.summarizer, "_call_llm", side_effect=invalid), \
+             patch.object(case.engine.zinom, "ingest_meeting") as ingest:
+            provider.return_value.transcribe.return_value = case.transcription()
+            result = case.engine.stop_recording()
+            ingest.assert_not_called()
+        self.assertEqual(result["status"], "partial")
+        slug = result["result"]["slug"]
+        bronze = case.engine.storage.bronze_dir / slug
+        self.assertEqual(result["result"]["summary_status"], "pending")
+        self.assertFalse((case.engine.storage.gold_dir / f"{slug}.json").exists())
+        self.assertEqual((bronze / "transcript_raw.txt").read_text(), "Decisão preservada")
+        self.assertEqual({json.loads(p.read_text())["stage"] for p in (bronze / ".jobs").glob("*.json")}, {"transcribed"})
+        self.assertIn(original, [p.read_bytes() for p in bronze.glob("*.ogg")])
+        with patch("castanha.engine.get_transcriber") as provider, \
+             patch.object(MeetingSummarizer, "_call_llm", side_effect=lambda sp, up, json_mode=False:
+                          self.valid if json_mode else "# Notas sintéticas"):
+            sync_meeting(slug, case.engine.storage)
+            provider.assert_not_called()
+        meta = case.engine.storage._read_bronze_metadata(slug)
+        self.assertEqual(meta["processing_status"], "complete")
+        self.assertNotIn("summary_status", meta)
+        self.assertEqual({json.loads(p.read_text())["stage"] for p in (bronze / ".jobs").glob("*.json")}, {"done"})
+        self.assertEqual(json.loads((case.engine.storage.gold_dir / f"{slug}.json").read_text()), json.loads(self.valid))
+        self.assertIn(original, [p.read_bytes() for p in bronze.glob("*.ogg")])
+
+    def test_engine_invalid_gold_preserves_bronze_and_recovers_without_asr(self):
+        self._engine_failure_and_recovery("gold")
+
+    def test_engine_empty_silver_preserves_bronze_and_recovers_without_asr(self):
+        self._engine_failure_and_recovery("silver")
 
 
 if __name__ == "__main__":

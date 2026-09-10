@@ -618,6 +618,7 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
                     result = submit_transcript_upload(path, client)
                     results.append({"checkpoint": path.name, **result})
             facts_sent = facts_dropped = 0
+            facts_awaiting_confirmation = False
             tombstoned = (any(old.get("status") == "tombstoned" for old in checkpoints.values())
                           or any(result["status"] == "tombstoned" for result in results))
             if tombstoned:
@@ -648,14 +649,17 @@ def ingest_current_recordings(bronze: Path, slug: str, metadata: dict, client, *
                         path = prepare_upload(directory, request, build)
                         result = submit_transcript_upload(path, client)
                         results.append({"checkpoint": path.name, "synthesis": True, **result})
-                        if result["status"] in ("ok", "pending"):
+                        if result["status"] == "ok":
                             facts_sent = len(request["facts"])
+                        elif result["status"] == "pending":
+                            facts_awaiting_confirmation = bool(request["facts"])
             states = {r["status"] for r in results}
             status = ("error" if "error" in states else "pending" if "pending" in states else
                       "tombstoned" if "tombstoned" in states else
                       "superseded" if "superseded" in states else "ok")
             return {"status": status, "source": {"transport": "bronze", "revisions": results},
-                    "facts_status": "ok" if facts_sent else "none", "facts_pending": [],
+                    "facts_status": ("pending" if facts_awaiting_confirmation else
+                                     "ok" if facts_sent else "none"), "facts_pending": [],
                     "facts_ingested": facts_sent, "facts_descartados": facts_dropped}
         except Exception as exc:
             previous_source = (metadata.get("zinom") or {}).get("source") or {}

@@ -32,6 +32,11 @@ class TestPrecisaSync(unittest.TestCase):
 
 class TestSyncMeeting(unittest.TestCase):
     def setUp(self):
+        config = {'zinom': {'bronze_ingest_enabled': False}}
+        for target in ('castanha.sync.load_config', 'castanha.zinom_adapter.load_config'):
+            patcher = patch(target, return_value=config)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.temp = Path(tempfile.mkdtemp())
         self.storage = MeetingStorage(base_dir=self.temp)
         self.slug = "2026-09-04_1042_reuniao"
@@ -153,6 +158,37 @@ class TestSyncMeeting(unittest.TestCase):
     def test_reuniao_que_nao_existe(self):
         saida = sync_meeting("nao-existe", self.storage)
         self.assertEqual(saida["status"], "error")
+
+    def test_silver_invalido_isola_falha_e_preserva_fila_manual_e_automatica(self):
+        from castanha.retry import drain_queue
+        broken_slug = '2026-09-03_1000_nota-invalida'
+        broken = self.storage.bronze_dir / broken_slug
+        broken.mkdir()
+        metadata_path = broken / 'metadata.json'
+        metadata_path.write_text(json.dumps({'slug': broken_slug, 'audio_status': 'ok'}))
+        silver = self.storage.silver_dir / f'{broken_slug}.md'
+        silver.write_bytes(b'nota original\xff\xfe')
+        before = {p: p.read_bytes() for p in (metadata_path, silver)}
+        with patch('castanha.sync.load_config', return_value={
+                'zinom': {'bronze_ingest_enabled': True}}), \
+             patch('castanha.sync.ZinomAdapter') as adapter:
+            adapter.return_value.ingest_meeting.return_value = {
+                'status': 'ok', 'remember': {'ok': True, 'id': 'conversation:fixture'},
+                'facts_ingested': 0, 'errors': []}
+            candidates = pending_candidates(self.storage)
+            self.assertEqual({slug for _, slug in candidates}, {broken_slug, self.slug})
+            for results in (sync_pending(storage=self.storage), drain_queue(self.storage, now=1000)):
+                by_slug = {result['slug']: result for result in results}
+                self.assertEqual(by_slug[broken_slug]['status'], 'error')
+                self.assertIn('UnicodeDecodeError', by_slug[broken_slug]['errors'][0])
+                self.assertEqual(by_slug[self.slug]['status'], 'ok')
+            self.assertEqual(adapter.return_value.ingest_meeting.call_count, 2)
+            manual = sync_meeting(broken_slug, self.storage)
+            self.assertEqual(manual['status'], 'error')
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        retry = json.loads((broken / '.sync-retry.json').read_text())
+        self.assertEqual(retry['status'], 'error')
+        self.assertGreater(retry['next_attempt_at'], 1000)
 
     def test_sync_pending_pula_o_que_ja_esta_la(self):
         meta = self._metadata()

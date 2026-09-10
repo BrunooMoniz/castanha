@@ -132,3 +132,39 @@ Reversão registrada antes de qualquer ativação: voltar ao código anterior,
 manter `por_canal` desligado e preservar originais, derivados, seleções,
 revisões, checkpoints e jobs. O legado não deve drenar jobs FLAC como Ogg.
 Nenhum deploy faz parte desta entrega.
+
+## Fila e prazo de execução
+
+O runner `queue-timeout-v1` mantém a identidade ASR anterior e acrescenta uma
+capacidade operacional, consultada por `--describe-runner`. O cliente só usa
+`--run-job` depois dessa confirmação. O supervisor mantém `job.lock` para impedir
+execução concorrente do mesmo pedido e adquire `asr.lock` antes de iniciar o
+prazo do processo de transcrição. A espera na fila não consome esse prazo.
+
+`status.json` registra `queued`, `running`, `failed` ou `completed`, com horários,
+contagens e posição no áudio, sem texto da reunião. Em timeout, o grupo do filho
+é encerrado e recolhido antes de liberar a fila. O resultado só é publicado por
+renomeação atômica depois de verificar sua identidade; originais e recibos
+anteriores permanecem intactos. Retentativas reutilizam resultados concluídos.
+
+Instale primeiro o worker pelo `scripts/deploy-vps-worker.sh`, usando SHA256
+exato e sua cópia de recuperação. Depois instale o cliente pelo mecanismo local
+com captura ociosa. O worker novo aceita o chamador antigo; cliente novo com
+worker sem a capacidade recusa execução e mantém a pendência.
+
+## Correção da esteira em 10/09/2026
+
+Risco VERMELHO: estado e entrega de reuniões. Revisão independente GLM, sem
+mudança de modelo ASR, provedor configurado, destino ou schema do servidor.
+Silver vazio ou Gold inválido permanecem pendentes; Hermes oferece um único
+reparo determinístico, preservando o primeiro resultado. O orçamento de espera
+local é separado do prazo remoto, permitindo atender as demais reuniões.
+
+Notas ilegíveis geram erro por reunião. Recibos antigos não encerram nova
+transcrição pendente. A retomada legada aguarda todas as origens antes de
+sintetizar; fatos só contam como ingeridos após confirmação durável.
+
+Reversão: worker anterior preservado pelo instalador remoto; checkout anterior
+registrado pelo instalador local antes da troca. Nunca reverter dados de reunião.
+Os testes usam fixtures isoladas, incluindo fila maior que o prazo, timeout,
+reutilização de resultado, síntese recusada e retomada sem retranscrever.
