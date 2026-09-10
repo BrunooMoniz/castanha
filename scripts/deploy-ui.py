@@ -13,8 +13,8 @@ from castanha.config import get_state_dir
 from castanha.durability import write_json
 
 
-def run(*args):
-    return subprocess.check_output(args, text=True, stderr=subprocess.PIPE, timeout=5).strip()
+def run(*args, timeout=5):
+    return subprocess.check_output(args, text=True, stderr=subprocess.PIPE, timeout=timeout).strip()
 
 
 def validate_paths(paths):
@@ -75,6 +75,14 @@ def wait_for_shell_jobs():
             time.sleep(0.1)
 
 
+def restart_stale_shell():
+    state = json.loads((get_state_dir() / "state.json").read_text())
+    if state.get("status") != "idle":
+        raise RuntimeError("Barra manteve cache antigo; reinício recusado durante captura/processamento")
+    wait_for_shell_jobs()
+    run("omarchy", "restart", "shell", timeout=30)
+
+
 def reload_panel(verify_new=True):
     wait_for_shell_jobs()
     run("omarchy-shell", "shell", "rescanPlugins")
@@ -89,7 +97,13 @@ def reload_panel(verify_new=True):
             return
         except subprocess.CalledProcessError:
             if attempt == 9:
-                raise
+                if not verify_new:
+                    raise
+                restart_stale_shell()
+                if run("omarchy-shell", "castanha-view", "health") != "uploaded-audio-pending-v1":
+                    raise RuntimeError("Interface nova não carregou após reiniciar barra")
+                run("omarchy-shell", "castanha", "open")
+                return
 
 
 def deploy(root, sha):

@@ -33,9 +33,19 @@ class UiDeploymentTests(unittest.TestCase):
 
     def test_old_panel_marker_cannot_pass_health(self):
         with patch.object(deploy_ui, "run", return_value="old-panel"), \
-             patch.object(deploy_ui, "guard_shell_jobs"), patch.object(deploy_ui.time, "sleep"):
-            with self.assertRaises(deploy_ui.subprocess.CalledProcessError):
+             patch.object(deploy_ui, "guard_shell_jobs"), patch.object(deploy_ui.time, "sleep"), \
+             patch.object(deploy_ui, "restart_stale_shell"):
+            with self.assertRaises(RuntimeError):
                 deploy_ui.reload_panel()
+
+    def test_shell_restart_is_refused_during_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state.json").write_text(json.dumps({"status": "recording"}))
+            with patch.object(deploy_ui, "get_state_dir", return_value=root), \
+                 patch.object(deploy_ui, "run") as run:
+                with self.assertRaises(RuntimeError): deploy_ui.restart_stale_shell()
+                run.assert_not_called()
 
     def exercise(self, fail=False, rollback_blocked=False):
         with tempfile.TemporaryDirectory() as temporary:
