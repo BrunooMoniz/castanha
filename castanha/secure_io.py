@@ -34,6 +34,12 @@ FILE_MODE = 0o600
 # longa cabe com folga; um stream sem fim, não.
 MAX_HTTP_BODY_BYTES = 8 * 1024 * 1024
 
+# Teto para corpos de erro HTTP (64 KiB). Respostas de erro (JSON de erro de
+# APIs como Groq, Deepgram, Zinom, ou páginas de erro de proxies/gateways)
+# cabem com folga; um stream infinito ou corpo malicioso é recusado antes de
+# alocar memória desnecessária no processo.
+MAX_HTTP_ERROR_BYTES = 64 * 1024
+
 
 class InsecureConfigError(RuntimeError):
     """O caminho da configuração não é seguro para guardar credencial."""
@@ -166,7 +172,7 @@ def read_bounded(resp: Any, max_bytes: int = MAX_HTTP_BODY_BYTES) -> bytes:
 
     declared = None
     try:
-        raw_len = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+        raw_len = resp.headers.get("Content-Length") if getattr(resp, "headers", None) is not None else None
         declared = int(raw_len) if raw_len is not None else None
     except (TypeError, ValueError):
         declared = None

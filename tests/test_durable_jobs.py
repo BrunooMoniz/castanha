@@ -796,11 +796,14 @@ class TestRemoteJob(unittest.TestCase):
         with patch('castanha.transcription.subprocess.run', side_effect=self.remote):
             with self.assertRaises(TranscriptionPending):
                 VpsSshTranscriber('fixture', self.contract).transcribe(self.audio, 'mic_only')
-        args, kwargs = self.remote.calls[-1]
+        scp_call = [c for c in self.remote.calls if c[0][0] == 'scp'][-1]
+        args, kwargs = scp_call
         self.assertEqual(args[0], 'scp')
         self.assertEqual(kwargs['timeout'], 30)
         self.assertIn('BatchMode=yes', args)
         self.assertEqual(self.audio.read_bytes(), self.original)
+        self.assertEqual(self.remote.calls[-1][0][0], 'ssh')
+        self.assertIn('rm -f --', self.remote.calls[-1][0][-1])
 
     def test_real_detached_job_survives_retry_without_second_transcription(self):
         # Executa os comandos remotos de verdade num diretório temporário local.

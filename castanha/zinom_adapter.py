@@ -27,7 +27,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from castanha.config import load_config
-from castanha.secure_io import read_bounded
+from castanha.secure_io import MAX_HTTP_ERROR_BYTES, read_bounded
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "castanha", "version": "0.1.0"}
@@ -225,7 +225,7 @@ _tool_json = tool_json
 
 def _http_error_detail(e: urllib.error.HTTPError) -> str:
     try:
-        body = e.read().decode("utf-8")
+        body = read_bounded(e, max_bytes=MAX_HTTP_ERROR_BYTES).decode("utf-8", "replace")
     except Exception:
         return str(e.reason or "")
     parsed = parse_mcp_response(body, e.headers.get("Content-Type", "") if e.headers else "")

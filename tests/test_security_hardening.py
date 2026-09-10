@@ -24,6 +24,8 @@ from castanha.secure_io import (
     DIR_MODE,
     FILE_MODE,
     InsecureConfigError,
+    MAX_HTTP_BODY_BYTES,
+    MAX_HTTP_ERROR_BYTES,
     ResponseTooLarge,
     ensure_private_dir,
     read_bounded,
@@ -51,6 +53,9 @@ class _Resposta:
     def __exit__(self, *args):
         return False
 
+    def close(self):
+        pass
+
     def read(self, n=None):
         # Sem n, devolveria tudo: é exatamente o padrão que o teto substitui.
         return self._buf.read(self._chunk if n is None else min(n, self._chunk))
@@ -69,6 +74,9 @@ class _RespostaInfinita:
     def __exit__(self, *args):
         return False
 
+    def close(self):
+        pass
+
     def read(self, n=None):
         pedaco = 65536 if n is None else n
         self.entregue += pedaco
@@ -76,6 +84,13 @@ class _RespostaInfinita:
         if self.entregue > 512 * 1024 * 1024:
             raise AssertionError("leitura sem teto: consumiu 512 MB")
         return b"x" * pedaco
+
+
+def _erro_http(code=429, msg="Too Many Requests", headers=None, fp=None):
+    import urllib.error
+    h = headers if headers is not None else {}
+    stream = fp if fp is not None else io.BytesIO(b"")
+    return urllib.error.HTTPError("https://api.test/v1", code, msg, h, stream)
 
 
 class TestDiretorioPrivado(unittest.TestCase):
@@ -292,15 +307,115 @@ class TestTranscricaoLimitaProvedores(unittest.TestCase):
                 DeepgramTranscriber("chave").transcribe(self.audio)
 
     def test_nenhuma_leitura_remota_sem_teto_no_pacote(self):
-        """Regressão: `resp.read()` cru não volta a aparecer."""
+        """Regressão: leituras cruas de respostas e erros HTTP não voltam a aparecer."""
+        import ast
+        import re
+
+        pattern = re.compile(r"\b(resp|response|res|r|e|err|error|exc)\.read\s*\(")
         ofensores = []
+
         for py in (REPO / "castanha").glob("*.py"):
             if py.name == "secure_io.py":
                 continue
-            for n, linha in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
-                if "resp.read()" in linha and not linha.strip().startswith("#"):
-                    ofensores.append(f"{py.name}:{n}")
-        self.assertEqual(ofensores, [], f"leitura remota sem teto: {ofensores}")
+            texto = py.read_text(encoding="utf-8")
+            linhas = texto.splitlines()
+
+            # 1. Checagem léxica: chamadas a .read() em variáveis de resposta ou erro
+            for n, linha in enumerate(linhas, 1):
+                if pattern.search(linha) and not linha.strip().startswith("#"):
+                    ofensores.append(f"{py.name}:{n} (léxico): {linha.strip()}")
+
+            # 2. Checagem sintática (AST): qualquer .read() no nome capturado em except
+            tree = ast.parse(texto, filename=str(py))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ExceptHandler) and node.name:
+                    err_var = node.name
+                    for sub in ast.walk(node):
+                        if (
+                            isinstance(sub, ast.Call)
+                            and isinstance(sub.func, ast.Attribute)
+                            and sub.func.attr == "read"
+                            and isinstance(sub.func.value, ast.Name)
+                            and sub.func.value.id == err_var
+                        ):
+                            ofensores.append(f"{py.name}:{sub.lineno} (AST except {err_var}.read())")
+
+        self.assertEqual(ofensores, [], f"leitura remota sem teto encontrada: {ofensores}")
+
+
+class TestHTTPErrorLimitado(unittest.TestCase):
+    """Corpos de erro HTTP remotos devem ser limitados com teto seguro antes de decodificar."""
+
+    def test_http_error_corpo_normal_lido_com_sucesso(self):
+        payload = b'{"error": "rate limit"}'
+        erro = _erro_http(429, "Too Many Requests", {"Content-Length": str(len(payload))}, io.BytesIO(payload))
+        corpo = read_bounded(erro, max_bytes=MAX_HTTP_ERROR_BYTES)
+        self.assertEqual(corpo, payload)
+
+    def test_http_error_content_length_grande_recusado_sem_ler(self):
+        inf = _RespostaInfinita()
+        erro = _erro_http(500, "Internal Server Error", {"Content-Length": "10000000"}, inf)
+        with self.assertRaises(ResponseTooLarge):
+            read_bounded(erro, max_bytes=MAX_HTTP_ERROR_BYTES)
+        # Rejeitado no pré-check sem ler nenhum byte da stream
+        self.assertEqual(inf.entregue, 0)
+
+    def test_http_error_content_length_mentiroso_recusado_no_teto(self):
+        payload = b"x" * (MAX_HTTP_ERROR_BYTES + 500)
+        erro = _erro_http(502, "Bad Gateway", {"Content-Length": "10"}, _Resposta(payload))
+        with self.assertRaises(ResponseTooLarge):
+            read_bounded(erro, max_bytes=MAX_HTTP_ERROR_BYTES)
+
+    def test_http_error_stream_infinito_para_no_teto(self):
+        inf = _RespostaInfinita()
+        erro = _erro_http(500, "Internal Server Error", {}, inf)
+        with self.assertRaises(ResponseTooLarge):
+            read_bounded(erro, max_bytes=MAX_HTTP_ERROR_BYTES)
+        # Parou em MAX_HTTP_ERROR_BYTES + 1, sem ler centenas de MB
+        self.assertEqual(inf.entregue, MAX_HTTP_ERROR_BYTES + 1)
+
+    def test_groq_retry_limita_leitura_de_http_error_infinito(self):
+        from castanha.transcription import GroqTranscriber
+
+        inf = _RespostaInfinita()
+        erro = _erro_http(429, "Too Many Requests", {}, inf)
+
+        temp = Path(tempfile.mkdtemp())
+        try:
+            audio = temp / "audio.ogg"
+            audio.write_bytes(b"OggS" + b"\0" * 64)
+            gt = GroqTranscriber("chave")
+            with patch.object(gt, "_request_groq", side_effect=erro), \
+                 patch("time.sleep"):
+                with self.assertRaises(RuntimeError):
+                    gt._request_groq_with_retry(audio, attempts=1)
+            # A stream infinita de erro foi limitada em 64 KiB + 1
+            self.assertEqual(inf.entregue, MAX_HTTP_ERROR_BYTES + 1)
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
+
+    def test_summarizer_limita_leitura_de_http_error_infinito(self):
+        from castanha.summarizer import MeetingSummarizer
+
+        inf = _RespostaInfinita()
+        erro = _erro_http(400, "Bad Request", {}, inf)
+
+        sm = MeetingSummarizer.__new__(MeetingSummarizer)
+        sm.model = "test-model"
+        sm.api_key = "test-key"
+        with patch("castanha.summarizer.urllib.request.urlopen", side_effect=erro):
+            res = sm._call_groq("sys", "user")
+            self.assertEqual(res, "")
+            self.assertEqual(inf.entregue, MAX_HTTP_ERROR_BYTES + 1)
+
+    def test_zinom_adapter_limita_leitura_de_http_error_infinito(self):
+        from castanha.zinom_adapter import _http_error_detail
+
+        inf = _RespostaInfinita()
+        erro = _erro_http(500, "Server Error", {}, inf)
+        detalhe = _http_error_detail(erro)
+        self.assertEqual(detalhe, "Server Error")
+        self.assertEqual(inf.entregue, MAX_HTTP_ERROR_BYTES + 1)
 
 
 class TestSetupEndurecido(unittest.TestCase):

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from castanha.config import load_config
-from castanha.secure_io import read_json_bounded
+from castanha.secure_io import MAX_HTTP_ERROR_BYTES, read_bounded, read_json_bounded
 
 @dataclass
 class Utterance:
@@ -216,7 +216,7 @@ class GroqTranscriber(BaseTranscriber):
             except urllib.error.HTTPError as e:
                 corpo = ""
                 try:
-                    corpo = e.read().decode("utf-8", "replace")[:300]
+                    corpo = read_bounded(e, max_bytes=MAX_HTTP_ERROR_BYTES).decode("utf-8", "replace")[:300]
                 except Exception:
                     pass
                 if e.code in (408, 429) or e.code >= 500:

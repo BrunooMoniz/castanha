@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 from castanha.config import get_state_dir, load_config
-from castanha.secure_io import read_json_bounded
+from castanha.secure_io import MAX_HTTP_ERROR_BYTES, read_bounded, read_json_bounded
 
 # O plano gratuito da Groq dá 8.000 tokens por MINUTO para o modelo de notas.
 # Uma reunião de 2h13 (05/09/2026) tem 23.454 tokens de transcrição: a chamada
@@ -501,7 +501,7 @@ class MeetingSummarizer:
             except urllib.error.HTTPError as e:
                 corpo = ""
                 try:
-                    corpo = e.read().decode("utf-8", "replace")
+                    corpo = read_bounded(e, max_bytes=MAX_HTTP_ERROR_BYTES).decode("utf-8", "replace")
                 except Exception:
                     pass
                 if e.code == 413:
