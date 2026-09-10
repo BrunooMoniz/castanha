@@ -577,6 +577,13 @@ class TestHermesSshLlm(unittest.TestCase):
 
 
 class TestHermesNoSummarizer(unittest.TestCase):
+    def setUp(self):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        env = patch.dict(os.environ, {"XDG_STATE_HOME": state.name})
+        env.start()
+        self.addCleanup(env.stop)
+
     def summarizer(self, provider="hermes_ssh", fallback="groq", key="gsk_teste"):
         cfg = {"llm": {"provider": provider, "fallback_provider": fallback, "api_key": key,
                        "hermes_ssh_host": "vps-fixture", "hermes_models": MODELOS}}
