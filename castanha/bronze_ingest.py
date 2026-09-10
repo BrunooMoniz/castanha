@@ -235,6 +235,7 @@ _TRANSCRIPT_SECTION = re.compile(r"(?:\A|\n)## 📝 Transcrição[^\n]*(?:\n.*)?
 SYNTHESIS_REFERENCE = "castanha-silver"
 MIN_QUOTE_CHARS = 20
 MAX_FACTS = 500
+_SIMPLE_BOLD = re.compile(r"(?<![\\*])\*\*([^\s*](?:[^*\r\n]*?[^\s*])?)(?<!\\)\*\*(?!\*)")
 
 
 def synthesis_text(silver_markdown: str) -> str:
@@ -244,15 +245,69 @@ def synthesis_text(silver_markdown: str) -> str:
     return text + "\n" if text else ""
 
 
+def _bold_projection(text: str) -> tuple:
+    """Remove só delimitadores ** pareados, mapeando cada caractere ao original.
+
+    Não interpreta código, escapes, itálico ou underscores. Nenhum caractere
+    de conteúdo, espaço, acento, número ou pontuação é normalizado.
+    """
+    removed, starts, ends = set(), {}, {}
+    offset, fence = 0, None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker:
+            run = marker.group(1)
+            if fence is None:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence):
+                fence = None
+        elif fence is None and "`" not in line and not line.startswith(("    ", "\t")):
+            for match in _SIMPLE_BOLD.finditer(line):
+                begin, end = offset + match.start(), offset + match.end()
+                removed.update((begin, begin + 1, end - 2, end - 1))
+                starts[begin + 2] = begin
+                ends[end - 3] = end
+        offset += len(line)
+    projected, positions = [], []
+    # Offsets de caractere são convertidos a bytes somente após localizar uma
+    # ocorrência única, sem recortar sequências UTF-8 no meio.
+    for index, char in enumerate(text):
+        if index not in removed:
+            projected.append(char)
+            positions.append((starts.get(index, index), ends.get(index, index + 1)))
+    return "".join(projected), positions
+
+
+def _unique_bold_excerpt(text: str, quote: str, projection: tuple):
+    projected, positions = projection
+    needle, _ = _bold_projection(quote)
+    # Delimitadores de apresentação não contam para o mínimo de conteúdo.
+    if len(needle.strip()) < MIN_QUOTE_CHARS:
+        return None
+    found = projected.find(needle)
+    if found < 0 or projected.find(needle, found + 1) >= 0:
+        return None
+    start_char, end_char = positions[found][0], positions[found + len(needle) - 1][1]
+    original = text[start_char:end_char]
+    # Recusa recortes que deixariam delimitadores incompletos ou precisariam
+    # de qualquer outra transformação para justificar a passagem.
+    if _bold_projection(original)[0] != needle:
+        return None
+    start = len(text[:start_char].encode("utf-8"))
+    return start, start + len(original.encode("utf-8"))
+
+
 def cite_facts(texto: str, facts) -> tuple:
-    """Fatos cuja passagem existe byte a byte no texto; o resto é descartado.
+    """Fatos com passagem original verificável; o resto é descartado.
 
     Devolve (fatos_citados, descartados). Deslocamentos são em bytes UTF-8 do
     texto exato enviado, e o hash é dos bytes da passagem: é o que o servidor
-    valida. Busca byte-exata nunca parte um caractere.
+    valida. Busca byte-exata tem prioridade; só delimitadores ** pareados
+    podem ser alinhados no fallback, que exige ocorrência única.
     """
     data = texto.encode("utf-8")
     cited, dropped = [], 0
+    projection = None
     for fact in facts or []:
         quote = fact.get("evidencia") if isinstance(fact, dict) else None
         if not is_fato_util(fact) or not isinstance(quote, str) or len(quote.strip()) < MIN_QUOTE_CHARS:
@@ -260,10 +315,16 @@ def cite_facts(texto: str, facts) -> tuple:
             continue
         needle = quote.strip().encode("utf-8")
         start = data.find(needle)
+        end = start + len(needle)
+        if start < 0:
+            if projection is None:
+                projection = _bold_projection(texto)
+            aligned = _unique_bold_excerpt(texto, quote.strip(), projection)
+            if aligned is not None:
+                start, end = aligned
         if start < 0 or len(cited) >= MAX_FACTS:
             dropped += 1
             continue
-        end = start + len(needle)
         cited.append({**fato_normalizado(fact),
                       "excerpt": {"start": start, "end": end,
                                   "sha256": hashlib.sha256(data[start:end]).hexdigest()}})

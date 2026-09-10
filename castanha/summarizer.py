@@ -620,6 +620,14 @@ class MeetingSummarizer:
             self.last_provider = "groq"
             return cached["content"]
 
+        from castanha.groq_quota import blocked_until
+        try:
+            quota_until = blocked_until(self.api_key)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LlmUnavailable("Checkpoint da cota ilegível; síntese pendente") from exc
+        if quota_until is not None:
+            raise LlmUnavailable("Cota diária da Groq esgotada; aguardando renovação, partes preservadas")
+
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -670,6 +678,11 @@ class MeetingSummarizer:
                     raise LlmUnavailable(f"chave da Groq recusada (HTTP {e.code})")
                 if e.code in (408, 429) or e.code >= 500:
                     if e.code == 429 and re.search(r"tokens per day|requests per day|\b(?:TPD|RPD)\b", corpo, re.I):
+                        from castanha.groq_quota import record_daily_quota
+                        try:
+                            record_daily_quota(self.api_key, e.headers.get("Retry-After") if e.headers else None)
+                        except (OSError, ValueError, RuntimeError) as exc:
+                            raise LlmUnavailable("Não foi possível preservar o prazo da cota; síntese pendente") from exc
                         raise LlmUnavailable("Cota diária da Groq esgotada; síntese pendente, partes concluídas preservadas")
                     # 429 aqui é quase sempre a janela de um minuto do plano
                     # gratuito: o Retry-After diz quanto falta para ela abrir.

@@ -945,7 +945,10 @@ class TestGroqDurableFallback(unittest.TestCase):
         def success(request, timeout=None):
             prompts.append(json.loads(request.data)["messages"][1]["content"])
             return _resposta("# Parcial\nDecisão preservada.")
-        with patch.object(S.urllib.request, "urlopen", side_effect=success):
+        # A retomada acontece depois da renovação da cota diária registrada.
+        renewed_at = S.time.time() + 86401
+        with patch.object(S.urllib.request, "urlopen", side_effect=success), \
+                patch("castanha.groq_quota.time.time", return_value=renewed_at):
             silver = resumed.generate_silver(self.meta, transcript)
         self.assertEqual(prompts.count(prompts[0]), 1, "parte concluída deve vir do checkpoint")
         self.assertIn(transcript, silver)

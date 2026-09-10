@@ -80,6 +80,70 @@ class TestSynthesisEnvelope(unittest.TestCase):
         cited, dropped = cite_facts(synthesis_text(SILVER), many)
         self.assertEqual((len(cited), dropped), (500, 20))
 
+    def test_bold_alignment_keeps_original_utf8_excerpt_and_hash(self):
+        text = "🌰 **Projeto Café** recebe **R$ 10.000** pela parceria comercial.\n"
+        quote = "Projeto Café recebe R$ 10.000 pela parceria comercial."
+        fact = {"subject": "Projeto Café", "predicate": "recebe", "object": "R$ 10.000", "evidencia": quote}
+        original_fact = json.dumps(fact, sort_keys=True)
+        cited, dropped = cite_facts(text, [fact])
+        self.assertEqual((len(cited), dropped), (1, 0))
+        excerpt = cited[0]["excerpt"]
+        original = text.encode()[excerpt["start"]:excerpt["end"]]
+        self.assertEqual(original.decode(), "**Projeto Café** recebe **R$ 10.000** pela parceria comercial.")
+        self.assertEqual(excerpt["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(json.dumps(fact, sort_keys=True), original_fact, "Gold original não pode ser reescrito")
+
+    def test_exact_quote_keeps_priority_over_another_bold_equivalent(self):
+        quote = "Projeto Café recebe R$ 10.000 pela parceria comercial."
+        text = "**Projeto Café** recebe R$ 10.000 pela parceria comercial.\n" + quote
+        fact = {**GOLD["facts"][0], "evidencia": quote}
+        cited, dropped = cite_facts(text, [fact])
+        self.assertEqual(dropped, 0)
+        self.assertEqual(cited[0]["excerpt"]["start"], text.encode().find(quote.encode()))
+
+    def test_bold_fallback_rejects_ambiguous_original_passages(self):
+        text = ("**Projeto Café** recebe R$ 10.000 pela parceria comercial.\n"
+                "Projeto Café recebe **R$ 10.000** pela parceria comercial.\n")
+        quote = "Projeto Café recebe R$ 10.000 pela parceria comercial."
+        self.assertEqual(cite_facts(text, [{**GOLD["facts"][0], "evidencia": quote}]), ([], 1))
+
+    def test_bold_alignment_rejects_any_content_change_or_other_normalization(self):
+        original = "Projeto Café recebe R$ 10.000 pela parceria comercial."
+        text = "**Projeto Café** recebe **R$ 10.000** pela parceria comercial."
+        changes = [original.replace("10.000", "10000"), original.replace("10.000", "20.000"),
+                   original.replace("Café", "Cafe"), original.replace("Café", "Cafe\u0301"),
+                   original.replace("Projeto", "projeto"), original.replace("recebe", "receberá"),
+                   original.replace(" recebe ", "  recebe "), original.replace(" recebe ", "\nrecebe "),
+                   original.replace(".", ",", 1)]
+        for quote in changes:
+            with self.subTest(quote=quote):
+                self.assertEqual(cite_facts(text, [{**GOLD["facts"][0], "evidencia": quote}]), ([], 1))
+        for formatted in ("__Projeto Café__", "*Projeto Café*", "***Projeto Café***", r"\**Projeto Café**",
+                          "`**Projeto Café** recebe **R$ 10.000** pela parceria comercial.`",
+                          "    **Projeto Café** recebe **R$ 10.000** pela parceria comercial.",
+                          "\t**Projeto Café** recebe **R$ 10.000** pela parceria comercial.",
+                          "```text\n    ```\n**Projeto Café** recebe **R$ 10.000** pela parceria comercial.\n```",
+                          "```text\n**Projeto Café** recebe **R$ 10.000** pela parceria comercial.\n```"):
+            candidate = formatted if "recebe" in formatted else formatted + " recebe **R$ 10.000** pela parceria comercial."
+            with self.subTest(formatted=formatted):
+                self.assertEqual(cite_facts(candidate, [{**GOLD["facts"][0], "evidencia": original}]), ([], 1))
+
+    def test_bold_delimiters_do_not_satisfy_minimum_quote_content(self):
+        self.assertEqual(cite_facts("Um fato breve aqui", [{**GOLD["facts"][0],
+            "evidencia": "**Um** **fato** **breve** aqui"}]), ([], 1))
+
+    def test_bold_fact_revision_is_idempotent_without_mutating_silver_or_gold(self):
+        quote = "Projeto Café recebe R$ 10.000 pela parceria comercial."
+        silver = "# Fixture\n\n**Projeto Café** recebe **R$ 10.000** pela parceria comercial."
+        gold = {"facts": [{"subject": "Projeto Café", "predicate": "recebe", "object": "R$ 10.000", "evidencia": quote}]}
+        request = _build(silver=silver, gold=gold)
+        self.assertEqual(len(request["facts"]), 1)
+        self.assertEqual(request, _build(silver=silver, gold=gold))
+        excerpt = request["facts"][0]["excerpt"]
+        data = request["envelope"]["texto"].encode()[excerpt["start"]:excerpt["end"]]
+        self.assertEqual(hashlib.sha256(data).hexdigest(), excerpt["sha256"])
+        self.assertNotEqual(revision_fingerprint(request), revision_fingerprint(_build(silver=silver, gold={"facts": []})))
+
     def test_envelope_shape_and_stable_identity(self):
         request = _build()
         envelope = request["envelope"]
