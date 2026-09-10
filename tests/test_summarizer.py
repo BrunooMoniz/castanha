@@ -27,12 +27,12 @@ def _http_error(code, body="", headers=None):
     return urllib.error.HTTPError("https://api.groq.com", code, "err", h, io.BytesIO(body.encode("utf-8")))
 
 
-def _resposta(texto):
+def _resposta(texto, finish_reason="stop"):
     class R:
         status = 200
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        _corpo = io.BytesIO(json.dumps({"choices": [{"message": {"content": texto}}]}).encode("utf-8"))
+        _corpo = io.BytesIO(json.dumps({"choices": [{"message": {"content": texto}, "finish_reason": finish_reason}]}).encode("utf-8"))
         headers: dict = {}
         # read(amt) como no HTTPResponse real: a leitura limitada pede pedaços.
         def read(self, amt=None): return self._corpo.read(amt) if amt else self._corpo.read()
@@ -366,6 +366,8 @@ class FakeVps:
             self.uploads[target.split(":", 1)[1]] = Path(local).read_text(encoding="utf-8")
             return _proc(0)
         command = argv[-1]
+        if command.startswith("python3 -c "):
+            return _proc(0, '{"blocked": false}')
         remote = re.search(r"\.local/state/castanha/llm/[0-9a-f]{64}", command).group(0)
         job = self.jobs.setdefault(remote, {"stage": "UPLOAD", "polls": 0})
         if "echo UPLOAD" in command:
@@ -864,6 +866,166 @@ class TestSynthesisReliability(unittest.TestCase):
 
     def test_engine_empty_silver_preserves_bronze_and_recovers_without_asr(self):
         self._engine_failure_and_recovery("silver")
+
+
+class TestGroqDurableFallback(unittest.TestCase):
+    def setUp(self):
+        TestSynthesisReliability.setUp(self)
+
+    def test_fallback_stays_selected_and_191k_transcript_never_reaches_groq_whole(self):
+        transcript = ("Discussão sintética com a origem e o tempo preservados.\n" * 4000)
+        self.assertGreater(len(transcript), 191000)
+        requests = []
+        def http(request, timeout=None):
+            payload = json.loads(request.data)
+            requests.append(payload)
+            system = payload["messages"][0]["content"]
+            return _resposta(self.valid if system == S.GOLD_SYSTEM_PROMPT else "# Notas\nDecisão sintética preservada.")
+        with patch.object(self.s.hermes, "complete", side_effect=S.LlmUnavailable("Quota indisponível")) as hermes, \
+             patch.object(S.urllib.request, "urlopen", side_effect=http):
+            silver = self.s.generate_silver(self.meta, transcript)
+            gold = self.s.generate_gold(self.meta, silver, transcript)
+        self.assertEqual(hermes.call_count, 1)
+        self.assertEqual(self.s.last_provider, "groq")
+        self.assertEqual(self.s._provider_in_use(), "groq")
+        self.assertIn(transcript, silver)
+        self.assertEqual(gold, json.loads(self.valid))
+        self.assertTrue(requests)
+        self.assertTrue(all(p["max_completion_tokens"] == 2048 for p in requests))
+        self.assertTrue(all(sum(len(m["content"]) for m in p["messages"]) <= S.GROQ_INPUT_CHARS for p in requests))
+        self.assertFalse(any(transcript in p["messages"][1]["content"] for p in requests))
+
+    def test_gold_covers_all_notes_exactly_and_merges_without_rewriting_evidence(self):
+        self.s._effective_provider = "groq"
+        notes = "".join(f"Nota {i}: orçamento aprovado para o projeto sintético.  \n" for i in range(900))
+        evidence = "orçamento aprovado para o projeto sintético."
+        fact = {"subject": "Projeto sintético", "predicate": "tem", "object": "orçamento aprovado", "evidencia": evidence}
+        parts = []
+        def http(request, timeout=None):
+            payload = json.loads(request.data)
+            user = payload["messages"][1]["content"]
+            self.assertNotIn("TRANSCRICAO-NAO-RETRANSMITIR", user)
+            parts.append(user.split("\nNotas Silver:\n", 1)[1][:-1])
+            self.assertLessEqual(sum(len(m["content"]) for m in payload["messages"]), S.GROQ_INPUT_CHARS)
+            return _resposta(json.dumps({"facts": [fact]}))
+        silver = notes + "\n## 📝 Transcrição Bruta\n" + "TRANSCRICAO-NAO-RETRANSMITIR" * 10000
+        with patch.object(S.urllib.request, "urlopen", side_effect=http):
+            result = self.s.generate_gold(self.meta, silver, "transcrição")
+        self.assertGreater(len(parts), 2)
+        self.assertEqual("".join(parts), notes)
+        self.assertEqual(result["facts"], [fact])
+        self.assertEqual(result["facts"][0]["evidencia"], evidence)
+
+    def test_successful_parts_survive_daily_quota_and_new_instance(self):
+        self.s._effective_provider = "groq"
+        transcript = "".join(f"Item sintético {i}: decisão preservada no canal original.\n" for i in range(900))
+        prompts = []
+        def failing(request, timeout=None):
+            prompt = json.loads(request.data)["messages"][1]["content"]
+            prompts.append(prompt)
+            if len(prompts) == 2:
+                raise _http_error(429, "Rate limit reached on tokens per day (TPD)")
+            return _resposta("# Parcial\nDecisão preservada.")
+        with patch.object(S.urllib.request, "urlopen", side_effect=failing), patch.object(S.time, "sleep") as sleep:
+            with self.assertRaisesRegex(S.LlmUnavailable, "Cota diária"):
+                self.s.generate_silver(self.meta, transcript)
+            sleep.assert_not_called()
+        cache = Path(self.temp.name) / "castanha/llm/groq"
+        self.assertEqual(len(list(cache.glob("*.json"))), 1)
+        with patch.object(S, "load_config", return_value={"llm": {"provider": "groq", "api_key": "fixture"}}):
+            resumed = MeetingSummarizer()
+        def success(request, timeout=None):
+            prompts.append(json.loads(request.data)["messages"][1]["content"])
+            return _resposta("# Parcial\nDecisão preservada.")
+        with patch.object(S.urllib.request, "urlopen", side_effect=success):
+            silver = resumed.generate_silver(self.meta, transcript)
+        self.assertEqual(prompts.count(prompts[0]), 1, "parte concluída deve vir do checkpoint")
+        self.assertIn(transcript, silver)
+        self.assertEqual(resumed.last_provider, "groq")
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+        for path in cache.glob("*.json"):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('"fixture"', path.read_text())
+            self.assertNotIn('"Authorization"', path.read_text())
+
+    def test_cache_is_scoped_to_credential_without_storing_the_secret(self):
+        self.s._effective_provider = "groq"
+        self.s.api_key = "credential-account-one"
+        with patch.object(S.urllib.request, "urlopen", side_effect=lambda *a, **k: _resposta("Resposta um")) as http:
+            self.assertEqual(self.s._call_llm("sistema", "fonte"), "Resposta um")
+            self.assertEqual(self.s._call_llm("sistema", "fonte"), "Resposta um")
+            self.assertEqual(http.call_count, 1)
+        self.s.api_key = "credential-account-two"
+        with patch.object(S.urllib.request, "urlopen", side_effect=lambda *a, **k: _resposta("Resposta dois")) as http:
+            self.assertEqual(self.s._call_llm("sistema", "fonte"), "Resposta dois")
+            self.assertEqual(http.call_count, 1)
+        files = list((Path(self.temp.name) / "castanha/llm/groq").glob("*.json"))
+        self.assertEqual(len(files), 2)
+        self.assertTrue(all("credential-account-" not in path.read_text() for path in files))
+
+    def test_invalid_gold_is_not_cached_and_stays_pending(self):
+        self.s._effective_provider = "groq"
+        with patch.object(S.urllib.request, "urlopen", side_effect=lambda *a, **k: _resposta("Erro de extração")):
+            with self.assertRaises(S.LlmInvalidResponse):
+                self.s.generate_gold(self.meta, "Notas", "Transcrição")
+        self.assertEqual(list((Path(self.temp.name) / "castanha/llm/groq").glob("*.json")), [])
+
+    def test_corrupt_checkpoint_is_preserved_without_network(self):
+        self.s._effective_provider = "groq"
+        with patch.object(S.urllib.request, "urlopen", return_value=_resposta("Notas concluídas")):
+            self.s._call_llm("sistema", "fonte")
+        cache_file = next((Path(self.temp.name) / "castanha/llm/groq").glob("*.json"))
+        cache_file.write_text("corrompido")
+        with patch.object(S.urllib.request, "urlopen") as http:
+            with self.assertRaisesRegex(S.LlmUnavailable, "Checkpoint"):
+                self.s._call_llm("sistema", "fonte")
+            http.assert_not_called()
+        self.assertEqual(cache_file.read_text(), "corrompido")
+
+    def test_preflight_rejects_oversize_without_http_or_checkpoint(self):
+        with patch.object(S.urllib.request, "urlopen") as http:
+            with self.assertRaises(S.LlmTooLarge):
+                self.s._call_groq("sistema", "x" * (S.GROQ_INPUT_CHARS + 1))
+            http.assert_not_called()
+        self.assertFalse((Path(self.temp.name) / "castanha/llm/groq").exists())
+
+    def test_exact_split_preserves_whitespace_unicode_and_tail(self):
+        text = ("  decisão\tcom ação.\n\nTexto sem alteração 🙂  " * 900) + "fim"
+        parts = S._split_exact(text, 137)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(all(len(part) <= 137 for part in parts))
+
+    def test_length_finish_reason_never_caches_partial_silver_or_gold(self):
+        for system, output in ((S.SILVER_SYSTEM_PROMPT, "Resumo incompleto"), (S.GOLD_SYSTEM_PROMPT, self.valid)):
+            with self.subTest(system=system), patch.object(S.urllib.request, "urlopen",
+                    return_value=_resposta(output, finish_reason="length")):
+                with self.assertRaisesRegex(S.LlmTooLarge, "truncada"):
+                    self.s._call_groq(system, "fonte")
+        self.assertEqual(list((Path(self.temp.name) / "castanha/llm/groq").glob("*.json")), [])
+
+    def test_gold_adapts_after_real_413_and_preserves_all_note_bytes(self):
+        self.s._effective_provider = "groq"
+        notes = "".join(f"Nota sintética {i}: decisão importante.\n" for i in range(180))
+        accepted, attempts = [], []
+        def http(request, timeout=None):
+            payload = json.loads(request.data)
+            part = payload["messages"][1]["content"].split("\nNotas Silver:\n", 1)[1][:-1]
+            attempts.append(len(part))
+            if len(part) > 2500:
+                raise _http_error(413, "Limit 8000 Requested 9000")
+            accepted.append(part)
+            return _resposta(self.valid)
+        with patch.object(S.urllib.request, "urlopen", side_effect=http):
+            self.assertEqual(self.s.generate_gold(self.meta, notes, "Transcrição"), json.loads(self.valid))
+        self.assertGreater(max(attempts), 2500)
+        self.assertEqual("".join(accepted), notes)
+
+    def test_permanent_gold_413_is_bounded_and_explicitly_pending(self):
+        self.s._effective_provider = "groq"
+        with patch.object(S.urllib.request, "urlopen", side_effect=_http_error(413)) as http:
+            with self.assertRaisesRegex(S.LlmUnavailable, "síntese pendente"):
+                self.s.generate_gold(self.meta, "Nota. " * 2000, "Transcrição")
+        self.assertLessEqual(http.call_count, 4)
 
 
 if __name__ == "__main__":

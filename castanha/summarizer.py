@@ -15,7 +15,8 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 from castanha.config import get_state_dir, load_config
-from castanha.secure_io import MAX_HTTP_ERROR_BYTES, read_bounded, read_json_bounded
+from castanha.secure_io import (MAX_HTTP_ERROR_BYTES, read_bounded, read_json_bounded,
+                               ensure_private_dir, read_private_json, write_private_json)
 
 # O plano gratuito da Groq dá 8.000 tokens por MINUTO para o modelo de notas.
 # Uma reunião de 2h13 (05/09/2026) tem 23.454 tokens de transcrição: a chamada
@@ -28,6 +29,10 @@ LLM_INPUT_SHARE = 0.6
 CHARS_PER_TOKEN = 3.5
 LLM_ATTEMPTS = 4
 LLM_MAX_WAIT_SEC = 180.0
+# Português pode usar mais tokens por caractere do que a estimativa inicial.
+# Espaço conservador para entrada, saída e overhead da janela de 8k TPM.
+GROQ_INPUT_CHARS = 12000
+GROQ_COMPLETION_TOKENS = 2048
 
 _LIMITE_RE = re.compile(r"Limit\s+(\d+).*?Requested\s+(\d+)", re.S)
 
@@ -103,6 +108,21 @@ def _extrair_json(texto: str) -> Optional[Dict[str, Any]]:
         if isinstance(dados, dict):
             return dados
     return None
+
+
+def _split_exact(text: str, limit: int) -> List[str]:
+    """Partes contíguas, sem alterar os bytes das citações nem cortar conteúdo."""
+    if limit < 1:
+        raise LlmUnavailable("Metadados excedem o orçamento da síntese; revisão necessária")
+    parts = []
+    while len(text) > limit:
+        boundary = max(text.rfind("\n", 0, limit), text.rfind(" ", 0, limit)) + 1
+        end = boundary if boundary > 0 and boundary >= limit // 2 else limit
+        parts.append(text[:end])
+        text = text[end:]
+    if text:
+        parts.append(text)
+    return parts
 
 
 def _valid_gold(data):
@@ -423,6 +443,16 @@ class HermesSshLlm:
         job_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         remote = f".local/state/castanha/llm/{job_id}"
         state = self._state(remote)
+        if state != "DONE":
+            from castanha.hermes_quota import remote_command
+            try:
+                quota = json.loads(self._ssh(remote_command(provider)))
+            except (ValueError, TypeError) as exc:
+                raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS") from exc
+            if not isinstance(quota, dict) or quota.get("unavailable"):
+                raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS")
+            if quota.get("blocked"):
+                raise _HermesJobFailed("credenciais indisponíveis por cota ou autenticação; aguardando renovação")
         if state == "UPLOAD":
             self._upload(prompt, remote)
             state = "RUNNING"
@@ -507,9 +537,13 @@ class MeetingSummarizer:
                                    timeout_sec=llm_cfg.get("hermes_timeout_sec", 900))
         # Quem produziu o último resumo: "hermes:<provider>/<model>" ou "groq".
         self.last_provider: Optional[str] = None
+        self._effective_provider: Optional[str] = None
+
+    def _provider_in_use(self):
+        return self._effective_provider or self.provider
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
-        if self.provider == "hermes_ssh":
+        if self._provider_in_use() == "hermes_ssh":
             try:
                 answer = self.hermes.complete(system_prompt, user_prompt, json_mode)
             except HermesInProgress:
@@ -522,10 +556,11 @@ class MeetingSummarizer:
                 if self.fallback_provider != "groq" or not self.api_key:
                     raise
                 print(f"[Castanha] Hermes indisponível ({exc}); usando Groq como reserva", file=sys.stderr)
+                self._effective_provider = "groq"
                 return self._call_groq(system_prompt, user_prompt, json_mode)
             self.last_provider = f"hermes:{self.hermes.last_model}"
             return answer
-        if self.provider != "groq":
+        if self._provider_in_use() != "groq":
             # Outro provedor configurado nunca vai parar na Groq por engano.
             raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; só 'hermes_ssh' e 'groq'")
         if not self.api_key:
@@ -533,6 +568,12 @@ class MeetingSummarizer:
         return self._call_groq(system_prompt, user_prompt, json_mode)
 
     def _call_groq(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
+        input_chars = len(system_prompt) + len(user_prompt)
+        if input_chars > GROQ_INPUT_CHARS:
+            # Antes do HTTP: não gastar quota enviando uma reunião inteira que
+            # já sabemos exceder o orçamento do provedor efetivo.
+            raise LlmTooLarge(LLM_DEFAULT_TPM, int(input_chars / CHARS_PER_TOKEN) + 1,
+                              "Entrada excede orçamento da Groq; dividir em partes")
         url = "https://api.groq.com/openai/v1/chat/completions"
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -541,9 +582,31 @@ class MeetingSummarizer:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
+            "max_completion_tokens": GROQ_COMPLETION_TOKENS,
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+
+        # A credencial só entra como digest, nunca como texto em disco/log.
+        # Trocar conta/chave não pode reutilizar a resposta de outra sessão.
+        identity = hashlib.sha256(json.dumps({"version": 1, "provider": "groq", "url": url,
+                                             "credential_scope": hashlib.sha256(self.api_key.encode()).hexdigest(),
+                                             "request": payload},
+                                             sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        try:
+            cache_dir = ensure_private_dir(get_state_dir() / "llm" / "groq")
+            cache_file = cache_dir / f"{identity}.json"
+            cached = read_private_json(cache_file)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise LlmUnavailable("Checkpoint da síntese ilegível; original preservado para revisão") from exc
+        def valid(content):
+            return (isinstance(content, str) and bool(content.strip())
+                    and (system_prompt != GOLD_SYSTEM_PROMPT or _valid_gold(_extrair_json(content))))
+        if cached is not None:
+            if not isinstance(cached, dict) or cached.get("identity") != identity or not valid(cached.get("content")):
+                raise LlmUnavailable("Checkpoint da síntese inválido; original preservado para revisão")
+            self.last_provider = "groq"
+            return cached["content"]
 
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -565,8 +628,18 @@ class MeetingSummarizer:
                     # Teto no corpo antes do parse: resposta sem fim da LLM
                     # não pode virar consumo de memória ilimitado.
                     res = read_json_bounded(resp)
-                    content = res["choices"][0]["message"]["content"]
+                    choice = res["choices"][0]
+                    if choice.get("finish_reason") == "length":
+                        raise LlmTooLarge(detail="Resposta da Groq truncada; dividir a fonte em partes menores")
+                    if choice.get("finish_reason") not in (None, "stop"):
+                        raise LlmInvalidResponse("Resposta da Groq interrompida; síntese pendente")
+                    content = choice["message"]["content"]
                     self.last_provider = "groq"
+                    if valid(content):
+                        try:
+                            write_private_json(cache_file, {"identity": identity, "content": content})
+                        except (OSError, RuntimeError) as exc:
+                            raise LlmUnavailable("Não foi possível preservar a parte concluída da síntese") from exc
                     return content
             except urllib.error.HTTPError as e:
                 corpo = ""
@@ -584,6 +657,8 @@ class MeetingSummarizer:
                     print(f"[Castanha] Chave da LLM recusada: HTTP {e.code}: {corpo[:200]}", file=sys.stderr)
                     raise LlmUnavailable(f"chave da Groq recusada (HTTP {e.code})")
                 if e.code in (408, 429) or e.code >= 500:
+                    if e.code == 429 and re.search(r"tokens per day|requests per day|\b(?:TPD|RPD)\b", corpo, re.I):
+                        raise LlmUnavailable("Cota diária da Groq esgotada; síntese pendente, partes concluídas preservadas")
                     # 429 aqui é quase sempre a janela de um minuto do plano
                     # gratuito: o Retry-After diz quanto falta para ela abrir.
                     # O corpo vai só ao stderr; no painel entra linguagem de produto.
@@ -622,7 +697,9 @@ class MeetingSummarizer:
 
     def _silver_em_partes(self, title: str, cabecalho: str, raw_transcript: str, part_chars: int, tentativa: int = 1) -> str:
         """Mapa e consolidação: notas parciais por parte, depois uma nota final."""
-        partes = _dividir_texto(raw_transcript, part_chars)
+        if self._provider_in_use() == "groq":
+            part_chars = min(part_chars, GROQ_INPUT_CHARS - len(PARTIAL_SYSTEM_PROMPT) - len(cabecalho) - 256)
+        partes = _split_exact(raw_transcript, part_chars)
         n = len(partes)
         parciais: List[str] = []
         for i, parte in enumerate(partes, 1):
@@ -732,6 +809,48 @@ attendees:
 
         return frontmatter + llm_output
 
+    def _gold_response(self, prompt: str) -> Dict[str, Any]:
+        output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
+        if not _valid_gold(_extrair_json(output)):
+            # Compatibilidade com modelos que recusam response_format mas
+            # produzem o objeto válido sem esse modo. Inválido nunca é cacheado.
+            output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=False)
+        data = _extrair_json(output)
+        if _valid_gold(data):
+            return _ground_gold(data)
+        if self._requires_summary():
+            raise LlmInvalidResponse("Extração de fatos inválida; síntese pendente, transcrição preservada")
+        return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}
+
+    def _gold_from_notes(self, header: str, notes: str) -> Dict[str, Any]:
+        # Evidência do Gold deve existir literalmente nas Notas Silver. Elas
+        # são processadas por inteiro; a transcrição já foi coberta no Silver
+        # e não precisa consumir novamente a quota limitada da reserva.
+        if not notes.strip() and self._requires_summary():
+            raise LlmInvalidResponse("Notas vazias para extração de fatos; síntese pendente")
+        part_chars = GROQ_INPUT_CHARS - len(GOLD_SYSTEM_PROMPT) - len(header) - 256
+        merged = {"facts": [], "decisions": [], "action_items": [], "people_notes": []}
+        seen = {key: set() for key in merged}
+        def extract(part, depth=0):
+            try:
+                return [self._gold_response(f"{header}\nNotas Silver:\n{part}\n")]
+            except LlmTooLarge:
+                if depth >= 3 or len(part) < 256:
+                    raise
+                results = []
+                for smaller in _split_exact(part, len(part) // 2):
+                    results.extend(extract(smaller, depth + 1))
+                return results
+        for part in _split_exact(notes, part_chars):
+            for data in extract(part):
+                for key in merged:
+                    for item in data[key]:
+                        identity = json.dumps(item, sort_keys=True, ensure_ascii=False)
+                        if identity not in seen[key]:
+                            seen[key].add(identity)
+                            merged[key].append(item)
+        return merged
+
     def generate_gold(self, metadata: Dict[str, Any], silver_content: str, raw_transcript: str) -> Dict[str, Any]:
         # O Silver carrega a transcrição inteira no fim; para os fatos bastam as
         # notas, senão uma reunião longa estoura o limite de novo.
@@ -741,33 +860,23 @@ attendees:
         transient = {"audio_levels", "recordings", "zinom", "processing_status",
                      "summary_status", "summary_error", "summary_provider"}
         meta_enxuta = {k: v for k, v in metadata.items() if k not in transient}
-        prompt = f"""Metadados da Reunião:
+        header = f"""Metadados da Reunião:
 {json.dumps(meta_enxuta, indent=2, ensure_ascii=False, sort_keys=True)}
-
-Notas Silver:
-{notas}
-
-Transcrição:
-{raw_transcript if self.provider == "hermes_ssh" else raw_transcript[:4000]}
 """
-
-        llm_output = ""
         if raw_transcript.strip():
+            using_groq = self._provider_in_use() == "groq"
             try:
-                llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
-                if not _valid_gold(_extrair_json(llm_output)):
-                    # O modo JSON da Groq recusa a resposta inteira quando o
-                    # modelo tropeça ("json_validate_failed", visto em 05/09
-                    # numa reunião de 2h). Sem o modo, o texto vem e o JSON
-                    # sai dele.
-                    llm_output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=False)
+                if using_groq:
+                    return self._gold_from_notes(header, notas)
+                return self._gold_response(f"{header}\nNotas Silver:\n{notas}\n\nTranscrição:\n{raw_transcript}\n")
             except LlmTooLarge as e:
+                # A reserva pode ter sido selecionada durante a primeira
+                # chamada. Recalcule o pedido usando seu orçamento real.
+                if not using_groq and self._provider_in_use() == "groq":
+                    try:
+                        return self._gold_from_notes(header, notas)
+                    except LlmTooLarge as retry:
+                        raise LlmUnavailable("Extração de fatos excede o limite da LLM; síntese pendente") from retry
                 raise LlmUnavailable("Extração de fatos excede o limite da LLM; síntese pendente") from e
-        dados = _extrair_json(llm_output)
-        if _valid_gold(dados):
-            return _ground_gold(dados)
-
-        if raw_transcript.strip() and self._requires_summary():
-            raise LlmInvalidResponse("Extração de fatos inválida; síntese pendente, transcrição preservada")
         # Convite não prova presença. Sem extração, não há fatos duráveis.
         return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}
