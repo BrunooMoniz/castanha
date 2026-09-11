@@ -76,6 +76,12 @@ def _pode_reprocessar(recordings: List[Dict[str, Any]], has_transcript: bool, me
     return not has_transcript
 
 
+def _exclusion_projection(meta):
+    return {key: meta.get(key) for key in ('content_status', 'excluded_recording', 'exclusion_id',
+            'remaining_count', 'can_reprocess', 'cleanup_status', 'cleanup_reason', 'can_restore',
+            'restore_reason', 'remote_cleanup_required')} | {'recording_revision': meta.get('recording_revision', 0)}
+
+
 def _processing_projection(meta: Dict[str, Any], has_transcript: bool, can_retry: bool) -> Dict[str, Any]:
     # Texto parcial não prova que todas as gravações foram transcritas.
     pending = meta.get("transcription_pending") is True or any(
@@ -210,6 +216,7 @@ class MeetingStorage:
             rec_entry["transcribed"] = True
         existing_recordings.append(rec_entry)
         meta["recordings"] = existing_recordings
+        meta["recording_revision"] = meta.get("recording_revision", 0) + 1
         meta["duration_seconds"] = (meta.get("duration_seconds") or 0) + dur
         meta["recordings_count"] = len(existing_recordings)
         meta["bronze_audio_file"] = str(dest_file)
@@ -486,7 +493,8 @@ class MeetingStorage:
             return state
         fields = ("zinom", "has_transcript", "transcription_pending", "transcription_pending_reason",
                   "transcription_status", "summary_status", "summary_error", "processing_status",
-                  "can_retry", "retry_stage")
+                  "can_retry", "retry_stage", "content_status", "recording_revision", "exclusion_id",
+                  "cleanup_status", "cleanup_reason", "can_restore", "restore_reason", "remote_cleanup_required")
         return {**state, "last_result": {**last, **{key: current[key] for key in fields}}}
 
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -558,6 +566,7 @@ class MeetingStorage:
                 "transcription_pending_reason": meta.get("transcription_pending_reason") or "",
                 "can_retry": can_retry,
                 **_processing_projection(meta, has_transcript, can_retry),
+                **_exclusion_projection(meta),
                 "processing_status": meta.get("processing_status") or "",
                 "summary_status": meta.get("summary_status") or "",
                 "summary_error": meta.get("summary_error") or "",
@@ -620,6 +629,7 @@ class MeetingStorage:
             "transcription_pending_reason": meta.get("transcription_pending_reason") or "",
             "can_retry": can_retry,
             **_processing_projection(meta, has_transcript, can_retry),
+            **_exclusion_projection(meta),
             "attendees": attendees,
             "recordings": recordings,
             "recordings_count": len(recordings),

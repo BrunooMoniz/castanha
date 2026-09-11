@@ -262,6 +262,23 @@ def cmd_notes(args):
         subprocess.Popen(["xdg-open", str(storage.silver_dir)])
 
 
+def cmd_recording_exclusion(args):
+    from castanha.recording_exclusion import (exclude_recording, restore_recording, ExclusionError, ExclusionConflict)
+    try:
+        if args.recordings_cmd == "exclude":
+            result = exclude_recording(args.slug, args.arquivo, expected_revision=args.expected_revision)
+        else:
+            result = restore_recording(args.slug, args.exclusion_id)
+    except ExclusionConflict as exc:
+        result = {"status": "conflict", "slug": args.slug, "message": str(exc)}
+    except ExclusionError as exc:
+        result = {"status": "error", "slug": args.slug, "message": str(exc)}
+    except (OSError, ValueError, TypeError, KeyError):
+        result = {"status": "error", "slug": args.slug, "message": "Não foi possível alterar a gravação com segurança; cópias preservadas"}
+    print(json.dumps(result, ensure_ascii=False) if args.json else result.get("message") or result["status"])
+    if result["status"] != "ok": sys.exit(1)
+
+
 def cmd_delete_recording(args):
     engine = CastanhaEngine()
     slug = args.slug
@@ -744,6 +761,18 @@ def main():
             command.add_argument("--stdin", action="store_true", required=True)
             command.add_argument("--expected-revision", default=None)
         command.set_defaults(func=cmd_annotations)
+
+    p_exclude = recs_sub.add_parser("exclude", help="Excluir gravação e invalidar seu conteúdo, preservando cópia local")
+    p_exclude.add_argument("slug")
+    p_exclude.add_argument("arquivo")
+    p_exclude.add_argument("--expected-revision", type=int, default=None)
+    p_exclude.add_argument("--json", action="store_true")
+    p_exclude.set_defaults(func=cmd_recording_exclusion)
+    p_restore = recs_sub.add_parser("restore", help="Restaurar exclusão local ainda reversível")
+    p_restore.add_argument("slug")
+    p_restore.add_argument("exclusion_id")
+    p_restore.add_argument("--json", action="store_true")
+    p_restore.set_defaults(func=cmd_recording_exclusion)
 
     # Sync
     p_sync = subparsers.add_parser("sync", help=t("cli.help.sync"))

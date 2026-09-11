@@ -122,6 +122,8 @@ class CastanhaEngine:
         if state.get("status") in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Gravação ou finalização já está em andamento. Retome com castanha sync --all."}
 
+        if meeting_slug and (self.storage.get_meeting(meeting_slug) or {}).get("cleanup_status") == "pending":
+            return {"status": "error", "message": "Aguarde a retirada do conteúdo anterior do Zinom antes de anexar outra gravação"}
         audio_cfg = self.config.get("audio", {})
         chosen_mode = mode or audio_cfg.get("default_mode", "dual")
         bitrate = audio_cfg.get("bitrate", "64k")
@@ -330,6 +332,9 @@ class CastanhaEngine:
                     "mode": state.get("mode", "dual"), "calendar_event": current_meeting,
                     "mic_muted_at_start": state.get("mic_muted_at_start"), "recordings": [],
                 }
+                metadata["recording_revision"] = metadata.get("recording_revision", 0) + 1
+                if metadata.get("exclusion_id"):
+                    metadata["content_status"] = "rebuilding"
                 metadata["processing_status"] = "pending"
                 metadata.setdefault("transcription_provider", "pending")
                 write_json(bronze / "metadata.json", metadata)
@@ -452,6 +457,9 @@ class CastanhaEngine:
     def process_pending(self, slug: str) -> Dict[str, Any]:
         """Retoma checkpoints do Bronze sem recapturar nem duplicar transcrições."""
         bronze = self.storage.bronze_dir / slug
+        from castanha.recording_exclusion import pending_exclusion, applicable, resume_exclusion, engine_result
+        if pending_exclusion(bronze) and applicable(slug, self.storage):
+            return engine_result(resume_exclusion(slug, self.storage, engine=self), self.storage)
         with meeting_lock(bronze):
             return self._process_pending_locked(slug)
 
@@ -460,6 +468,11 @@ class CastanhaEngine:
         metadata = self.storage._read_bronze_metadata(slug)
         jobs_dir = bronze / ".jobs"
         jobs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in jobs_dir.glob("*.json")]
+        removed = set(metadata.get("removed_job_ids", []))
+        jobs = [(p, job) for p, job in jobs if job.get("id") not in removed]
+        if not jobs:
+            return {"status": "empty", "result": {"slug": slug, "zinom": metadata.get("zinom", {}),
+                    "content_status": "empty", "message": "Nenhuma gravação ativa para processar"}}
         def recorded_time(item):
             value = item[1].get("recorded_at")
             try:
@@ -682,6 +695,8 @@ class CastanhaEngine:
                 # rodada é pendente, senão a fila zera o backoff e o CLI diz "salvo".
                 "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                 "problemas": errors + [t("engine.problem_summary_pending", exc=exc)]}}
+        if metadata.get("exclusion_id"):
+            metadata["content_status"] = "current"
         # Quem resumiu fica no Bronze antes do recibo: record_zinom_result relê o disco.
         metadata["summary_provider"] = silver_provider
         write_json(bronze / "metadata.json", metadata)
@@ -744,6 +759,9 @@ class CastanhaEngine:
         if not bronze_dir.exists():
             return {"status": "error", "message": f"Reunião '{slug}' não encontrada no Bronze."}
 
+        from castanha.recording_exclusion import pending_exclusion, applicable, resume_exclusion, engine_result
+        if pending_exclusion(bronze_dir) and applicable(slug, self.storage):
+            return engine_result(resume_exclusion(slug, self.storage, engine=self, reprocess=True), self.storage)
         if any((bronze_dir / ".jobs").glob("*.json")):
             # O botão legado também retoma os checkpoints novos, sem retranscrever
             # nem anexar uma segunda cópia do texto ao caminho paralelo antigo.

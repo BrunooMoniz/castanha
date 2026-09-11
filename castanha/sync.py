@@ -115,6 +115,9 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
+    from castanha.recording_exclusion import pending_exclusion, applicable, resume_exclusion
+    if pending_exclusion(bronze) and applicable(slug, storage):
+        return resume_exclusion(slug, storage)
     from castanha.annotations import regeneration_pending, regenerate_annotations
     if regeneration_pending(bronze):
         return regenerate_annotations(slug, storage, resume=True)
@@ -230,6 +233,11 @@ def pending_candidates(storage: MeetingStorage):
     z_cfg = load_config().get("zinom", {})
     for bronze in storage.bronze_dir.iterdir():
         if not bronze.is_dir():
+            continue
+        from castanha.recording_exclusion import pending_exclusion, applicable, needs_resume
+        if pending_exclusion(bronze) and applicable(bronze.name, storage):
+            if needs_resume(bronze.name, storage):
+                candidates.append(("", bronze.name))
             continue
         from castanha.annotations import regeneration_pending
         if regeneration_pending(bronze):

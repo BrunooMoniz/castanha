@@ -194,6 +194,8 @@ def regeneration_pending(bronze):
 
 def _inputs(fd, slug):
     metadata = _metadata(fd, slug)
+    if metadata.get("content_status") in ("invalidated", "empty", "rebuilding"):
+        raise AnnotationError("Conteúdo invalidado pela exclusão de áudio; conclua o processamento dos restantes")
     from castanha.state import StateManager
     state = StateManager().read()
     if state.get("capture_slug") == slug and state.get("status") in ("recording", "paused", "processing"):
