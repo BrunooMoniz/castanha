@@ -136,6 +136,25 @@ class MeetingLibrary:
         warnings = []
         meta = self._load(self.storage.bronze_dir, slug, 'metadata.json', warnings=warnings,
                           label='Metadados', json_data=True) or {}
+        # O journal antecede a invalidação dos metadados. Um encerramento entre
+        # essas duas escritas não pode expor os derivados antigos como válidos.
+        from castanha.annotations import _directory
+        from castanha.recording_exclusion import _load as exclusion_operation
+        try:
+            with _directory(self.storage, slug) as fd:
+                try:
+                    operation = exclusion_operation(fd)
+                    interrupted = bool(operation and operation.get('phase') in ('applying', 'restoring'))
+                except (OSError, ValueError, KeyError, TypeError):
+                    interrupted = True
+        except (OSError, ValueError):
+            # Ausência ou recusa da própria pasta segue o tratamento original;
+            # não fabricar metadados para uma reunião inexistente/link externo.
+            interrupted = False
+        if interrupted:
+            meta = {**meta, 'content_status': 'invalidated', 'processing_status': 'invalidated',
+                    'can_restore': False, 'can_reprocess': False}
+            warnings.append('A alteração dos áudios está incompleta; o conteúdo anterior foi ocultado até a recuperação.')
         # Só stat, sem carregar resumo/transcrição no inventário.
         present = {}
         for key, root, parts in (

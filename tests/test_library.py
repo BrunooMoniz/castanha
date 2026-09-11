@@ -100,6 +100,26 @@ class TestLibrary(unittest.TestCase):
         self.assertEqual(entry['status'], 'complete')
         self.assertEqual(entry['status_label'], 'Resumo local pronto')
 
+    def test_interrupted_or_corrupt_exclusion_journal_hides_old_metadata_content(self):
+        slug, bronze = self.meeting()
+        identity = 'a' * 32
+        archive = bronze / '.recording-exclusions' / identity
+        archive.mkdir(parents=True)
+        pointer = bronze / '.recording-exclusion.json'
+        pointer.write_text(json.dumps({'id': identity}))
+        for phase in ('applying', 'restoring'):
+            (archive / 'operation.json').write_text(json.dumps({'id': identity, 'version': 1, 'phase': phase}))
+            detail = self.library.detail(slug)['meeting']
+            self.assertEqual(detail['summary'], '')
+            self.assertEqual(detail['transcript'], '')
+            self.assertFalse(detail['can_reprocess'])
+            self.assertFalse(detail['can_restore'])
+            self.assertTrue(detail['warnings'])
+        pointer.write_text('corrupt')
+        self.assertEqual(self.library.detail(slug)['meeting']['summary'], '')
+        pointer.unlink()
+        self.assertIn('Resumo completo sintético', self.library.detail(slug)['meeting']['summary'])
+
     def test_delivery_unknown_or_pending_facts_never_claims_complete(self):
         slug, bronze = self.meeting()
         path = bronze/'metadata.json'
@@ -222,6 +242,10 @@ class TestLibrary(unittest.TestCase):
         okay = subprocess.run([str(ROOT/'bin/castanha'), 'library', '--json', slug], capture_output=True, text=True)
         self.assertEqual(okay.returncode, 0, okay.stderr)
         self.assertEqual(json.loads(okay.stdout)['meeting']['slug'], slug)
+        recording = json.loads(okay.stdout)['meeting']['recordings'][0]
+        self.assertEqual(recording['id'], 'original.wav')
+        self.assertEqual(recording['name'], recording['id'])
+        self.assertNotIn('job_id', recording)
         bad = subprocess.run([str(ROOT/'bin/castanha'), 'library', '--json', '../outside'], capture_output=True, text=True)
         self.assertNotEqual(bad.returncode, 0)
         self.assertEqual(json.loads(bad.stdout)['status'], 'error')
