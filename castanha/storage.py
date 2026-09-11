@@ -497,6 +497,31 @@ class MeetingStorage:
                   "cleanup_status", "cleanup_reason", "can_restore", "restore_reason", "remote_cleanup_required")
         return {**state, "last_result": {**last, **{key: current[key] for key in fields}}}
 
+    def _project_exclusion_read(self, slug, entry):
+        """O journal é autoridade durante apply/restore, mesmo antes da metadata."""
+        from castanha.recording_exclusion import pending_exclusion, _load
+        from castanha.annotations import _directory
+        interrupted = False
+        if pending_exclusion(self.bronze_dir / slug):
+            try:
+                with _directory(self, slug) as fd:
+                    operation = _load(fd)
+                interrupted = bool(operation and operation.get("phase") in ("applying", "restoring"))
+            except (OSError, ValueError, KeyError, TypeError):
+                interrupted = True
+        if not interrupted and entry.get("content_status") not in ("invalidated", "empty", "rebuilding"):
+            return entry
+        projected = {**entry, "silver_path": "", "gold_path": "", "transcript_path": "",
+                     "has_transcript": False, "summary_preview": "", "transcription_status": "unavailable"}
+        receipt = entry.get("zinom") or {}
+        if receipt.get("status") not in ("pending_cleanup", "pending", "not_needed"):
+            projected["zinom"] = {"status": "invalidated", "reason": "Conteúdo anterior invalidado pela exclusão"}
+        if interrupted:
+            projected.update(content_status="invalidated", processing_status="invalidated",
+                             summary_status="invalidated", can_restore=False, can_reprocess=False,
+                             can_retry=False, retry_stage="")
+        return projected
+
     def list_recent_meetings(self, limit: int = 10) -> List[Dict[str, Any]]:
         """As últimas reuniões, com metadados detalhados, participantes, transcrição e gravações."""
         results = []
@@ -545,7 +570,7 @@ class MeetingStorage:
             error = meta.get("transcription_error") or ""
             can_retry = _pode_reprocessar(recordings, has_transcript, meta)
 
-            results.append({
+            results.append(self._project_exclusion_read(slug, {
                 "slug": slug,
                 "title": meta.get("title") or _title_from_slug(slug),
                 "when": meta.get("recorded_at") or "",
@@ -576,7 +601,7 @@ class MeetingStorage:
                 "has_audio": len(recordings) > 0,
                 "summary_preview": summary_preview,
                 "modified": _get_mtime(slug),
-            })
+            }))
         return results
 
     def get_meeting(self, slug: str) -> Optional[Dict[str, Any]]:
@@ -605,7 +630,7 @@ class MeetingStorage:
         error = meta.get("transcription_error") or ""
         can_retry = _pode_reprocessar(recordings, has_transcript, meta)
 
-        return {
+        return self._project_exclusion_read(slug, {
             "slug": slug,
             "title": meta.get("title") or _title_from_slug(slug),
             "when": meta.get("recorded_at") or "",
@@ -636,7 +661,7 @@ class MeetingStorage:
             "has_audio": len(recordings) > 0,
             "summary_preview": summary_preview,
             "modified": silver_file.stat().st_mtime if silver_file.exists() else (bronze_dir.stat().st_mtime if bronze_dir.exists() else 0.0),
-        }
+        })
 
     def delivery_content_sha256(self, slug: str) -> str:
         """Identidade local do conteúdo, sem incluir o próprio recibo de envio."""

@@ -375,6 +375,23 @@ class TestRecordingExclusion(unittest.TestCase):
         with patch.object(module,'_write_json',side_effect=interrupted):
             with self.assertRaises(OSError):self.exclude()
         self.assertEqual(self.storage.get_meeting(self.slug)['recording_revision'],0)
+        for dto in (self.storage.get_meeting(self.slug), self.storage.list_recent_meetings()[0]):
+            self.assertEqual(dto['content_status'],'invalidated')
+            self.assertFalse(dto['has_transcript'])
+            self.assertEqual(dto['summary_preview'],'')
+            self.assertEqual(dto['silver_path'],'')
+            self.assertEqual(dto['gold_path'],'')
+            self.assertEqual(dto['transcript_path'],'')
+            self.assertNotEqual(dto['zinom']['status'],'ok')
+            self.assertFalse(dto['can_retry'])
+        cli=str(Path(__file__).resolve().parents[1]/'bin/castanha')
+        notes=subprocess.run([cli,'notes','--json'],capture_output=True,text=True,timeout=10)
+        self.assertEqual(notes.returncode,0,notes.stderr)
+        listed=json.loads(notes.stdout)
+        if isinstance(listed,dict):listed=listed.get('meetings',listed.get('notes',[]))
+        self.assertEqual(listed[0]['content_status'],'invalidated')
+        self.assertEqual(listed[0]['summary_preview'],'')
+
         self.assertTrue((self.bronze/'transcript_raw.txt').exists())
         self.assertTrue(module.applicable(self.slug,self.storage))
         self.assertIn(('',self.slug),pending_candidates(self.storage))
@@ -398,6 +415,20 @@ class TestRecordingExclusion(unittest.TestCase):
         self.assertEqual(result['status'],'pending')
         self.assertEqual(result['cleanup_status'],'pending')
         self.assertIn('sem escopo verificável',result['cleanup_reason'])
+
+    def test_read_dto_hides_corrupt_and_restoring_journals_without_mutation(self):
+        result=self.exclude()
+        op_path=self.bronze/ARCHIVE/result['exclusion_id']/'operation.json'
+        operation=json.loads(op_path.read_text());operation['phase']='restoring';write_json(op_path,operation)
+        self.storage.save_silver(self.slug,'PARTIALLY RESTORED OLD SUMMARY')
+        for malformed in (False,True):
+            if malformed:(self.bronze/POINTER).write_text('corrupt')
+            before=(self.bronze/'metadata.json').read_bytes()
+            for dto in (self.storage.get_meeting(self.slug),self.storage.list_recent_meetings()[0]):
+                self.assertEqual(dto['content_status'],'invalidated')
+                self.assertEqual(dto['summary_preview'],'')
+                self.assertFalse(dto['can_restore'])
+            self.assertEqual((self.bronze/'metadata.json').read_bytes(),before)
 
     def test_cli_retry_empty_is_valid_and_never_invokes_providers(self):
         self.one_audio();self.exclude()
