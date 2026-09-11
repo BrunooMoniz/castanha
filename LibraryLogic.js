@@ -22,3 +22,52 @@ function plainNotes(value) {
   return String(value || "").replace(/^#{1,6}\s+/gm, "").replace(/\*\*([^*\n]+)\*\*/g, "$1")
 }
 function localAudio(value) { return typeof value === "string" && value.indexOf("file:///") === 0 }
+
+// Parsing only creates plain text blocks. Fences and HTML remain literal text.
+function notesDocument(value, title) {
+  var blocks = [], sections = {decisions: [], actions: []}
+  var paragraph = [], activeSection = "", firstContent = true, fence = ""
+  function flush(literal) {
+    if (!paragraph.length) return
+    var text = paragraph.join("\n")
+    blocks.push({level: 0, text: literal ? text : plainNotes(text)})
+    if (activeSection && !literal) sections[activeSection].push(text)
+    paragraph = []
+  }
+  String(value || "").split(/\r?\n/).forEach(function(line) {
+    var fenceMatch = line.match(/^\s*(`{3,}|~{3,})/)
+    if (fenceMatch && !fence) {
+      flush(); fence = fenceMatch[1][0]
+      paragraph.push(line); firstContent = false; return
+    }
+    if (fenceMatch && fence === fenceMatch[1][0]) {
+      paragraph.push(line); flush(true); fence = ""; return
+    }
+    var heading = !fence && line.match(/^(#{1,6})\s+(.+?)\s*#*$/)
+    if (heading) {
+      flush()
+      var text = plainNotes(heading[2]).trim()
+      if (!(firstContent && heading[1].length === 1 && text === String(title || "").trim()))
+        blocks.push({level: heading[1].length, text: text})
+      var label = text.toLocaleLowerCase().replace(/^[^a-zà-ÿ]+/, "")
+      activeSection = /^decis(?:ões|oes)(?: tomadas)?$/.test(label) ? "decisions"
+        : /^(pr(?:ó|o)ximos passos|itens de a(?:ç|c)(?:ã|a)o|a(?:ç|c)(?:ões|oes)|tarefas|action items)$/.test(label) ? "actions" : ""
+      firstContent = false
+    } else if (!line.trim() && !fence) flush()
+    else { paragraph.push(line); if (line.trim()) firstContent = false }
+  })
+  flush(Boolean(fence))
+  return {blocks: blocks, sections: sections}
+}
+function extraFacts(items, document, section) {
+  function normalized(line) {
+    return plainNotes(line).replace(/^\s*(?:[-*•□]|\d+[.)])\s+/, "").trim()
+  }
+  var existing = []
+  ;(document.sections[section] || []).forEach(function(block) {
+    block.split("\n").forEach(function(line) { existing.push(normalized(line)) })
+  })
+  // Only a complete identical line suppresses a repeated extracted item.
+  // Different wording, numbers, assignments and deadlines stay visible.
+  return (items || []).filter(function(item) { return existing.indexOf(normalized(item)) < 0 })
+}

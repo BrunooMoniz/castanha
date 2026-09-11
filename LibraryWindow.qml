@@ -44,6 +44,9 @@ FloatingWindow {
   readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.07)
   readonly property var filteredMeetings: LibraryLogic.filtered(meetings, query, statusFilter)
   readonly property var current: detail && detail.slug === selectedSlug ? detail : null
+  readonly property var summaryDocument: LibraryLogic.notesDocument(current ? current.summary : "", current ? current.title : "")
+  readonly property var extraDecisions: LibraryLogic.extraFacts(current ? current.decisions : [], summaryDocument, "decisions")
+  readonly property var extraActions: LibraryLogic.extraFacts(current ? current.action_items : [], summaryDocument, "actions")
   readonly property bool historyLoading: historyProcess.running
   readonly property bool detailLoading: detailProcess.running
   readonly property var audioRecords: current ? current.recordings || [] : []
@@ -315,26 +318,32 @@ FloatingWindow {
           Column {
             width: summaryScroll.availableWidth
             spacing: 24
-            TextArea {
-              objectName: "librarySummary"
-              width: parent.width
-              padding: 0
-              text: root.current ? LibraryLogic.plainNotes(root.current.summary) || "O resumo ainda não está disponível. Sua gravação está preservada." : ""
-              textFormat: TextEdit.PlainText
-              wrapMode: TextEdit.Wrap
-              readOnly: true; selectByMouse: true
-              color: root.foreground; selectionColor: root.accent
-              font.family: root.readingFontFamily; font.pixelSize: 16
-              background: null
-            }
-            Text { visible: root.current && root.current.decisions.length > 0; text: "Decisões"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 20; font.weight: Font.DemiBold }
             Repeater {
-              model: root.current ? root.current.decisions : []
+              model: root.summaryDocument.blocks.length ? root.summaryDocument.blocks : [{level: 0, text: "O resumo ainda não está disponível."}]
+              TextArea {
+                required property var modelData
+                objectName: "librarySummaryBlock"
+                width: parent.width
+                padding: 0
+                text: modelData.text
+                textFormat: TextEdit.PlainText
+                wrapMode: TextEdit.Wrap
+                readOnly: true; selectByMouse: true
+                color: root.foreground; selectionColor: root.accent
+                font.family: root.readingFontFamily
+                font.pixelSize: modelData.level === 0 ? 16 : modelData.level <= 2 ? 21 : 18
+                font.weight: modelData.level === 0 ? Font.Normal : Font.DemiBold
+                background: null
+              }
+            }
+            Text { visible: root.extraDecisions.length > 0; text: "Decisões extraídas"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 20; font.weight: Font.DemiBold }
+            Repeater {
+              model: root.extraDecisions
               TextArea { required property string modelData; width: parent.width; text: "• " + modelData; textFormat: TextEdit.PlainText; padding: 0; wrapMode: TextEdit.Wrap; readOnly: true; selectByMouse: true; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 15; background: null }
             }
-            Text { visible: root.current && root.current.action_items.length > 0; text: "Próximos passos"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 20; font.weight: Font.DemiBold }
+            Text { visible: root.extraActions.length > 0; text: "Ações extraídas"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 20; font.weight: Font.DemiBold }
             Repeater {
-              model: root.current ? root.current.action_items : []
+              model: root.extraActions
               TextArea { required property string modelData; width: parent.width; text: "□ " + modelData; textFormat: TextEdit.PlainText; padding: 0; wrapMode: TextEdit.Wrap; readOnly: true; selectByMouse: true; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 15; background: null }
             }
           }

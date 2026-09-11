@@ -6,6 +6,8 @@ A janela começa invisível. `library.showMeeting(slug)` abre o detalhe; `librar
 
 `castanha library --json` retorna todas as reuniões locais, com título, data, duração, disponibilidade e estado. `castanha library SLUG --json` acrescenta notas, decisões e próximos passos do Gold, texto integral, segmentos existentes e áudios originais. Falhas retornam JSON de erro e código diferente de zero. A consulta não usa rede, não executa LLM e não altera os arquivos das reuniões.
 
+O resumo apresenta cabeçalhos com hierarquia e omite somente o primeiro H1 idêntico ao título da reunião. Itens extraídos do Gold só deixam de se repetir quando correspondem a uma linha inteira da seção apropriada das notas; conteúdo adicional permanece em Decisões extraídas/Ações extraídas. A cópia conserva o conteúdo completo.
+
 A transcrição permite alternar entre segmentos com tempos e texto integral. Tempos só iniciam reprodução quando job, referência temporal e SHA-256 correspondem a um único áudio original e o hash real foi conferido. Canal local/remoto não é identidade de participante. Textos são PlainText, sem links automáticos; copiar envia o texto por stdin ao wl-copy.
 
 Leitura limitada a 8 MiB por documento, com erro explícito; áudios não são carregados no inventário. Identificadores e componentes internos rejeitam travessia e symlinks. Os diretórios raiz configurados são confiáveis. Arquivos removidos ou trocados depois da leitura podem tornar a reprodução indisponível, com erro visível.
