@@ -61,7 +61,7 @@ Panel {
   IpcHandler {
     enabled: root.manageIpc
     target: "castanha-view"
-    function health(): string { return "castanha-gui-v4" }
+    function health(): string { return "castanha-gui-v5" }
     function library(): void { root.openLibrary("") }
   }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting

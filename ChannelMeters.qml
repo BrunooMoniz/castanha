@@ -52,7 +52,8 @@ Column {
                 anchors { right: parent.right; top: parent.top; margins: Style.space(9) }
                 text: !channel.modelData.enabled ? "Desativado" : channel.modelData.muted ? "Mudo"
                     : root.paused ? "Pausado" : !root.recording ? "Pronto"
-                    : !channel.fresh ? "Sem medição" : channel.modelData.peak > 0.01 ? "Recebendo áudio" : "Silêncio"
+                    : !channel.fresh ? "Sem medição" : MeterLogic.visualLevel(channel.modelData.peak) > 0.15 ? "Recebendo áudio"
+                    : MeterLogic.visualLevel(channel.modelData.peak) > 0 ? "Áudio baixo" : "Silêncio"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

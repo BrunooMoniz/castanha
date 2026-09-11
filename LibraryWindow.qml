@@ -2,6 +2,7 @@
 // foreground/fontFamily podem ser herdados do Panel; background/accent e
 // readingFontFamily são opcionais. Fechar interrompe apenas a reprodução.
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
@@ -55,7 +56,15 @@ FloatingWindow {
      current.action_items.length ? "Próximos passos\n" + current.action_items.join("\n") : ""].filter(function(x) { return x }).join("\n\n")
 
   function showMeeting(slug) {
-    visible = true
+    // O fechamento nativo pode ocultar o backing window sem zerar o
+    // estado interno do wrapper. Reafirme false antes de reabrir.
+    if (!root.backingWindowVisible) root.visible = false
+    root.minimized = false
+    root.visible = true
+    Qt.callLater(function() {
+      var window = root.contentItem.Window.window
+      if (window) window.requestActivate()
+    })
     refreshHistory()
     if (slug) selectMeeting(String(slug))
   }
@@ -112,6 +121,7 @@ FloatingWindow {
     clipboard.command = clipboardCommand
     clipboard.running = true
   }
+  onClosed: root.visible = false
   onVisibleChanged: if (!visible) { player.stop(); playWhenReady = false }
   Shortcut { sequence: "Escape"; enabled: root.visible; onActivated: root.visible = false }
   Shortcut { sequence: "Ctrl+F"; enabled: root.visible; onActivated: searchField.forceActiveFocus() }

@@ -204,6 +204,7 @@ class TestLibrary(unittest.TestCase):
             (config/file.name).symlink_to(file)
         copy_path = self.root/'copied.txt'
         shell = '''import QtQuick
+import QtQuick.Window
 import Quickshell
 ShellRoot {
   LibraryWindow { id: library; cliCommand: CLI; clipboardCommand: COPY }
@@ -255,7 +256,17 @@ ShellRoot {
     if (library.meetings.length !== 1 || !library.historyError) { console.log("LIBRARY_FAIL history discarded"); Qt.exit(1) }
     library.visible = false
     if (media.playing) { console.log("LIBRARY_FAIL audio continued after close"); Qt.exit(1) }
-    console.log("CASTANHA_LIBRARY_OK"); Qt.exit(0)
+    reopenCheck.start()
+  } }
+  Timer { id: reopenCheck; interval: 150; repeat: true; property int phase: 0; onTriggered: {
+    phase++
+    if (phase % 2 === 1) library.showMeeting("")
+    else {
+      if (!library.visible || !library.backingWindowVisible) { console.log("LIBRARY_FAIL reopen after close"); Qt.exit(1) }
+      if (phase === 6) { console.log("CASTANHA_LIBRARY_OK"); Qt.exit(0) }
+      // Fechar pela janela nativa reproduz o botão X/atalho do compositor.
+      library.contentItem.Window.window.close()
+    }
   } }
 }'''.replace('CLI', json.dumps([str(ROOT/'bin/castanha')])).replace('SLUG', json.dumps(slug)).replace('COPY', json.dumps([
             'python3', '-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text(sys.stdin.read())', str(copy_path)]))

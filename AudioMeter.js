@@ -41,3 +41,13 @@ function render(samples) {
   while (values.length < HISTORY_SIZE) values.unshift(0)
   return values.map(levelChar).join("")
 }
+
+// O backend já entrega amplitude com raiz cúbica. Converter uma única vez
+// para uma faixa em dB evita a antiga raiz sexta, que ampliava ruído e
+// achatava a diferença visual entre silêncio e fala. Não muda o áudio salvo.
+function visualLevel(value) {
+  var peak = clampPeak(value)
+  if (peak === 0) return 0
+  var db = 60 * Math.log(peak) / Math.LN10
+  return Math.pow(Math.max(0, Math.min(1, (db + 54) / 45)), 1.15)
+}
