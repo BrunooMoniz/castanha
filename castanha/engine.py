@@ -184,6 +184,14 @@ class CastanhaEngine:
             "audio_peak": 0.0,
             "audio_peak_updated_at": 0.0,
             "audio_peak_path": str(self.recorder.peak_path) if self.recorder.peak_path else None,
+            "mic_peak": 0.0, "call_peak": 0.0,
+            "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0,
+            "mic_peak_path": str(self.recorder.mic_peak_path) if getattr(self.recorder, "mic_peak_path", None) else None,
+            "call_peak_path": str(self.recorder.call_peak_path) if getattr(self.recorder, "call_peak_path", None) else None,
+            "mic_device_name": (getattr(self.recorder.devices, "source_name", None)
+                                or getattr(self.recorder.devices, "source", None)) if getattr(self.recorder, "devices", None) else None,
+            "call_device_name": (getattr(self.recorder.devices, "monitor_name", None)
+                                 or getattr(self.recorder.devices, "monitor", None)) if chosen_mode == "dual" and getattr(self.recorder, "devices", None) else None,
             "error": None,
         })
 
@@ -209,7 +217,8 @@ class CastanhaEngine:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-        self.state_mgr.write({"status": "paused"})
+        self.state_mgr.write({"status": "paused", "audio_peak": 0.0, "audio_peak_updated_at": 0.0,
+                              "mic_peak": 0.0, "call_peak": 0.0, "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0})
         notify(t("notify.paused_title"), t("notify.paused_body"))
         return {"status": "paused"}
 
@@ -235,13 +244,13 @@ class CastanhaEngine:
         if state.get("status") not in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Nenhuma gravação em andamento para finalizar."}
 
-        self.state_mgr.write({"status": "processing", "processing_pid": os.getpid()})
+        self.state_mgr.write({"status": "processing", "processing_pid": os.getpid(),
+                              "audio_peak": 0.0, "audio_peak_updated_at": 0.0,
+                              "mic_peak": 0.0, "call_peak": 0.0, "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0})
         notify(t("notify.finishing_title"), t("notify.finishing_body"))
 
         pid = state.get("pid")
         audio_path = Path(state.get("audio_path", ""))
-        peak_path_text = state.get("audio_peak_path")
-        peak_path = Path(peak_path_text) if peak_path_text else None
 
         # Finaliza processo do áudio
         if pid and state.get("status") in ("recording", "paused"):
@@ -272,11 +281,13 @@ class CastanhaEngine:
         # start e stop podem ser comandos CLI distintos. Nesse caso o objeto
         # do stop não conhece o caminho em memória, então o estado persistido
         # é a autoridade para remover o artefato temporário.
-        if is_safe_capture_peak(audio_path, peak_path):
-            try:
-                peak_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        for field in ("audio_peak_path", "mic_peak_path", "call_peak_path"):
+            candidate = Path(state[field]) if state.get(field) else None
+            if is_safe_capture_peak(audio_path, candidate):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         self.state_mgr.write({"pid": None})
         if state.get("capture_slug") and state.get("capture_job_id"):
@@ -328,6 +339,9 @@ class CastanhaEngine:
                               "current_meeting": None, "capture_slug": None, "capture_job_id": None,
                               "elapsed_seconds": 0, "audio_peak": 0.0,
                               "audio_peak_updated_at": 0.0, "audio_peak_path": None,
+                              "mic_peak_path": None, "call_peak_path": None,
+                              "mic_peak": 0.0, "call_peak": 0.0,
+                              "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0,
                               "last_result": result["result"]})
         if result["status"] == "partial":
             notify(t("notify.preserved_title"), title, timeout=10000)

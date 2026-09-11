@@ -19,11 +19,20 @@ DEFAULT_STATE: Dict[str, Any] = {
     "audio_peak": 0.0,
     "audio_peak_updated_at": 0.0,
     "audio_peak_path": None,
+    "mic_peak": 0.0,
+    "call_peak": 0.0,
+    "mic_peak_updated_at": 0.0,
+    "call_peak_updated_at": 0.0,
+    "mic_peak_path": None,
+    "call_peak_path": None,
+    "mic_device_name": None,
+    "call_device_name": None,
     "current_meeting": None,
     "mic_muted_at_start": None,
     "next_meeting": None,
     "upcoming_meetings": [],
     "agenda_error": None,
+    "agenda_updated_at": 0.0,
     "last_result": None,
     "error": None,
     "updated_at": 0,
@@ -79,7 +88,7 @@ class StateManager:
         # A agenda não é estado da gravação: sobrevive ao reset.
         atual = self.read()
         state = dict(DEFAULT_STATE)
-        for chave in ("next_meeting", "upcoming_meetings", "agenda_error"):
+        for chave in ("next_meeting", "upcoming_meetings", "agenda_error", "agenda_updated_at"):
             state[chave] = atual.get(chave)
         state["updated_at"] = int(time.time())
         return self.write(state)

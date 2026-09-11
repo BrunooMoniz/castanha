@@ -1,9 +1,11 @@
 """Mecanismo de captura de áudio com PipeWire / FFmpeg."""
 
 import os
+import json
 import math
 import re
 import signal
+import stat as stat_mode
 import subprocess
 import time
 from dataclasses import dataclass
@@ -17,6 +19,8 @@ class AudioDeviceInfo:
     source: str
     sink: str
     monitor: str
+    source_name: Optional[str] = None
+    monitor_name: Optional[str] = None
 
 @dataclass
 class RecordingResult:
@@ -53,7 +57,17 @@ def get_audio_devices() -> AudioDeviceInfo:
     except Exception:
         pass
 
-    return AudioDeviceInfo(source=source, sink=sink, monitor=monitor)
+    names = {}
+    try:
+        listing = subprocess.run(["pactl", "-f", "json", "list", "sources"],
+                                 capture_output=True, text=True, check=True, timeout=5)
+        names = {item["name"]: item.get("description") or item["name"]
+                 for item in json.loads(listing.stdout) if isinstance(item, dict) and item.get("name")}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        # The exact capture source remains a truthful fallback if labels fail.
+        pass
+    return AudioDeviceInfo(source=source, sink=sink, monitor=monitor,
+                           source_name=names.get(source, source), monitor_name=names.get(monitor, monitor))
 
 class AudioRecorder:
     def __init__(self):
@@ -63,6 +77,8 @@ class AudioRecorder:
         self.start_time: Optional[float] = None
         self.mode: str = "dual"
         self.peak_path: Optional[Path] = None
+        self.mic_peak_path: Optional[Path] = None
+        self.call_peak_path: Optional[Path] = None
 
     def is_recording(self) -> bool:
         if self.process is None:
@@ -79,10 +95,15 @@ class AudioRecorder:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.mode = mode
         self.peak_path = self._peak_path(self.output_path)
-        try:
-            self.peak_path.unlink(missing_ok=True)
-        except OSError:
-            self.peak_path = None
+        self.mic_peak_path = self._peak_path(self.output_path, "mic")
+        self.call_peak_path = self._peak_path(self.output_path, "call") if mode == "dual" else None
+        for field in ("peak_path", "mic_peak_path", "call_peak_path"):
+            path = getattr(self, field)
+            if path:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    setattr(self, field, None)
 
         # Garante caminhos e fontes
         if mode == "dual":
@@ -121,18 +142,25 @@ class AudioRecorder:
             raise ValueError(f"Modo de gravação desconhecido: {mode}")
 
         self.start_time = time.time()
-        self.process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,  # Isolamento de grupo de processos
-        )
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid,  # Isolamento de grupo de processos
+            )
+        except OSError:
+            self.stop_meter()
+            raise
         return self.process
 
     @staticmethod
-    def _peak_path(output_path: Path) -> Path:
-        return output_path.with_name(output_path.stem + ".peak")
+    def _peak_path(output_path: Path, channel: Optional[str] = None) -> Path:
+        if channel not in (None, "mic", "call"):
+            raise ValueError("Canal de medição desconhecido")
+        suffix = f".{channel}.peak" if channel else ".peak"
+        return output_path.with_name(output_path.stem + suffix)
 
     @staticmethod
     def _filter_path(path: Path) -> str:
@@ -140,25 +168,32 @@ class AudioRecorder:
         return str(path).replace('\\', '\\\\').replace(':', '\\:')
 
     def _meter_stats(self) -> str:
-        if not self.peak_path:
+        outputs = [(self.peak_path, "Overall")]
+        outputs.append((self.mic_peak_path, "1" if self.mode == "dual" else "Overall"))
+        if self.mode == "dual":
+            outputs.append((self.call_peak_path, "2"))
+        outputs = [(path, channel) for path, channel in outputs if path]
+        if not outputs:
             return "anull"
-        output = self._filter_path(self.peak_path)
-        return (
-            f"asetnsamples=n=12000:p=1,"
-            "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=Peak_level,"
-            f"ametadata=mode=print:key=lavfi.astats.Overall.Peak_level:file={output}:direct=1"
-        )
+        # Metadata comes from the same pre-Opus capture, never decoded lossy
+        # stereo (which can leak energy between channels) or another PW client.
+        # https://ffmpeg.org/ffmpeg-filters.html#astats-1
+        stats = ["asetnsamples=n=12000:p=1",
+                 "astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=Peak_level"]
+        stats.extend(f"ametadata=mode=print:key=lavfi.astats.{channel}.Peak_level:"
+                     f"file={self._filter_path(path)}:direct=1" for path, channel in outputs)
+        return ",".join(stats)
 
     def stop_meter(self) -> None:
-        # O medidor é um segundo output do FFmpeg principal. Não existe
-        # processo auxiliar para órfão, inclusive quando start e stop rodam em
-        # instâncias diferentes do CLI.
-        if self.peak_path:
-            try:
-                self.peak_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        self.peak_path = None
+        # All three files belong to the main capture process; no extra recorder.
+        for field in ("peak_path", "mic_peak_path", "call_peak_path"):
+            path = getattr(self, field)
+            if path:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            setattr(self, field, None)
 
     def pause(self) -> None:
         if self.process and self.is_recording():
@@ -183,6 +218,9 @@ class AudioRecorder:
             pass
 
         duration = time.time() - (self.start_time or time.time())
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
         self.process = None
         self.stop_meter()
 
@@ -202,7 +240,7 @@ class AudioRecorder:
         )
 
 
-_PEAK_LINE = re.compile(r"lavfi\.astats\.Overall\.Peak_level=(-?(?:inf|\d+(?:\.\d+)?))")
+_PEAK_LINE = re.compile(r"lavfi\.astats\.(?:Overall|1|2)\.Peak_level=(-?(?:inf|\d+(?:\.\d+)?))")
 _CAPTURE_NAME = re.compile(r"castanha_rec_\d+\.ogg\Z")
 
 
@@ -219,10 +257,15 @@ def is_safe_capture_peak(audio_path: Optional[Path], peak_path: Optional[Path]) 
     peak = Path(peak_path)
     return (audio.parent == Path("/tmp")
             and bool(_CAPTURE_NAME.fullmatch(audio.name))
-            and peak == AudioRecorder._peak_path(audio))
+            and peak in {AudioRecorder._peak_path(audio, channel) for channel in (None, "mic", "call")})
 
 
 def read_audio_peak(path: Optional[Path], max_age: float = 1.5) -> Optional[float]:
+    sample = read_audio_peak_sample(path, max_age)
+    return sample[0] if sample else None
+
+
+def read_audio_peak_sample(path: Optional[Path], max_age: float = 1.5):
     """Lê o último pico do output auxiliar do FFmpeg sem travar a captura.
 
     O output auxiliar escreve uma amostra a cada 250 ms. A janela curta transforma
@@ -232,10 +275,13 @@ def read_audio_peak(path: Optional[Path], max_age: float = 1.5) -> Optional[floa
     if not path:
         return None
     try:
-        stat = path.stat()
-        if time.time() - stat.st_mtime > max_age:
-            return None
-        with path.open("rb") as stream:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if not stat_mode.S_ISREG(stat.st_mode):
+                return None
+            if not -0.5 <= time.time() - stat.st_mtime <= max_age:
+                return None
             stream.seek(max(0, stat.st_size - 8192))
             text = stream.read().decode("utf-8", errors="ignore")
     except (OSError, ValueError):
@@ -245,17 +291,29 @@ def read_audio_peak(path: Optional[Path], max_age: float = 1.5) -> Optional[floa
         return None
     raw = matches[-1]
     if raw == "-inf":
-        return 0.0
+        return 0.0, stat.st_mtime
     try:
         db = float(raw)
     except ValueError:
         return None
     if not math.isfinite(db):
-        return 0.0
-    linear = 10.0 ** (db / 20.0)
+        return None
+    linear = 10.0 ** (min(0.0, db) / 20.0)
     # A mesma compressão perceptual (cúbica) usada pelo visualizador do
     # Quickshell, para que o valor do sidecar preserve a escala já aprovada.
-    return max(0.0, min(1.0, linear ** (1.0 / 3.0)))
+    return max(0.0, min(1.0, linear ** (1.0 / 3.0))), stat.st_mtime
+
+
+def capture_channel_peaks(state):
+    """Independent samples: zero + timestamp 0 means unavailable, not silence."""
+    updates = {}
+    for channel in ("mic", "call"):
+        path = state.get(f"{channel}_peak_path")
+        enabled = state.get("status") == "recording" and (channel == "mic" or state.get("mode") == "dual")
+        sample = read_audio_peak_sample(Path(path)) if path and enabled else None
+        updates[f"{channel}_peak"] = sample[0] if sample else 0.0
+        updates[f"{channel}_peak_updated_at"] = sample[1] if sample else 0.0
+    return updates
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from castanha.config import get_state_dir
 from castanha.agenda import agenda_warning, collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
-from castanha.audio import read_audio_peak
+from castanha.audio import read_audio_peak, capture_channel_peaks
 from castanha.i18n import t
 from castanha.state import StateManager
 from castanha.retry import RetryScheduler
@@ -125,6 +125,7 @@ class CastanhaDaemon:
             self.state_mgr.write({
                 "next_meeting": proxima.to_dict() if proxima else None,
                 "upcoming_meetings": [m.to_dict() for m in proximas],
+                "agenda_updated_at": time.time(),
                 "agenda_error": agenda_warning(self.config, error),
             })
             if proxima:
@@ -183,10 +184,13 @@ class CastanhaDaemon:
                 self.state_mgr.write({
                     "audio_peak": peak if peak is not None else 0.0,
                     "audio_peak_updated_at": now if peak is not None else 0.0,
+                    **capture_channel_peaks(state),
                 })
-            elif state.get("audio_peak"):
+            elif any(state.get(field) for field in ("audio_peak", "mic_peak", "call_peak",
+                     "audio_peak_updated_at", "mic_peak_updated_at", "call_peak_updated_at")):
                 # Pause, processing e idle nunca deixam a última barra presa.
-                self.state_mgr.write({"audio_peak": 0.0, "audio_peak_updated_at": 0.0})
+                self.state_mgr.write({"audio_peak": 0.0, "audio_peak_updated_at": 0.0,
+                                      **capture_channel_peaks(state)})
 
             # 2. Verificação periódica de calendário (iCal + contas Google do Zinom)
             if agenda_ligada and (now - last_calendar_check > poll_interval):
@@ -198,7 +202,7 @@ class CastanhaDaemon:
                     self._agenda_thread.join(timeout=0.02)
                     self._apply_agenda_result(self._take_agenda_result())
 
-            time.sleep(1)
+            time.sleep(0.25 if state.get("status") == "recording" else 1)
 
     def _trigger_meeting_alert(self, meeting):
         title = meeting.title
