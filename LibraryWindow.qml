@@ -260,7 +260,7 @@ FloatingWindow {
               spacing: 6
               Text { width: parent.width; text: meetingRow.modelData.title; textFormat: Text.PlainText; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
               Text { width: parent.width; text: LibraryLogic.date(meetingRow.modelData.when); textFormat: Text.PlainText; elide: Text.ElideRight; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: 11 }
-              Text { text: meetingRow.modelData.status_label + " · " + LibraryLogic.clock(meetingRow.modelData.duration_seconds); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: 12 }
+              Text { width: parent.width; wrapMode: Text.Wrap; text: meetingRow.modelData.status_label + " · " + LibraryLogic.clock(meetingRow.modelData.duration_seconds); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: 12 }
             }
             MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: { historyList.currentIndex = meetingRow.index; historyList.forceActiveFocus(); root.selectMeeting(meetingRow.modelData.slug) } }
           }
