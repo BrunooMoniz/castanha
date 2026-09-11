@@ -161,10 +161,13 @@ class MeetingLibrary:
                    or delivery.get('status') not in ('ok', 'success', 'synced', 'disabled')
                    or delivery.get('facts_status') in ('pending', 'pending_lineage', 'error', 'failed')
                    or not present['has_summary'])
-        entry = {'slug': slug, 'title': _text(meta.get('title')) or _title_from_slug(slug),
+        manual = meta.get('source') == 'manual'
+        if manual:
+            pending = bool(warnings) or not present['has_summary'] or meta.get('summary_status') in ('pending', 'error', 'failed')
+        entry = {'source': _text(meta.get('source')), 'slug': slug, 'title': _text(meta.get('title')) or _title_from_slug(slug),
                  'when': _text(meta.get('recorded_at')), 'duration_seconds': _number(meta.get('duration_seconds')),
                  'status': 'pending' if pending else 'complete',
-                 'status_label': ('Gravação sem áudio detectado' if meta.get('audio_status') == 'sem_audio'
+                 'status_label': ('Resumo local pronto' if manual and not pending else 'Anotações locais' if manual else 'Gravação sem áudio detectado' if meta.get('audio_status') == 'sem_audio'
                      else 'Microfone sem áudio na gravação' if meta.get('audio_status') == 'mic_mudo'
                      else 'Notas prontas · entrega não confirmada'
                      if present['has_summary'] and delivery.get('status') not in ('ok', 'success', 'synced', 'disabled')

@@ -4,6 +4,15 @@ import "../../StageStatus.js" as StageStatus
 
 TestCase {
     name: "MeetingStages"
+    function test_manual_notes_do_not_invent_audio_or_remote_delivery() {
+        var n = {source: "manual", summary_status: "not_requested", zinom: {status: "local_only"}}
+        compare(StageStatus.stages(n)[0].state, "removed")
+        compare(StageStatus.stages(n)[1].state, "removed")
+        verify(StageStatus.status(n).label.indexOf("Anotações locais") >= 0)
+        n.summary_status = "complete"
+        compare(StageStatus.status(n).label, "Resumo local pronto")
+        compare(StageStatus.stages(n)[3].state, "removed")
+    }
     function test_summary_pending_never_becomes_transcription_failure() {
         var n = {recordings_count: 1, has_transcript: true, summary_status: "pending", summary_error: "Cota esgotada", zinom: {}}
         compare(StageStatus.stages(n)[1].state, "done")

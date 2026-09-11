@@ -37,6 +37,8 @@ FloatingWindow {
   property string copyFeedback: ""
   property int currentTab: 0
   property bool showRawTranscript: false
+  property bool creatingNote: false
+  property string creationError: ""
   property int audioIndex: -1
   property string audioError: ""
   property real pendingSeek: -1
@@ -51,7 +53,7 @@ FloatingWindow {
   readonly property bool historyLoading: historyProcess.running
   readonly property bool detailLoading: detailProcess.running
   readonly property var audioRecords: current ? current.recordings || [] : []
-  readonly property string currentCopyText: !current ? "" : currentTab === 1 ? current.transcript :
+  readonly property string currentCopyText: currentTab === 3 ? notesEditor.text : !current ? "" : currentTab === 1 ? current.transcript :
     [LibraryLogic.plainNotes(current.summary), current.decisions.length ? "Decisões\n" + current.decisions.join("\n") : "",
      current.action_items.length ? "Próximos passos\n" + current.action_items.join("\n") : ""].filter(function(x) { return x }).join("\n\n")
 
@@ -88,7 +90,7 @@ FloatingWindow {
     if (!detailProcess.running) startDetail()
   }
   function startDetail() {
-    if (!selectedSlug) return
+    if (!selectedSlug || detailProcess.running) return
     detailProcess.requestedSlug = selectedSlug
     detailProcess.command = cliCommand.concat(["library", "--json", "--", selectedSlug])
     detailProcess.running = true
@@ -122,7 +124,7 @@ FloatingWindow {
     clipboard.running = true
   }
   onClosed: root.visible = false
-  onVisibleChanged: if (!visible) { player.stop(); playWhenReady = false }
+  onVisibleChanged: if (!visible) { player.stop(); playWhenReady = false; if (notesEditor) notesEditor.flush() }
   Shortcut { sequence: "Escape"; enabled: root.visible; onActivated: root.visible = false }
   Shortcut { sequence: "Ctrl+F"; enabled: root.visible; onActivated: searchField.forceActiveFocus() }
 
@@ -157,6 +159,21 @@ FloatingWindow {
           root.detailError = "Não foi possível ler esta reunião. Os arquivos permanecem preservados."
         }
       } else root.startDetail()
+    }
+  }
+  Process {
+    id: createNoteProcess
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      try {
+        var result = JSON.parse(stdout.text)
+        if (code !== 0 || result.status !== "ok" || !result.slug) throw new Error(result.message || "Não foi possível criar a anotação.")
+        root.creatingNote = false
+        noteTitle.text = ""
+        root.selectMeeting(result.slug)
+        root.currentTab = 3
+        root.refreshHistory()
+      } catch (error) { root.creationError = String(error.message || error) }
     }
   }
   Process {
@@ -203,6 +220,17 @@ FloatingWindow {
         spacing: 14
         Text { text: "CASTANHA"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: 12; font.letterSpacing: 2 }
         Text { text: "Suas reuniões"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 25; font.weight: Font.DemiBold }
+        LibraryButton { objectName: "libraryNewNote"; text: "Nova anotação"; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: { root.creatingNote = true; root.creationError = ""; noteTitle.forceActiveFocus() } }
+        ColumnLayout {
+          visible: root.creatingNote
+          Layout.fillWidth: true
+          TextField { id: noteTitle; objectName: "libraryNoteTitle"; Layout.fillWidth: true; placeholderText: "Título da reunião"; color: root.foreground; font.family: root.readingFontFamily; selectByMouse: true; background: Rectangle { color: root.background; radius: 6; border.color: root.muted } }
+          RowLayout {
+            LibraryButton { objectName: "libraryCreateNote"; text: createNoteProcess.running ? "Criando…" : "Criar"; enabled: !!noteTitle.text.trim() && !createNoteProcess.running; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: { root.creationError = ""; createNoteProcess.command = root.cliCommand.concat(["annotations", "create", "--title", noteTitle.text.trim(), "--json"]); createNoteProcess.running = true } }
+            LibraryButton { text: "Cancelar"; enabled: !createNoteProcess.running; foreground: root.foreground; onClicked: root.creatingNote = false }
+          }
+          Text { Layout.fillWidth: true; visible: !!root.creationError; text: root.creationError; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground }
+        }
         TextField {
           id: searchField
           objectName: "librarySearch"
@@ -301,8 +329,12 @@ FloatingWindow {
         visible: root.current !== null
         Layout.fillWidth: true
         spacing: 5
+        Flow {
+          Layout.fillWidth: true
+          Layout.preferredHeight: childrenRect.height
+          spacing: 5
         Repeater {
-          model: ["Resumo", "Transcrição", "Áudio"]
+          model: ["Resumo", "Transcrição", "Áudio", "Minhas notas"]
           LibraryButton {
             required property string modelData
             required property int index
@@ -312,7 +344,7 @@ FloatingWindow {
             onClicked: root.currentTab = index
           }
         }
-        Item { Layout.fillWidth: true }
+        }
         LibraryButton { text: root.copyFeedback || "Copiar texto"; enabled: root.currentCopyText !== ""; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: 12; onClicked: root.copyText(root.currentCopyText) }
       }
       StackLayout {
@@ -443,6 +475,14 @@ FloatingWindow {
             Text { text: LibraryLogic.clock(player.duration / 1000); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily }
           }
           Item { Layout.fillHeight: true }
+        }
+        MeetingNotes {
+          id: notesEditor
+          objectName: "libraryMeetingNotes"
+          meetingSlug: root.selectedSlug
+          cliCommand: root.cliCommand
+          foreground: root.foreground; accent: root.accent; fontFamily: root.readingFontFamily
+          onSummaryUpdated: function(slug) { if (slug === root.selectedSlug) root.startDetail(); root.refreshHistory() }
         }
       }
       Item { Layout.fillHeight: true; visible: root.current === null }

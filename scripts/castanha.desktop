@@ -1,0 +1,19 @@
+[Desktop Entry]
+Name=Castanha
+GenericName=Gravador e Assistente de Reuniões
+Comment=Gravações, anotações e resumos de reuniões
+Exec=omarchy-shell castanha-view library
+Terminal=false
+Type=Application
+Icon=audio-input-microphone
+Categories=AudioVideo;Audio;Recorder;Office;
+Keywords=meeting;reuniao;gravador;audio;castanha;notas;
+Actions=Record;Notes;
+
+[Desktop Action Record]
+Name=Iniciar / Parar Gravação
+Exec=castanha toggle
+
+[Desktop Action Notes]
+Name=Abrir Biblioteca de Reuniões
+Exec=omarchy-shell castanha-view library

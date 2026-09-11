@@ -3,11 +3,12 @@
 
 Uso: python3 scripts/deploy-local.py CHECKOUT SHA_COMPLETO
 Execute depois dos testes e review. A árvore instalada deve estar limpa.
-Não altera links, configuração ou gravações.
+Atualiza o lançador Castanha com backup; não altera gravações ou configuração de captura.
 """
 import fcntl
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -38,6 +39,43 @@ def health(root, verify_ui=False):
         run("omarchy-shell", "shell", "rescanPlugins")
 
 
+def launcher_path():
+    return Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "applications/castanha.desktop"
+
+
+def install_launcher(root, journal_dir):
+    source = root / "scripts/castanha.desktop"
+    if not source.exists():
+        return None
+    target = launcher_path()
+    if target.is_symlink():
+        raise RuntimeError("Lançador é um link; preserve o destino antes de atualizar")
+    previous = target.read_bytes() if target.exists() else None
+    backup = journal_dir / "launcher-before-release.desktop"
+    if previous is not None:
+        backup.write_bytes(previous)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".desktop.castanha-new")
+    try:
+        temporary.write_bytes(source.read_bytes())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return (target, previous)
+
+
+def restore_launcher(snapshot):
+    if snapshot is None:
+        return
+    target, previous = snapshot
+    if previous is None:
+        target.unlink(missing_ok=True)
+    else:
+        temporary = target.with_suffix(".desktop.castanha-rollback")
+        temporary.write_bytes(previous)
+        os.replace(temporary, target)
+
+
 def deploy(root, sha):
     root = Path(root).resolve(strict=True)
     git = lambda *args: run("git", "-C", str(root), *args)
@@ -54,13 +92,16 @@ def deploy(root, sha):
         # Registrado ANTES de parar o daemon. Nenhum dado de reunião é revertido.
         journal = state_dir / "local-release.json"
         journal.write_text(json.dumps({"previous": previous, "candidate": sha, "checkout": str(root)}))
+        launcher_snapshot = None
         try:
             run("systemctl", "--user", "stop", "castanha.service")
             git("merge", "--ff-only", sha)
             run("systemctl", "--user", "start", "castanha.service")
             time.sleep(2)
+            launcher_snapshot = install_launcher(root, state_dir)
             health(root, verify_ui="candidate")
         except BaseException:
+            restore_launcher(launcher_snapshot)
             run("systemctl", "--user", "stop", "castanha.service")
             git("reset", "--keep", previous)
             run("systemctl", "--user", "start", "castanha.service")

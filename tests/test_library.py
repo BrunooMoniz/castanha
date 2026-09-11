@@ -67,6 +67,19 @@ class TestLibrary(unittest.TestCase):
         for excluded in ('Resumo completo', 'A proposta', 'file://', 'secret_fixture', 'calendar_event', 'sha256'):
             self.assertNotIn(excluded, encoded)
 
+    def test_manual_annotations_are_local_without_fake_transcript(self):
+        from castanha.annotations import create_annotations
+        item = create_annotations("Anotação sem gravação", self.storage)
+        entry = self.library.detail(item['slug'])['meeting']
+        self.assertEqual(entry['source'], 'manual')
+        self.assertEqual(entry['status_label'], 'Anotações locais')
+        self.assertEqual(entry['recordings'], [])
+        self.assertEqual(entry['transcript'], '')
+        (self.storage.silver_dir / (item['slug'] + '.md')).write_text('Resumo só de notas')
+        entry = self.library.list()['meetings'][0]
+        self.assertEqual(entry['status'], 'complete')
+        self.assertEqual(entry['status_label'], 'Resumo local pronto')
+
     def test_delivery_unknown_or_pending_facts_never_claims_complete(self):
         slug, bronze = self.meeting()
         path = bronze/'metadata.json'
@@ -200,7 +213,7 @@ class TestLibrary(unittest.TestCase):
         config = self.root/'shell'; config.mkdir()
         for name in ('Commons', 'Ui'):
             (config/name).symlink_to(SHELL/name, target_is_directory=True)
-        for file in ROOT.glob('Library*'):
+        for file in list(ROOT.glob('Library*')) + [ROOT/'MeetingNotes.qml']:
             (config/file.name).symlink_to(file)
         copy_path = self.root/'copied.txt'
         shell = '''import QtQuick

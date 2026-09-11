@@ -4,6 +4,10 @@ function stages(note) {
     var n = note || {}, z = n.zinom || {}
     var transcript = n.transcription_status === "complete" || (n.has_transcript && !n.transcription_pending)
     var summary = n.summary_status === "complete" || (n.summary_status !== "pending" && !!n.summary_preview)
+    if (n.source === "manual") return [
+        {label: "Áudio", state: "removed"}, {label: "Transcrição", state: "removed"},
+        {label: "Resumo", state: summary ? "done" : "waiting"}, {label: "Somente local", state: "removed"}
+    ]
     var saved = z.status === "ok" && z.facts_status !== "pending_lineage"
     return [
         {label: "Áudio", state: n.recordings_count > 0 ? "done" : transcript ? "removed" : "waiting"},
@@ -15,6 +19,7 @@ function stages(note) {
 
 function status(note) {
     var n = note || {}, z = n.zinom || {}, steps = stages(n)
+    if (n.source === "manual") return {label: steps[2].state === "done" ? "Resumo local pronto" : "Anotações locais · resumo ao solicitar", tone: steps[2].state === "done" ? "done" : "neutral"}
     if (z.status === "tombstoned") return {label: "Excluída no Zinom", tone: "neutral"}
     if (z.status === "superseded") return {label: "Substituída no Zinom", tone: "neutral"}
     if (n.audio_status === "mic_mudo" || n.audio_status === "sem_audio")

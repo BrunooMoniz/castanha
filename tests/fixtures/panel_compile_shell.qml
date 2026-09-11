@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -12,17 +13,6 @@ import qs.Ui
 // responde, e o teste passaria medindo o acervo da máquina.
 ShellRoot {
   id: root
-
-  // A barra é injetada pelo shell em produção. Aqui só o que o Panel lê.
-  QtObject {
-    id: fakeBar
-    readonly property color foreground: Color.foreground
-    readonly property color barForeground: Color.foreground
-    readonly property color urgent: Color.urgent
-    readonly property string fontFamily: Style.font.family
-    function run(cmd) { root.lastCommand = cmd }
-    function switchPanelFrom(panel, direction) {}
-  }
 
   property string lastCommand: ""
   property var falhas: []
@@ -48,13 +38,38 @@ ShellRoot {
     onTriggered: if (callback) callback(castanha.contentNaturalHeight)
   }
 
-  FloatingWindow {
-    visible: true
-    implicitWidth: 400
-    implicitHeight: 700
+  // KeyboardPanel deriva tela e geometria da barra layer-shell, não de uma
+  // janela flutuante. O fixture não reserva espaço nem captura input do dono.
+  Region { id: noInput; width: 0; height: 0 }
+  PanelWindow {
+    id: fakeBar
+    screen: Quickshell.screens[0]
+    anchors { top: true; left: true; right: true }
+    implicitHeight: 30
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    mask: noInput
+    WlrLayershell.namespace: "castanha-panel-test-bar"
+    WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    readonly property color foreground: Color.foreground
+    readonly property color barForeground: Color.foreground
+    readonly property color urgent: Color.urgent
+    readonly property string fontFamily: Style.font.family
+    readonly property string position: "top"
+    readonly property bool vertical: false
+    readonly property int barSize: 30
+    readonly property bool foregroundAnimationEnabled: false
+    property var activePopout: null
+    function requestPopout(owner) { activePopout = owner }
+    function releasePopout(owner) { if (activePopout === owner) activePopout = null }
+    function run(cmd) { root.lastCommand = cmd }
+    function switchPanelFrom(panel, direction) {}
 
     CastanhaPanel {
       id: castanha
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
       bar: fakeBar
       manageIpc: false
     }
@@ -91,7 +106,11 @@ ShellRoot {
         if (castanha.data[j].objectName === "castanhaKeyboardPanel") panelWindow = castanha.data[j]
       }
       root.checar(panelWindow !== null, "janela do painel não encontrada")
-      if (panelWindow) panelWindow.focusTarget.activateRequested()
+      if (panelWindow) {
+        panelWindow.WlrLayershell.keyboardFocus = WlrKeyboardFocus.None
+        panelWindow.mask = noInput
+        panelWindow.focusTarget.activateRequested()
+      }
       root.checar(root.lastCommand === "", "ativação genérica iniciou gravação")
 
       // O título da avulsa entra citado na linha de comando.
@@ -109,6 +128,12 @@ ShellRoot {
 
       // ---- render: o painel aberto, com a nota que a CLI devolveu ----------
       castanha.open()
+      if (panelWindow) {
+        root.checar(panelWindow.screen && panelWindow.screen.width > 0,
+                    "popup sem tela herdada da barra")
+        root.checar(panelWindow.WlrLayershell.keyboardFocus === WlrKeyboardFocus.None,
+                    "fixture tentou capturar teclado da sessão real")
+      }
       root.esperarNota(0)
     }
   }

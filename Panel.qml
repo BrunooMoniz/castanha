@@ -254,7 +254,7 @@ Panel {
   // Altura natural do conteúdo do painel. Serve ao layout (o Flickable) e é o
   // que prova, no teste de QML, que uma seção realmente renderizou em vez de
   // só existir como estado.
-  property real contentNaturalHeight: 0
+  readonly property real contentNaturalHeight: column.implicitHeight + captureControls.implicitHeight
 
   function openPath(path) {
     if (!path) return
@@ -906,8 +906,6 @@ Panel {
           width: parent.width
           spacing: Style.space(12)
 
-          onImplicitHeightChanged: root.contentNaturalHeight = implicitHeight + captureControls.implicitHeight
-          Component.onCompleted: root.contentNaturalHeight = implicitHeight + captureControls.implicitHeight
 
         // ---------- Próximas reuniões ----------
         PanelSeparator { width: parent.width; foreground: root.foreground }

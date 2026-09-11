@@ -272,7 +272,8 @@ class PluginLayoutTest(unittest.TestCase):
 
         KeyboardPanel é um PanelWindow: sem backend Wayland ele não carrega, e
         por isso este é o único teste de QML que não roda offscreen. O painel
-        abre num FloatingWindow de teste, não na barra.
+        usa uma barra layer-shell isolada, sem reservar espaço nem receber
+        teclado/cliques da sessão real.
 
         O acervo é temporário e apontado por XDG_CONFIG_HOME: a nota que o
         painel lista vem do `castanha notes --json` de verdade, e não de uma
@@ -324,6 +325,8 @@ class PluginLayoutTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CASTANHA_PANEL_OK", result.stdout)
         self.assertNotIn("CASTANHA_PANEL_FAIL", result.stdout)
+        self.assertNotIn("Unable to assign [undefined]", result.stdout)
+        self.assertNotIn("Cannot assign [undefined]", result.stdout)
 
     def _acervo_de_uma_nota(self, base):
         """Config + acervo com exatamente uma reunião, para o painel listar."""

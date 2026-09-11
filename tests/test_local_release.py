@@ -61,3 +61,30 @@ class LocalReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "alterações locais"):
             self.install([])
         self.assertEqual((self.repo / "version").read_text(), "work in progress")
+
+    def test_launcher_backup_and_rollback_preserve_existing_entry(self):
+        source = self.repo / "scripts/castanha.desktop"
+        source.parent.mkdir()
+        source.write_text("Exec=omarchy-shell castanha-view library\n")
+        target = self.root / "applications/castanha.desktop"
+        target.parent.mkdir()
+        target.write_text("previous launcher\n")
+        with patch.object(release, "launcher_path", return_value=target):
+            snapshot = release.install_launcher(self.repo, self.root)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        self.assertEqual((self.root / "launcher-before-release.desktop").read_text(), "previous launcher\n")
+        release.restore_launcher(snapshot)
+        self.assertEqual(target.read_text(), "previous launcher\n")
+
+    def test_launcher_failure_leaves_symlink_untouched(self):
+        source = self.repo / "scripts/castanha.desktop"
+        source.parent.mkdir()
+        source.write_text("new")
+        external = self.root / "external"
+        external.write_text("preserved")
+        target = self.root / "castanha.desktop"
+        target.symlink_to(external)
+        with patch.object(release, "launcher_path", return_value=target):
+            with self.assertRaises(RuntimeError):
+                release.install_launcher(self.repo, self.root)
+        self.assertEqual(external.read_text(), "preserved")
