@@ -367,6 +367,11 @@ os.execv(os.environ['CASTANHA_TEST_REAL_CLI'], ['castanha', *sys.argv[1:]])
         bronze, silver, gold = meetings / "bronze", meetings / "silver", meetings / "gold"
         for d in (bronze, silver, gold, xdg_state):
             d.mkdir(parents=True, exist_ok=True)
+        # O app inicializado já tem o diretório da trava compartilhada entre
+        # captura/deploy/exclusão. Use o bootstrap real, sem contornar a trava.
+        from castanha.state import StateManager
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg_state)}):
+            StateManager()
 
         cfg_dir = xdg_config / "castanha"
         cfg_dir.mkdir(parents=True, exist_ok=True)
