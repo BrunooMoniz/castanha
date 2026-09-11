@@ -91,7 +91,7 @@ def reload_panel(verify_new=True):
     for attempt in range(10):
         time.sleep(0.2)
         try:
-            if verify_new and run("omarchy-shell", "castanha-view", "health") != "uploaded-audio-pending-v1":
+            if verify_new and run("omarchy-shell", "castanha-view", "health") != "independent-stages-v2":
                 raise subprocess.CalledProcessError(1, "castanha-view health")
             run("omarchy-shell", "castanha", "open")
             return
@@ -100,7 +100,7 @@ def reload_panel(verify_new=True):
                 if not verify_new:
                     raise
                 restart_stale_shell()
-                if run("omarchy-shell", "castanha-view", "health") != "uploaded-audio-pending-v1":
+                if run("omarchy-shell", "castanha-view", "health") != "independent-stages-v2":
                     raise RuntimeError("Interface nova não carregou após reiniciar barra")
                 run("omarchy-shell", "castanha", "open")
                 return

@@ -6,8 +6,8 @@ function projectedLastResult(last, notes) {
   if (!last || !last.slug) return last
   for (var i = 0; i < (notes || []).length; i++) {
     var note = notes[i]
-    if (note && note.slug === last.slug && note.zinom && note.zinom.receipt_source === "legacy-recovery")
-      return Object.assign({}, last, {zinom: note.zinom})
+    if (note && note.slug === last.slug)
+      return Object.assign({}, last, note)
   }
   return last
 }
@@ -18,14 +18,32 @@ function uploadComplete(note) {
 }
 
 function transcriptionLine(note, lang) {
-  return I18N.t(uploadComplete(note) ? "note.upload_complete" : "note.transcription_pending", lang || "en")
+  if (!note) return ""
+  var pending = note.transcription_pending === true || note.transcription_status === "pending"
+  if (!pending && (note.has_transcript || note.transcription_status === "complete"))
+    return I18N.t("note.transcription_complete", lang || "pt")
+  if (!pending && !note.can_retry) return ""
+  return I18N.t(uploadComplete(note) ? "note.upload_complete" : "note.transcription_pending", lang || "pt")
+}
+
+function summaryLine(note, lang) {
+  if (!note || note.summary_status !== "pending") return ""
+  var reason = String(note.summary_error || "")
+  if (reason.length > 90) reason = reason.substring(0, 89) + "…"
+  return I18N.t("delivery.summary_pending", lang || "pt") + (reason ? ": " + reason : "")
+}
+
+function processingLine(note, lang) {
+  if (!note) return ""
+  var transcription = transcriptionLine(note, lang)
+  var summary = summaryLine(note, lang)
+  return transcription + (transcription && summary ? " · " : "") + summary
 }
 
 function zinomNeedsSync(note) {
   if (!note) return false
   var z = note.zinom || {}
   if (z.status === "tombstoned" || z.status === "superseded") return false
-  if (note.processing_status === "pending") return true
   if (z.status === "skipped") {
     var reason = String(z.reason || "").toLowerCase()
     return reason.indexOf("token") >= 0 || reason.indexOf("credencia") >= 0 || reason.indexOf("desligada") >= 0
@@ -38,16 +56,8 @@ function zinomIcon(note) {
 }
 
 function zinomLine(result, lang) {
-  var L = lang || "en"
+  var L = lang || "pt"
   if (!result) return ""
-  var terminal = result.zinom && (result.zinom.status === "tombstoned" || result.zinom.status === "superseded")
-  if (uploadComplete(result) && !terminal) return transcriptionLine(result, L)
-  if (result.summary_status === "pending" && !terminal) {
-    // Transcrição salva; o resumo volta sozinho na próxima tentativa.
-    var porque = String(result.summary_error || "")
-    if (porque.length > 60) porque = porque.substring(0, 59) + "…"
-    return I18N.t("delivery.summary_pending", L) + (porque ? ": " + porque : "")
-  }
   var z = result.zinom
   if (!z) return ""
   if (z.status === "tombstoned") return I18N.t("delivery.tombstoned", L)
@@ -71,4 +81,8 @@ function zinomLine(result, lang) {
   // O bloco do metadata traz remember_id; o do estado da sessão traz remember.
   if (z.status === "ok" || delivered) return I18N.t("delivery.saved", L)
   return ""
+}
+
+function retryLabel(note, lang) {
+  return I18N.t(note && note.retry_stage === "summary" ? "btn.retry_summary" : "btn.retry", lang || "pt")
 }

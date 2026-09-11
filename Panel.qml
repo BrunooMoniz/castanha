@@ -22,8 +22,8 @@ Panel {
   moduleName: "io.github.brunoomoniz.castanha"
   ipcTarget: "castanha"
 
-  // Inglês é o default; pt só quando o locale do sistema é português.
-  readonly property string lang: Qt.locale().name.startsWith("pt") ? "pt" : "en"
+  // Idioma do produto, independente do locale inglês do desktop.
+  readonly property string lang: I18N.resolveLanguage(Quickshell.env("CASTANHA_LANG"))
 
   // ----------------------------------------------------------------- tema
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -60,7 +60,7 @@ Panel {
   IpcHandler {
     enabled: root.manageIpc
     target: "castanha-view"
-    function health(): string { return "uploaded-audio-pending-v1" }
+    function health(): string { return "independent-stages-v2" }
   }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
 
@@ -1353,7 +1353,7 @@ Panel {
               enabled: opacity > 0 && !noteRow.reprocessando
               iconText: "󰑐"
               tooltipText: noteRow.reprocessando ? I18N.t("tooltip.reprocessing", root.lang)
-                : I18N.t("tooltip.retry_upload", root.lang)
+                : DeliveryStatus.retryLabel(noteRow.note, root.lang)
               foreground: root.foreground
               fontFamily: root.fontFamily
               fontSize: Style.font.caption
@@ -1405,11 +1405,12 @@ Panel {
         Text {
           textFormat: Text.PlainText
           width: parent.width
-          visible: noteRow.precisaRetry && !noteRow.aberta
+          visible: !noteRow.aberta && text !== ""
           text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang)
-                : noteRow.note.transcription_pending ? "󰑐  " + DeliveryStatus.transcriptionLine(noteRow.note, root.lang)
-                : "󰀦  " + I18N.t("note.upload_pending", root.lang)
-          color: noteRow.transcrevendo || noteRow.reprocessando ? root.dim : root.urgent
+                : DeliveryStatus.processingLine(noteRow.note, root.lang)
+          color: noteRow.transcrevendo || noteRow.reprocessando
+            || !(noteRow.note && (noteRow.note.summary_status === "pending"
+              || noteRow.note.transcription_status === "pending" || noteRow.precisaRetry)) ? root.dim : root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1595,8 +1596,8 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        visible: !!(noteRow.note && noteRow.note.transcription_pending)
-        text: "󰑐  " + DeliveryStatus.transcriptionLine(noteRow.note, root.lang)
+        visible: text !== ""
+        text: DeliveryStatus.processingLine(noteRow.note, root.lang)
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -1844,7 +1845,7 @@ Panel {
 
         Button {
           visible: !!(noteRow.note && noteRow.note.can_retry)
-          text: noteRow.reprocessando ? I18N.t("btn.reprocessing", root.lang) : I18N.t("btn.retry", root.lang)
+          text: noteRow.reprocessando ? I18N.t("btn.reprocessing", root.lang) : DeliveryStatus.retryLabel(noteRow.note, root.lang)
           iconText: "󰑐"
           foreground: root.foreground
           fontFamily: root.fontFamily

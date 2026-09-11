@@ -35,6 +35,7 @@ var STRINGS = {
   "btn.play_recording": { "en": "Play recording", "pt": "Ouvir gravação" },
   "btn.delete_recording": { "en": "Delete this audio (keeps notes and transcript)", "pt": "Apagar este áudio (mantém notas e transcrição)" },
   "btn.reprocessing": { "en": "Reprocessing…", "pt": "Reprocessando…" },
+  "btn.retry_summary": { "en": "Resume summary", "pt": "Retomar resumo" },
   "btn.retry": { "en": "Resume processing", "pt": "Retomar processamento" },
   "btn.notes": { "en": "Notes", "pt": "Notas" },
   "btn.transcript": { "en": "Transcript", "pt": "Transcrição" },
@@ -94,6 +95,7 @@ var STRINGS = {
   "note.upload_complete": { "en": "Audio uploaded · transcription pending", "pt": "Áudio enviado · transcrição pendente" },
   "note.audio_check_pending": { "en": "Audio diagnosis pending", "pt": "Diagnóstico de áudio pendente" },
   "note.upload_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
+  "note.transcription_complete": { "en": "Transcription complete", "pt": "Transcrição concluída" },
   "note.transcription_pending": { "en": "Transcription pending: 󰑐 tries again", "pt": "Transcrição pendente: 󰑐 tenta de novo" },
   "note.collapse_details": { "en": "Collapse meeting details", "pt": "Recolher detalhes da reunião" },
   "note.view_details": { "en": "View meeting details", "pt": "Ver detalhes da reunião" },
@@ -134,4 +136,8 @@ function t(key, lang) {
     if (!entry) return key;
     var s = entry[lang] || entry.en;
     return s !== undefined ? s : key;
+}
+
+function resolveLanguage(override) {
+    return !override || /^pt($|[_-])/i.test(String(override)) ? "pt" : "en";
 }

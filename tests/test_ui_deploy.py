@@ -63,7 +63,7 @@ class UiDeploymentTests(unittest.TestCase):
             def run(*args):
                 calls.append(args)
                 if args == ("omarchy-shell", "castanha-view", "health"):
-                    return "uploaded-audio-pending-v1"
+                    return "independent-stages-v2"
                 if args[0] == "git":
                     command = args[3]
                     if command == "rev-parse": return previous

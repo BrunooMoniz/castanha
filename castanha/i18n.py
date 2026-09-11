@@ -1,4 +1,4 @@
-"""Catálogo de mensagens do Castanha: en padrão, pt-BR quando o locale é pt."""
+"""Catálogo de mensagens do Castanha: pt-BR padrão, inglês por CASTANHA_LANG explícito."""
 
 import os
 import re
@@ -759,11 +759,7 @@ def resolve_locale() -> str:
     override = os.environ.get("CASTANHA_LANG")
     if override:
         return _match_locale(override)
-    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        value = os.environ.get(var)
-        if value:
-            return _match_locale(value)
-    return "en"
+    return "pt"
 
 
 def _match_locale(value: str) -> str:

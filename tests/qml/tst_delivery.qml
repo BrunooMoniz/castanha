@@ -52,7 +52,7 @@ TestCase {
     compare(DeliveryStatus.zinomLine({zinom: {status: "pending"}}, "en"), "Zinom delivery pending")
     compare(DeliveryStatus.zinomLine({zinom: {status: "skipped", reason: "Gravação sem áudio, nada para lembrar"}}, "en"), "Not sent to Zinom: Gravação sem áudio, nada para lembrar")
     compare(DeliveryStatus.zinomLine({zinom: {status: "ok", remember_id: "note-id", facts_ingested: 2}}, "en"), "Saved in Zinom, with 2 facts")
-    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "pending"}}, "en"), "Summary pending")
+    compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "pending"}}, "en"), "Zinom delivery pending")
   }
 
   function test_legacy_projection_is_read_only_and_bound_to_slug() {
@@ -83,7 +83,7 @@ TestCase {
       { tag: "deleted", note: {zinom: {status: "tombstoned"}}, pending: false },
       { tag: "superseded", note: {zinom: {status: "superseded"}}, pending: false },
       { tag: "deleted_processing", note: {processing_status: "pending", zinom: {status: "tombstoned"}}, pending: false },
-      { tag: "processing", note: {processing_status: "pending", zinom: {status: "ok"}}, pending: true },
+      { tag: "processing", note: {processing_status: "pending", zinom: {status: "ok"}}, pending: false },
       { tag: "new", note: {}, pending: true }
     ]
   }
@@ -95,9 +95,21 @@ TestCase {
   function test_summary_pending_line_and_retry() {
     var note = {processing_status: "pending", summary_status: "pending",
                 summary_error: "cota da Groq esgotada (HTTP 429), 4 tentativas", zinom: {status: "pending"}}
-    compare(DeliveryStatus.zinomLine(note, "pt"), "Resumo pendente: cota da Groq esgotada (HTTP 429), 4 tentativas")
+    compare(DeliveryStatus.summaryLine(note, "pt"), "Resumo pendente: cota da Groq esgotada (HTTP 429), 4 tentativas")
+    compare(DeliveryStatus.zinomLine(note, "pt"), "Envio ao Zinom pendente")
     verify(DeliveryStatus.zinomNeedsSync(note))
     compare(DeliveryStatus.zinomLine({summary_status: "", zinom: {status: "pending"}}, "pt"), "Envio ao Zinom pendente")
     compare(DeliveryStatus.zinomLine({summary_status: "pending", zinom: {status: "tombstoned"}}, "pt"), "Excluído no Zinom")
+  }
+  function test_completed_transcription_and_pending_summary_are_independent() {
+    var note = {has_transcript: true, transcription_pending: false, transcription_status: "complete",
+      can_retry: true, retry_stage: "summary", summary_status: "pending", summary_error: "Cota diária esgotada",
+      zinom: {status: "pending"}}
+    compare(DeliveryStatus.processingLine(note, "pt"), "Transcrição concluída · Resumo pendente: Cota diária esgotada")
+    compare(DeliveryStatus.zinomLine(note, "pt"), "Envio ao Zinom pendente")
+    compare(DeliveryStatus.retryLabel(note, "pt"), "Retomar resumo")
+    verify(!DeliveryStatus.uploadComplete(note))
+    note.transcription_status = "pending"
+    compare(DeliveryStatus.transcriptionLine(note, "pt"), "Transcrição pendente: 󰑐 tenta de novo")
   }
 }

@@ -1,4 +1,4 @@
-"""Catálogo i18n: en padrão, pt-BR por locale, sem depender do ambiente."""
+"""Catálogo i18n: pt-BR padrão, inglês por escolha explícita, sem depender do ambiente."""
 
 import os
 import subprocess
@@ -34,8 +34,11 @@ class TestResolveLocale(unittest.TestCase):
     def test_locale_desconhecido_resolves_en(self):
         self.assertEqual(self._resolve(CASTANHA_LANG="xx_YY"), "en")
 
-    def test_sem_nada_resolves_en(self):
-        self.assertEqual(self._resolve(), "en")
+    def test_sem_nada_resolves_pt(self):
+        self.assertEqual(self._resolve(), "pt")
+
+    def test_desktop_ingles_nao_troca_idioma_do_produto(self):
+        self.assertEqual(self._resolve(LANG="en_US.UTF-8", LC_ALL="C"), "pt")
 
 
 class TestT(unittest.TestCase):

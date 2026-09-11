@@ -483,10 +483,20 @@ def cmd_agenda_refresh(args):
     try:
         proximas = collect_upcoming(cfg, window_minutes=window_minutes, force=True)
         proximas_dicts = [m.to_dict() for m in proximas]
+        warning = agenda_warning(cfg)
+        if warning:
+            # A coleta conserva cache em memória, mas esta CLI é um processo novo.
+            # Preserve a última agenda do daemon e não anuncie sucesso em falha.
+            mgr.write({"agenda_error": warning})
+            if getattr(args, "json", False):
+                print(json.dumps({"status": "error", "error": warning}, ensure_ascii=False))
+            else:
+                print(warning, file=sys.stderr)
+            sys.exit(1)
         mgr.write({
             "next_meeting": _proxima_com_hora(proximas_dicts),
             "upcoming_meetings": proximas_dicts,
-            "agenda_error": agenda_warning(cfg),
+            "agenda_error": None,
         })
         if getattr(args, "json", False):
             print(json.dumps({
