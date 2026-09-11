@@ -154,6 +154,16 @@ class TestLibrary(unittest.TestCase):
         self.assertIsNone(detail['segments'][0]['start'])
         self.assertFalse(detail['segments'][0]['can_seek'])
 
+    def test_silent_recording_explains_its_pending_status(self):
+        slug, bronze = self.meeting()
+        path = bronze/'metadata.json'
+        meta = json.loads(path.read_text())
+        meta['audio_status'] = 'sem_audio'
+        path.write_text(json.dumps(meta))
+        entry = self.library.list()['meetings'][0]
+        self.assertEqual(entry['status'], 'pending')
+        self.assertIn('sem áudio', entry['status_label'])
+
     def test_invalid_folder_does_not_hide_valid_meetings(self):
         slug, bronze = self.meeting()
         invalid = self.storage.bronze_dir / ('fixture' + chr(92) + 'invalid')

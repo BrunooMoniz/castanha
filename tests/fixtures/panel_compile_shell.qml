@@ -84,6 +84,16 @@ ShellRoot {
       castanha.renameCurrent("")
       root.checar(root.lastCommand === "", "nome vazio disparou comando")
 
+      // A ativação genérica de Espaço/Enter no fundo não inicia captura.
+      root.lastCommand = ""
+      var panelWindow = null
+      for (var j = 0; j < castanha.data.length; j++) {
+        if (castanha.data[j].objectName === "castanhaKeyboardPanel") panelWindow = castanha.data[j]
+      }
+      root.checar(panelWindow !== null, "janela do painel não encontrada")
+      if (panelWindow) panelWindow.focusTarget.activateRequested()
+      root.checar(root.lastCommand === "", "ativação genérica iniciou gravação")
+
       // O título da avulsa entra citado na linha de comando.
       castanha.adhocTitle = "Nome com 'aspas'"
       castanha.toggleRecording()

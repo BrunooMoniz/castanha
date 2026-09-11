@@ -33,7 +33,7 @@ def health(root, verify_ui=False):
         spec = importlib.util.spec_from_file_location("castanha_ui_release", Path(__file__).with_name("deploy-ui.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        module.reload_panel(verify_new=verify_ui == "candidate", expected_token="castanha-gui-v3")
+        module.reload_panel(verify_new=verify_ui == "candidate", expected_token="castanha-gui-v4")
     else:
         run("omarchy-shell", "shell", "rescanPlugins")
 

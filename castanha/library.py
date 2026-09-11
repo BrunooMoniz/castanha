@@ -155,7 +155,8 @@ class MeetingLibrary:
                 warnings.append('Um arquivo da reunião não pôde ser acessado.')
         audio = self._audio(slug, meta, warnings)
         delivery = meta.get('zinom') if isinstance(meta.get('zinom'), dict) else {}
-        pending = (bool(warnings) or meta.get('processing_status') in ('pending', 'processing', 'error', 'failed')
+        pending = (bool(warnings) or meta.get('audio_status') in ('sem_audio', 'mic_mudo')
+                   or meta.get('processing_status') in ('pending', 'processing', 'error', 'failed')
                    or meta.get('summary_status') in ('pending', 'error', 'failed') or meta.get('transcription_pending') is True
                    or delivery.get('status') not in ('ok', 'success', 'synced', 'disabled')
                    or delivery.get('facts_status') in ('pending', 'pending_lineage', 'error', 'failed')
@@ -163,7 +164,9 @@ class MeetingLibrary:
         entry = {'slug': slug, 'title': _text(meta.get('title')) or _title_from_slug(slug),
                  'when': _text(meta.get('recorded_at')), 'duration_seconds': _number(meta.get('duration_seconds')),
                  'status': 'pending' if pending else 'complete',
-                 'status_label': ('Notas prontas · entrega não confirmada'
+                 'status_label': ('Gravação sem áudio detectado' if meta.get('audio_status') == 'sem_audio'
+                     else 'Microfone sem áudio na gravação' if meta.get('audio_status') == 'mic_mudo'
+                     else 'Notas prontas · entrega não confirmada'
                      if present['has_summary'] and delivery.get('status') not in ('ok', 'success', 'synced', 'disabled')
                      else 'Pendente' if pending else 'Concluída'),
                  'recordings_count': len(audio), 'warnings': warnings, **present}

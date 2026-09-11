@@ -61,7 +61,7 @@ Panel {
   IpcHandler {
     enabled: root.manageIpc
     target: "castanha-view"
-    function health(): string { return "castanha-gui-v3" }
+    function health(): string { return "castanha-gui-v4" }
     function library(): void { root.openLibrary("") }
   }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
@@ -630,6 +630,7 @@ Panel {
 
   KeyboardPanel {
     id: panel
+    objectName: "castanhaKeyboardPanel"
     anchorItem: button
     owner: root
     bar: root.bar
@@ -644,8 +645,10 @@ Panel {
       // Enquanto um campo de nome está em edição, as teclas são dele: sem isto,
       // digitar "x" no nome apagava a reunião e "j" rolava o painel.
       blocked: root.textEditing
+      Keys.priority: Keys.AfterItem
 
-      onActivateRequested: root.toggleRecording()
+      // Gravar/finalizar exige ativar o botão explícito. Espaço/Enter no
+      // fundo do painel não pode iniciar uma captura ao receber foco.
       onCloseRequested: {
         if (root.contextSlug !== "") { root.closeContext(); return }
         root.close()
