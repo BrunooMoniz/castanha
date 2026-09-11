@@ -22,6 +22,16 @@ entra na chamada — o áudio é capturado na sua própria máquina.
 
 ---
 
+## Painel e biblioteca
+
+- Durante a gravação, ciano mostra seu microfone e âmbar mostra o áudio da chamada, com níveis independentes e o nome dos dispositivos capturados. Silêncio, pausa e medição indisponível ficam explícitos.
+- Os controles de pausar, retomar e finalizar ficam fixos no painel. O clique no ícone da barra abre o painel.
+- A biblioteca oferece busca, filtros, resumo completo, decisões, próximos passos e transcrição copiável. O player permite avançar, voltar e ajustar a velocidade.
+- Trechos com timestamps verificados abrem o ponto correspondente do áudio. Reuniões antigas sem essa informação continuam legíveis, sem tempos ou participantes inventados.
+- Áudio, transcrição, resumo e entrega ao Zinom têm estados separados. Apagar áudios exige confirmação e preserva as notas.
+
+Para abrir a biblioteca por um atalho: `omarchy-shell castanha-view library`.
+
 ## Comece aqui: sua primeira gravação em 3 minutos
 
 ### 1. Instale
@@ -40,7 +50,7 @@ arquivo de configuração. Ele nunca sobrescreve uma configuração existente.
 omarchy bar put io.github.brunoomoniz.castanha
 ```
 
-Um ícone de microfone aparece na barra. É toda a interface.
+Um ícone de microfone aparece na barra. Ele abre os controles rápidos; **Abrir Castanha** abre a biblioteca completa.
 
 ### 3. Grave alguma coisa
 
@@ -60,7 +70,7 @@ Fale por um minuto e aperte **Encerrar e salvar**. Quando terminar, você tem:
 └── gold/2026-02-17_0900_sync-de-produto.json # fatos extraídos
 ```
 
-Abra a nota com `castanha notes --open`. Pronto — você já está usando.
+Abra **Castanha · histórico completo** no painel para buscar reuniões, ler o resumo e a transcrição ou ouvir o áudio.
 
 > **Funciona de imediato?** Gravar, o cronômetro, a lista de notas e o
 > diagnóstico de áudio não precisam de nada além de FFmpeg e PipeWire.

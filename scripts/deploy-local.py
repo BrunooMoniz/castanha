@@ -6,6 +6,7 @@ Execute depois dos testes e review. A árvore instalada deve estar limpa.
 Não altera links, configuração ou gravações.
 """
 import fcntl
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -22,13 +23,19 @@ def run(*args):
     return subprocess.check_output(args, text=True, stderr=subprocess.PIPE, timeout=45).strip()
 
 
-def health(root):
+def health(root, verify_ui=False):
     run("systemctl", "--user", "is-active", "castanha.service")
     pid = int(run("systemctl", "--user", "show", "castanha.service", "-p", "MainPID", "--value"))
     assert process_identity(pid).cwd == str(root), "Daemon fora do checkout instalado"
     state = json.loads(run(sys.executable, str(root / "bin/castanha"), "status", "--json"))
     assert state.get("status") == "idle", "CLI sem estado ocioso válido"
-    run("omarchy-shell", "shell", "rescanPlugins")
+    if verify_ui:
+        spec = importlib.util.spec_from_file_location("castanha_ui_release", Path(__file__).with_name("deploy-ui.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.reload_panel(verify_new=verify_ui == "candidate", expected_token="castanha-gui-v3")
+    else:
+        run("omarchy-shell", "shell", "rescanPlugins")
 
 
 def deploy(root, sha):
@@ -52,13 +59,13 @@ def deploy(root, sha):
             git("merge", "--ff-only", sha)
             run("systemctl", "--user", "start", "castanha.service")
             time.sleep(2)
-            health(root)
+            health(root, verify_ui="candidate")
         except BaseException:
             run("systemctl", "--user", "stop", "castanha.service")
             git("reset", "--keep", previous)
             run("systemctl", "--user", "start", "castanha.service")
             time.sleep(2)
-            health(root)
+            health(root, verify_ui="rollback")
             print("Falha na atualização; versão anterior restaurada.", file=sys.stderr)
             raise
     print(f"Castanha instalado e saudável: {sha}")

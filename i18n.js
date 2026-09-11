@@ -14,12 +14,12 @@ var STRINGS = {
   "hero.next_meeting": { "en": "next meeting in {n} min", "pt": "próxima reunião em {n} min" },
   "hero.ready": { "en": "ready to record", "pt": "pronto para gravar" },
 
-  "bar.tooltip_recording": { "en": "Recording for {t} · click for panel, right-click to finish", "pt": "Gravando há {t} · clique para o painel, direito para finalizar" },
+  "bar.tooltip_recording": { "en": "Recording for {t} · click to open controls", "pt": "Gravando há {t} · clique para abrir os controles" },
   "bar.tooltip_paused": { "en": "Recording paused at {t}", "pt": "Gravação pausada em {t}" },
   "bar.tooltip_processing": { "en": "Processing meeting notes", "pt": "Processando as notas da reunião" },
   "bar.tooltip_mic_muted": { "en": "Castanha · microphone is muted", "pt": "Castanha · o microfone está mudo" },
   "bar.tooltip_next_meeting": { "en": "{title} in {n} min", "pt": "{title} em {n} min" },
-  "bar.tooltip_idle": { "en": "Castanha · click for panel, right-click to record", "pt": "Castanha · clique para o painel, direito para gravar" },
+  "bar.tooltip_idle": { "en": "Castanha · click to open", "pt": "Castanha · clique para abrir" },
 
   "mic_warning.body": { "en": "Microphone is muted. The recording will be silent until you unmute.", "pt": "Microfone mudo. A gravação sai em silêncio até você desmutar." },
 

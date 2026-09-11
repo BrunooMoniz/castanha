@@ -14,6 +14,7 @@ import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 import "DeliveryStatus.js" as DeliveryStatus
+import "StageStatus.js" as StageStatus
 import "AudioMeter.js" as AudioMeterLogic
 import "i18n.js" as I18N
 
@@ -30,7 +31,7 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // Esmaecer por alfa, não por Qt.darker: escurecer some no tema claro.
-  readonly property color dim: alpha(foreground, 0.55)
+  readonly property color dim: alpha(foreground, 0.72)
   readonly property color faint: alpha(foreground, 0.05)
   readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
 
@@ -60,7 +61,8 @@ Panel {
   IpcHandler {
     enabled: root.manageIpc
     target: "castanha-view"
-    function health(): string { return "independent-stages-v2" }
+    function health(): string { return "castanha-gui-v3" }
+    function library(): void { root.openLibrary("") }
   }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
 
@@ -70,6 +72,16 @@ Panel {
 
   // As notas saem da CLI, que é quem sabe onde o acervo mora.
   property var recentNotes: []
+  property string notesLoadError: ""
+  property double notesLoadedAt: 0
+  property bool showAllDay: false
+  property string deleteAudioArmed: ""
+  readonly property var timedUpcoming: upcoming.filter(function(m) { return !m.all_day })
+  readonly property var dayUpcoming: upcoming.filter(function(m) { return !!m.all_day })
+  readonly property color waiting: Qt.hsla(0.10, 0.72, darkPanel ? 0.72 : 0.33, 1)
+  function openLibrary(slug) { root.close(); library.showMeeting(String(slug || "")) }
+  LibraryWindow { id: library; foreground: root.foreground; fontFamily: root.fontFamily }
+
 
   // Uma reunião aberta por vez. Vazio = nenhuma.
   property string expandedUid: ""
@@ -96,12 +108,14 @@ Panel {
     root.contextSlug = s
     root.renamingSlug = ""
     root.deleteArmedSlug = ""
+    root.deleteAudioArmed = ""
   }
 
   function closeContext() {
     root.contextSlug = ""
     root.renamingSlug = ""
     root.deleteArmedSlug = ""
+    root.deleteAudioArmed = ""
   }
 
   // Nome da gravação avulsa: pode ser digitado antes de começar, e trocado
@@ -397,9 +411,12 @@ Panel {
         if (root.editingNotes) return
         try {
           var data = JSON.parse(text)
-          root.recentNotes = data.notes || []
+          if (!Array.isArray(data.notes)) throw new Error("Formato inválido")
+          root.recentNotes = data.notes
+          root.notesLoadError = ""
+          root.notesLoadedAt = Date.now()
         } catch (e) {
-          root.recentNotes = []
+          root.notesLoadError = "Não foi possível atualizar as reuniões. Os últimos dados foram preservados."
         }
       }
     }
@@ -525,7 +542,7 @@ Panel {
   // o inode antigo depois da primeira troca: sem esta releitura, o painel
   // mostrava a agenda de meia hora atrás, foi o que escondeu o Marco Túlio.
   Timer {
-    interval: root.isBusy || root.opened ? 1000 : 10000
+    interval: root.isBusy ? 250 : root.opened ? 1000 : 10000
     running: true
     repeat: true
     onTriggered: {
@@ -543,6 +560,36 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.barText
+    labelVisible: !root.isBusy
+    fixedWidth: root.isBusy ? barChannels.implicitWidth + Style.space(17) : -1
+    Row {
+      id: barChannels
+      anchors.centerIn: parent
+      visible: root.isBusy
+      spacing: Style.space(7)
+      Text {
+        text: root.glyph + " " + root.formatTime(root.elapsedSeconds)
+        color: root.isPaused ? root.foreground : root.contrasting(root.urgent)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        anchors.verticalCenter: parent.verticalCenter
+      }
+      ChannelWaveform {
+        width: Style.space(30); height: Style.space(15); barCount: 7
+        anchors.verticalCenter: parent.verticalCenter
+        peak: root.stateData.mic_peak || 0
+        active: root.isRecording && !root.micMuted && AudioMeterLogic.isFresh(root.stateData.mic_peak_updated_at, Math.max(root.nowMs, Date.now()), true)
+        ink: liveMeters.micColor
+      }
+      ChannelWaveform {
+        width: Style.space(30); height: Style.space(15); barCount: 7
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.mode === "dual"
+        peak: root.stateData.call_peak || 0
+        active: root.isRecording && root.mode === "dual" && AudioMeterLogic.isFresh(root.stateData.call_peak_updated_at, Math.max(root.nowMs, Date.now()), true)
+        ink: liveMeters.callColor
+      }
+    }
     active: root.isRecording
     tooltipText: {
       if (root.isRecording) return I18N.t("bar.tooltip_recording", root.lang).replace("{t}", root.formatTime(root.elapsedSeconds))
@@ -554,8 +601,7 @@ Panel {
     }
 
     onPressed: function(btn) {
-      if (btn === Qt.RightButton) root.run("castanha toggle")
-      else root.toggle()
+      root.toggle()
     }
   }
 
@@ -576,8 +622,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(panelFlick.contentHeight, Style.space(620))
+    contentWidth: panel.fittedContentWidth(Style.space(410))
+    contentHeight: panel.fittedContentHeight(captureControls.implicitHeight + panelFlick.contentHeight + libraryFooter.implicitHeight + Style.space(24), Style.space(720))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -593,22 +639,12 @@ Panel {
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Flickable {
-        id: panelFlick
-        anchors.fill: parent
-        contentWidth: width
-        contentHeight: column.implicitHeight
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-
-        Column {
-          id: column
-          width: parent.width
-          spacing: Style.space(12)
-
-          onImplicitHeightChanged: root.contentNaturalHeight = implicitHeight
-          Component.onCompleted: root.contentNaturalHeight = implicitHeight
-
+      Column {
+        id: captureControls
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Style.space(8)
         // ---------- Hero ----------
         PanelHero {
           width: parent.width
@@ -696,6 +732,23 @@ Panel {
           }
         }
 
+        ChannelMeters {
+          id: liveMeters
+          width: parent.width
+          visible: root.isBusy
+          stateData: root.stateData
+          micMuted: root.micMuted
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+        Text {
+          width: parent.width
+          visible: !root.isBusy && !root.isProcessing
+          text: "Microfone e chamada em canais separados"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
         // ---------- Nome da gravação ----------
         // Antes de começar: escolhe o nome da avulsa. Durante: corrige o nome
         // que a nota vai receber quando o stop escrever o Bronze.
@@ -770,10 +823,10 @@ Panel {
           spacing: Style.space(18)
           visible: root.isBusy || !!(root.meeting && root.meeting.conference_url)
 
-          PanelActionButton {
+          Button {
+            text: root.isPaused ? "Retomar" : "Pausar"
             visible: root.isBusy
             iconText: root.isPaused ? "󰐊" : "󰏤"
-            tooltipText: root.isPaused ? I18N.t("btn.resume", root.lang) : I18N.t("btn.pause", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: root.run(root.isPaused ? "castanha resume" : "castanha pause")
@@ -787,7 +840,7 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: {
               if (root.meeting && root.meeting.conference_url)
-                root.run("xdg-open '" + root.meeting.conference_url + "'")
+                root.run("xdg-open " + root.shellQuote(root.meeting.conference_url))
               root.close()
             }
           }
@@ -797,39 +850,48 @@ Panel {
             tooltipText: I18N.t("btn.open_notes_folder", root.lang)
             foreground: root.foreground
             fontFamily: root.fontFamily
-            onClicked: { root.run("castanha notes --open"); root.close() }
+            onClicked: { root.openLibrary("") }
           }
         }
 
-        // ---------- Reunião em curso ----------
-        PanelSeparator {
+      }
+      Column {
+        id: libraryFooter
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        spacing: Style.space(8)
+        PanelSeparator { width: parent.width; foreground: root.foreground }
+        Button {
           width: parent.width
-          visible: root.isBusy
+          text: "Abrir Castanha · histórico completo"
+          iconText: "󰈙"
           foreground: root.foreground
+          fontFamily: root.fontFamily
+          bordered: true
+          onClicked: root.openLibrary("")
         }
+      }
+      Flickable {
+        id: panelFlick
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: captureControls.bottom
+        anchors.bottom: libraryFooter.top
+        anchors.topMargin: Style.space(12)
+        anchors.bottomMargin: Style.space(12)
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
 
         Column {
+          id: column
           width: parent.width
-          visible: root.isBusy
-          spacing: Style.space(4)
+          spacing: Style.space(12)
 
-          PanelSectionHeader {
-            width: parent.width
-            text: I18N.t("panel.current_meeting", root.lang)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            text: root.currentMeeting && root.currentMeeting.title ? root.currentMeeting.title : I18N.t("panel.adhoc_recording", root.lang)
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
-        }
+          onImplicitHeightChanged: root.contentNaturalHeight = implicitHeight + captureControls.implicitHeight
+          Component.onCompleted: root.contentNaturalHeight = implicitHeight + captureControls.implicitHeight
 
         // ---------- Próximas reuniões ----------
         PanelSeparator { width: parent.width; foreground: root.foreground }
@@ -877,7 +939,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            visible: root.upcoming.length === 0
+            visible: root.timedUpcoming.length === 0
             text: root.agendaError !== "" ? root.agendaError
                                           : (root.refreshingAgenda ? I18N.t("agenda.refreshing", root.lang) : I18N.t("agenda.empty", root.lang))
             color: root.agendaError !== "" ? root.urgent : root.dim
@@ -898,7 +960,7 @@ Panel {
           }
 
           Repeater {
-            model: root.upcoming.slice(0, 4)
+            model: root.timedUpcoming.slice(0, 3)
             MeetingRow {
               required property var modelData
               width: parent.width
@@ -907,6 +969,35 @@ Panel {
           }
         }
 
+        Text {
+          width: parent.width
+          visible: !!root.stateData.agenda_updated_at && !root.agendaError
+          text: "Agenda atualizada " + Math.max(0, Math.floor((root.nowMs / 1000 - (Number(root.stateData.agenda_updated_at) || root.parseIso(root.stateData.agenda_updated_at) / 1000)) / 60)) + " min atrás"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        Button {
+          visible: root.dayUpcoming.length > 0
+          text: (root.showAllDay ? "Recolher" : "Mostrar") + " eventos do dia (" + root.dayUpcoming.length + ")"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: root.showAllDay = !root.showAllDay
+        }
+        Repeater {
+          model: root.showAllDay ? root.dayUpcoming : []
+          MeetingRow { required property var modelData; width: parent.width; meeting: modelData }
+        }
+        Text {
+          width: parent.width
+          visible: root.notesLoadError !== "" || (root.recentNotes.length === 0 && root.notesLoadedAt > 0)
+          text: root.notesLoadError || "Suas reuniões aparecerão aqui após a primeira gravação."
+          color: root.notesLoadError ? root.waiting : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
         // ---------- Notas recentes ----------
         PanelSeparator {
           width: parent.width
@@ -1023,7 +1114,7 @@ Panel {
               text: "󰕧"
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.body
               Behavior on opacity { NumberAnimation { duration: 120 } }
             }
 
@@ -1337,8 +1428,8 @@ Panel {
               id: quando
               anchors.centerIn: parent
               textFormat: Text.PlainText
-              opacity: (sincronizar.opacity > 0 || reprocessar.opacity > 0) ? 0 : 1
-              text: noteRow.note ? root.formatWhen(noteRow.note.when) : ""
+              opacity: 1
+              text: ""
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1349,7 +1440,8 @@ Panel {
             PanelActionButton {
               id: reprocessar
               anchors.centerIn: parent
-              opacity: noteRow.precisaRetry && (noteHover.containsMouse || noteRow.reprocessando) ? 1 : 0
+              visible: false
+              opacity: 0
               enabled: opacity > 0 && !noteRow.reprocessando
               iconText: "󰑐"
               tooltipText: noteRow.reprocessando ? I18N.t("tooltip.reprocessing", root.lang)
@@ -1365,7 +1457,8 @@ Panel {
             PanelActionButton {
               id: sincronizar
               anchors.centerIn: parent
-              opacity: noteRow.precisaSync && (noteHover.containsMouse || noteRow.sincronizando) ? 1 : 0
+              visible: false
+              opacity: 0
               enabled: opacity > 0 && !noteRow.sincronizando
               iconText: "󰑐"
               tooltipText: noteRow.sincronizando ? I18N.t("zinom.sending", root.lang) : I18N.t("zinom.resend", root.lang)
@@ -1378,66 +1471,23 @@ Panel {
           }
         }
 
-        // Subtítulo quando fechado: resumo de duração / status / participantes
         Text {
-          textFormat: Text.PlainText
           width: parent.width
-          visible: !noteRow.aberta && text !== ""
-          text: {
-            if (!noteRow.note) return ""
-            var partes = []
-            if (noteRow.note.duration_seconds > 0)
-              partes.push(root.formatDuration(noteRow.note.duration_seconds))
-            if (noteRow.participantes.length > 0)
-              partes.push(I18N.t(noteRow.participantes.length === 1 ? "count.participants_one" : "count.participants_many", root.lang).replace("{n}", noteRow.participantes.length))
-            if (noteRow.note.recordings_count !== undefined) {
-              if (noteRow.note.recordings_count === 0) partes.push(I18N.t("note.no_audio", root.lang))
-              else if (noteRow.note.recordings_count > 1) partes.push(I18N.t("note.recordings_plural", root.lang).replace("{n}", noteRow.note.recordings_count))
-            }
-            return partes.join(" · ")
-          }
+          visible: !noteRow.aberta
+          text: noteRow.note ? [root.formatWhen(noteRow.note.when), noteRow.note.duration_seconds > 0 ? root.formatDuration(noteRow.note.duration_seconds) : ""].filter(function(value) { return value }).join(" · ") : ""
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
 
+        // Subtítulo quando fechado: resumo de duração / status / participantes
         Text {
-          textFormat: Text.PlainText
           width: parent.width
-          visible: !noteRow.aberta && text !== ""
-          text: noteRow.reprocessando ? "󰑐  " + I18N.t("note.reprocessing", root.lang)
-                : DeliveryStatus.processingLine(noteRow.note, root.lang)
-          color: noteRow.transcrevendo || noteRow.reprocessando
-            || !(noteRow.note && (noteRow.note.summary_status === "pending"
-              || noteRow.note.transcription_status === "pending" || noteRow.precisaRetry)) ? root.dim : root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          visible: noteRow.comProblema && !noteRow.precisaRetry && !noteRow.aberta
-          text: "󰀦  " + root.audioDiag(noteRow.note)
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          visible: text !== "" && !noteRow.aberta
-          text: {
-            if (noteRow.sincronizando) return "󰑐  " + I18N.t("zinom.sending", root.lang)
-            var linha = root.zinomLine(noteRow.statusInfo)
-            if (linha === "") return ""
-            return DeliveryStatus.zinomIcon(noteRow.note) + linha
-          }
-          color: noteRow.precisaSync && !noteRow.sincronizando ? root.urgent : root.dim
+          visible: !noteRow.aberta
+          text: (noteRow.reprocessando || noteRow.sincronizando) ? "Retomando etapa pendente…" : StageStatus.status(noteRow.note).label
+          color: StageStatus.status(noteRow.note).tone === "error" ? root.contrasting(root.urgent)
+            : StageStatus.status(noteRow.note).tone === "waiting" ? root.waiting : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1457,6 +1507,15 @@ Panel {
         }
       }
 
+      PanelActionButton {
+        anchors.right: parent.right
+        anchors.top: parent.top
+        iconText: "⋯"
+        tooltipText: "Ações da reunião"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.openContext(noteRow.note ? noteRow.note.slug : "")
+      }
       PanelToolTip {
         visible: noteHover.containsMouse && !noteRow.noMenu
         text: noteRow.aberta ? I18N.t("note.collapse_details", root.lang) : I18N.t("note.view_details", root.lang)
@@ -1521,6 +1580,20 @@ Panel {
           onClicked: root.renameMeeting(noteRow.note ? noteRow.note.slug : "", renomearField.text)
         }
 
+        Button {
+          visible: noteRow.gravacoes.length > 0
+          text: root.deleteAudioArmed === noteRow.note.slug ? "Confirmar apagar áudios" : "Apagar apenas os áudios"
+          foreground: root.deleteAudioArmed === noteRow.note.slug ? root.contrasting(root.urgent) : root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          onClicked: {
+            if (root.deleteAudioArmed === noteRow.note.slug) {
+              root.deleteRecording(noteRow.note.slug, "")
+              root.deleteAudioArmed = ""
+              root.closeContext()
+            } else root.deleteAudioArmed = noteRow.note.slug
+          }
+        }
         Button {
           text: noteRow.apagarArmado ? I18N.t("btn.delete_meeting_confirm", root.lang)
                                      : I18N.t("btn.delete_meeting", root.lang)
@@ -1592,6 +1665,12 @@ Panel {
         wrapMode: Text.WordWrap
       }
 
+      ProcessingStages {
+        width: parent.width
+        note: noteRow.note || ({})
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
       // Diagnóstico de áudio se houver
       Text {
         textFormat: Text.PlainText
@@ -1815,6 +1894,8 @@ Panel {
 
             PanelActionButton {
               id: recDelBtn
+              visible: false
+              width: 0
               anchors.right: parent.right
               anchors.rightMargin: Style.space(4)
               anchors.verticalCenter: parent.verticalCenter
@@ -1856,13 +1937,22 @@ Panel {
         }
 
         Button {
-          text: I18N.t("btn.notes", root.lang)
+          visible: noteRow.precisaSync
+          text: noteRow.sincronizando ? "Atualizando…" : "Atualizar entrega"
+          enabled: !syncProcess.running
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          bordered: true
+          onClicked: root.syncMeeting(noteRow.note ? noteRow.note.slug : "")
+        }
+        Button {
+          text: "Ler reunião completa"
           iconText: "󰈙"
           foreground: root.foreground
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           bordered: true
-          onClicked: root.openPath(noteRow.note ? noteRow.note.silver_path : "")
+          onClicked: root.openLibrary(noteRow.note ? noteRow.note.slug : "")
         }
 
         Button {
@@ -1873,7 +1963,7 @@ Panel {
           fontFamily: root.fontFamily
           fontSize: Style.font.caption
           bordered: true
-          onClicked: root.openPath(noteRow.note ? noteRow.note.transcript_path : "")
+          onClicked: root.openLibrary(noteRow.note ? noteRow.note.slug : "")
         }
 
         Button {

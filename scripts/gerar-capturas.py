@@ -3,24 +3,24 @@
 Não toca no acervo real: monta um HOME temporário (com XDG_CONFIG_HOME e
 XDG_STATE_HOME dentro dele) contendo reuniões inventadas — nomes genéricos,
 e-mails `@example.com`, nenhuma organização real —, sobe o Panel.qml de verdade
-ancorado numa barra layer-shell e fotografa **apenas o card do painel**, na
-geometria que o próprio painel informa.
+ancorado numa barra layer-shell e exporta **apenas o card do painel** pelo renderizador Qt.
 
 Por que HOME falso: o painel deriva caminhos de HOME, então apontar só os XDG_*
 deixava a captura sair com a agenda real de quem rodou o script.
 
-Por que recortar pela geometria do card: `grim` sem `-g` fotografa a tela
-inteira, arrastando as janelas de trabalho abertas — e os dados dentro delas —
-para uma imagem que vai para o README.
+A exportação grabToImage usa somente o componente Qt. Mesmo que o usuário
+feche o painel durante a captura, nenhuma outra janela entra na imagem.
 
 Uso:
     python3 scripts/gerar-capturas.py [--saida docs/images]
 
-Requer: quickshell, grim, e um compositor Wayland (WAYLAND_DISPLAY).
+Requer: quickshell e um compositor Wayland (WAYLAND_DISPLAY).
 """
 
 import argparse
 import json
+import math
+import threading
 import os
 import shutil
 import subprocess
@@ -53,36 +53,36 @@ def reunioes(agora: datetime) -> list:
     return [
         {
             "slug": "2026-02-17_0900_weekly-product-sync",
-            "title": "Weekly Product Sync",
+            "title": "Alinhamento de produto",
             "recorded_at": (agora - timedelta(hours=2)).isoformat(timespec="seconds"),
             "duration_seconds": 1_920,
             "attendees": [_participante(ADA, organizer=True), _participante(RAVI),
                           _participante(SOFIA, status="tentative")],
-            "summary": ("The team agreed to ship the onboarding rewrite behind a flag "
-                        "and to postpone the billing migration until the new pricing "
-                        "page lands.\n"),
-            "decisions": ["Ship the onboarding rewrite behind the `onboarding_v2` flag.",
-                          "Billing migration moves to the next cycle."],
-            "actions": ["Ada: cut the release branch and enable the flag internally.",
-                        "Ravi: write the rollback note for the billing migration."],
+            "summary": ("A equipe decidiu liberar o novo cadastro gradualmente "
+                        "e adiar a migração de cobrança até concluir a página "
+                        "de preços.\n"),
+            "decisions": ["Liberar o novo cadastro gradualmente.",
+                          "Adiar a migração de cobrança para o próximo ciclo."],
+            "actions": ["Ada: preparar a versão e habilitar o cadastro internamente.",
+                        "Ravi: documentar a reversão da migração de cobrança."],
         },
         {
             "slug": "2026-02-16_1430_design-review-checkout",
-            "title": "Design Review — Checkout",
+            "title": "Revisão do checkout",
             "recorded_at": (agora - timedelta(days=1, hours=3)).isoformat(timespec="seconds"),
             "duration_seconds": 2_640,
             "attendees": [_participante(SOFIA, organizer=True), _participante(ADA)],
-            "summary": "Checkout drops the address step for returning customers.\n",
-            "decisions": ["Returning customers skip the address step."],
-            "actions": ["Sofia: update the prototype with the two-step flow."],
+            "summary": "Clientes recorrentes terão um checkout mais curto.\n",
+            "decisions": ["Pular o endereço para clientes recorrentes."],
+            "actions": ["Sofia: atualizar o protótipo com o fluxo em duas etapas."],
         },
         {
             "slug": "2026-02-16_1100_infra-oncall-handoff",
-            "title": "Infra On-call Handoff",
+            "title": "Passagem de plantão",
             "recorded_at": (agora - timedelta(days=1, hours=6)).isoformat(timespec="seconds"),
             "duration_seconds": 780,
             "attendees": [_participante(RAVI, organizer=True)],
-            "summary": "Queue backlog cleared; one noisy alert silenced for 24h.\n",
+            "summary": "Fila normalizada; alerta repetitivo silenciado por 24 horas.\n",
             "decisions": ["Silence the disk-pressure alert on staging for 24h."],
             "actions": ["Ravi: file a ticket to fix the alert threshold."],
             # Uma pendência de propósito: a captura mostra a "segunda chance"
@@ -99,7 +99,7 @@ def agenda(agora: datetime) -> list:
     eventos = [
         MeetingEvent(
             uid="demo-roadmap-1",
-            title="Quarterly Roadmap",
+            title="Planejamento trimestral",
             start=agora + timedelta(minutes=18),
             end=agora + timedelta(minutes=78),
             attendees=[_participante(ADA, organizer=True),
@@ -108,18 +108,18 @@ def agenda(agora: datetime) -> list:
             conference_url="https://meet.example.com/quarterly-roadmap",
             description="Plan the next quarter.",
             location="https://meet.example.com/quarterly-roadmap",
-            calendar_name="Work",
+            calendar_name="Trabalho",
             account="you@example.com",
             conference_provider="meet",
         ),
         MeetingEvent(
             uid="demo-mentoring-2",
-            title="1:1 — Mentoring",
+            title="Mentoria individual",
             start=agora + timedelta(hours=3),
             end=agora + timedelta(hours=3, minutes=30),
             attendees=[_participante(SOFIA, organizer=True)],
             organizer=SOFIA["email"],
-            calendar_name="Work",
+            calendar_name="Trabalho",
             account="you@example.com",
         ),
     ]
@@ -164,7 +164,7 @@ def montar_acervo(base: Path, gravando: bool = False) -> dict:
             "audio_status": "ok", "attendees": r["attendees"],
             "transcription_provider": "pending" if pendente else "whisper-large-v3",
             "transcription_pending": pendente,
-            "transcription_pending_reason": ("SSH unavailable; job preserved to resume"
+            "transcription_pending_reason": ("Sem conexão; processamento preservado para retomar"
                                              if pendente else None),
             "summary_provider": None if pendente else "claude-opus-5",
             "processing_status": "pending" if pendente else "complete",
@@ -185,9 +185,9 @@ def montar_acervo(base: Path, gravando: bool = False) -> dict:
         (silver / f"{slug}.md").write_text(
             f'---\ntitle: "{r["title"]}"\ndate: {r["recorded_at"]}\n'
             f'attendees: [{pessoas}]\n---\n\n'
-            f'# {r["title"]}\n\n## Executive Summary\n\n{r["summary"]}\n'
-            "## Decisions\n\n" + "".join(f"- {d}\n" for d in r["decisions"]) +
-            "\n## Actions\n\n" + "".join(f"- {a}\n" for a in r["actions"]),
+            f'# {r["title"]}\n\n## Resumo Executivo\n\n{r["summary"]}\n'
+            "## Decisões\n\n" + "".join(f"- {d}\n" for d in r["decisions"]) +
+            "\n## Próximos passos\n\n" + "".join(f"- {a}\n" for a in r["actions"]),
             encoding="utf-8")
         (gold / f"{slug}.json").write_text(json.dumps({
             "title": r["title"], "slug": slug,
@@ -209,12 +209,14 @@ def montar_acervo(base: Path, gravando: bool = False) -> dict:
             "status": "recording",
             "started_at": comeco.isoformat(timespec="seconds"),
             "current_meeting": {
-                "title": "Quarterly Roadmap",
+                "title": "Planejamento trimestral",
                 "attendees": [_participante(ADA, organizer=True), _participante(RAVI)],
                 "conference_url": "https://meet.example.com/quarterly-roadmap",
                 "uid": "demo-roadmap-1",
             },
             "mode": "dual",
+            "mic_device_name": "Microfone interno · Dell XPS",
+            "call_device_name": "Áudio do sistema · saída selecionada",
             "audio_peak": {"mic": 0.42, "system": 0.61,
                            "at": agora.isoformat(timespec="seconds")},
         })
@@ -230,12 +232,20 @@ def montar_qml(destino: Path) -> Path:
     destino.mkdir(parents=True, exist_ok=True)
     (destino / "Ui").symlink_to(OMARCHY_SHELL / "Ui", target_is_directory=True)
     (destino / "Commons").symlink_to(OMARCHY_SHELL / "Commons", target_is_directory=True)
-    for nome in ("AudioMeter.qml", "AudioMeter.js", "RecordingAudioMeter.qml",
-                 "DeliveryStatus.js", "i18n.js", "PanelActionFlow.qml"):
-        (destino / nome).symlink_to(ROOT / nome)
+    for source in [*ROOT.glob("*.qml"), *ROOT.glob("*.js")]:
+        if source.name != "Panel.qml":
+            (destino / source.name).symlink_to(source)
     # O tipo QML vem do nome do arquivo; "Panel" colidiria com o Ui/Panel.qml
     # do shell, que é a base do nosso.
-    (destino / "CastanhaPanel.qml").symlink_to(ROOT / "Panel.qml")
+    source = (ROOT / "Panel.qml").read_text()
+    source = source.replace("  function cardGeometry() {", """  function fixtureCapture(path) {
+    if (!root.opened) { root.open(); return false }
+    return keyCatcher.parent.parent.grabToImage(function(result) {
+      if (root.opened && result.saveToFile(path)) console.log("CASTANHA_PRONTO")
+    })
+  }
+  function cardGeometry() {""")
+    (destino / "CastanhaPanel.qml").write_text(source)
     (destino / "shell.qml").write_text(CENA, encoding="utf-8")
     return destino / "shell.qml"
 
@@ -307,7 +317,7 @@ ShellRoot {
       if (!card) { console.log("CASTANHA_SEM_GEOMETRIA"); return }
       console.log("CASTANHA_GEOMETRIA " + Math.round(card.x) + "," + Math.round(card.y)
                   + " " + Math.round(card.width) + "x" + Math.round(card.height))
-      console.log("CASTANHA_PRONTO")
+      castanha.fixtureCapture(Quickshell.env("CASTANHA_PREVIEW_OUTPUT"))
     }
   }
 }
@@ -322,8 +332,6 @@ CENAS = [
 def capturar(saida: Path) -> list:
     if not shutil.which("quickshell"):
         sys.exit("quickshell não encontrado")
-    if not shutil.which("grim"):
-        sys.exit("grim não encontrado (necessário para a captura)")
     if not os.environ.get("WAYLAND_DISPLAY"):
         sys.exit("sem WAYLAND_DISPLAY: o painel exige um compositor Wayland")
 
@@ -348,7 +356,26 @@ def _uma_cena(destino: Path, gravando: bool) -> Path:
         env["XDG_CONFIG_HOME"] = str(acervo["xdg_config"])
         env["XDG_STATE_HOME"] = str(acervo["xdg_state"])
         env["PATH"] = f"{ROOT / 'bin'}:{env.get('PATH', '')}"
-        env["CASTANHA_LANG"] = "en"
+        env["CASTANHA_LANG"] = "pt"
+        env["CASTANHA_PREVIEW_OUTPUT"] = str(destino.resolve())
+
+        stop_fixture = threading.Event()
+        def fixture_levels():
+            state_path = acervo["xdg_state"] / "castanha" / "state.json"
+            initial = json.loads(state_path.read_text())
+            tick = 0
+            while not stop_fixture.is_set():
+                tick += 1
+                initial.update(mic_peak=abs(math.sin(tick * .61)) * .55,
+                               call_peak=abs(math.sin(tick * .29 + 1)) * .35,
+                               mic_peak_updated_at=time.time(), call_peak_updated_at=time.time())
+                temporary = state_path.with_suffix(".preview-tmp")
+                temporary.write_text(json.dumps(initial))
+                temporary.replace(state_path)
+                stop_fixture.wait(.1)
+        worker = threading.Thread(target=fixture_levels, daemon=True) if gravando else None
+        if worker:
+            worker.start()
 
         proc = subprocess.Popen(
             ["quickshell", "--no-duplicate", "--path", str(shell), "--no-color"],
@@ -360,6 +387,7 @@ def _uma_cena(destino: Path, gravando: bool) -> Path:
                 linha = proc.stdout.readline()
                 if not linha:
                     break
+                print(linha.rstrip(), file=sys.stderr)
                 if "CASTANHA_GEOMETRIA" in linha:
                     geometria = linha.split("CASTANHA_GEOMETRIA", 1)[1].strip()
                 if "CASTANHA_PRONTO" in linha:
@@ -368,10 +396,12 @@ def _uma_cena(destino: Path, gravando: bool) -> Path:
                 proc.kill()
                 sys.exit(f"o painel não informou a geometria do card ({destino.name})")
 
-            time.sleep(1.2)
-            subprocess.run(["grim", "-g", geometria, str(destino)],
-                           check=True, timeout=30)
+            if not destino.exists():
+                sys.exit("a captura do componente não foi concluída")
         finally:
+            stop_fixture.set()
+            if worker:
+                worker.join(timeout=2)
             proc.terminate()
             try:
                 proc.wait(timeout=5)

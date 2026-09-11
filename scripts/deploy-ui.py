@@ -83,7 +83,7 @@ def restart_stale_shell():
     run("omarchy", "restart", "shell", timeout=30)
 
 
-def reload_panel(verify_new=True):
+def reload_panel(verify_new=True, expected_token="independent-stages-v2"):
     wait_for_shell_jobs()
     run("omarchy-shell", "shell", "rescanPlugins")
     # O rescan é assíncrono. A presença do painel confirma que o componente
@@ -91,7 +91,7 @@ def reload_panel(verify_new=True):
     for attempt in range(10):
         time.sleep(0.2)
         try:
-            if verify_new and run("omarchy-shell", "castanha-view", "health") != "independent-stages-v2":
+            if verify_new and run("omarchy-shell", "castanha-view", "health") != expected_token:
                 raise subprocess.CalledProcessError(1, "castanha-view health")
             run("omarchy-shell", "castanha", "open")
             return
@@ -100,7 +100,7 @@ def reload_panel(verify_new=True):
                 if not verify_new:
                     raise
                 restart_stale_shell()
-                if run("omarchy-shell", "castanha-view", "health") != "independent-stages-v2":
+                if run("omarchy-shell", "castanha-view", "health") != expected_token:
                     raise RuntimeError("Interface nova não carregou após reiniciar barra")
                 run("omarchy-shell", "castanha", "open")
                 return

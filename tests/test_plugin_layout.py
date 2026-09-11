@@ -291,9 +291,9 @@ class PluginLayoutTest(unittest.TestCase):
             config.mkdir()
             (config / "Ui").symlink_to(OMARCHY_SHELL / "Ui", target_is_directory=True)
             (config / "Commons").symlink_to(OMARCHY_SHELL / "Commons", target_is_directory=True)
-            for nome in ("AudioMeter.qml", "AudioMeter.js", "RecordingAudioMeter.qml",
-                         "DeliveryStatus.js", "i18n.js", "PanelActionFlow.qml"):
-                (config / nome).symlink_to(ROOT / nome)
+            for source in [*ROOT.glob("*.qml"), *ROOT.glob("*.js")]:
+                if source.name != "Panel.qml":
+                    (config / source.name).symlink_to(source)
             # O tipo QML vem do nome do arquivo, e "Panel" colidiria com o
             # Panel.qml do próprio shell, que é a base do nosso.
             (config / "CastanhaPanel.qml").symlink_to(ROOT / "Panel.qml")
