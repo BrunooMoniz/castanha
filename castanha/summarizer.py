@@ -548,7 +548,7 @@ class MeetingSummarizer:
     def _groq_gold_budget(self, system_prompt):
         # GPT-OSS compartilha a saída entre raciocínio e resposta. O Gold
         # precisa de espaço para concluir o JSON, mesmo com poucos fatos.
-        return system_prompt == GOLD_SYSTEM_PROMPT and self.model in (
+        return system_prompt in (GOLD_SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE) and self.model in (
             "openai/gpt-oss-20b", "openai/gpt-oss-120b")
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:

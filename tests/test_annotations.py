@@ -344,6 +344,13 @@ class TestAnnotations(unittest.TestCase):
                     self.assertLess(silver.index(TEXT), silver.index("## 📝 Transcrição"))
                 self.assertGreaterEqual(call.call_count, 2)
 
+    def test_manual_gold_keeps_groq_reasoning_completion_budget(self):
+        from castanha.summarizer import GOLD_SYSTEM_PROMPT, SILVER_NOTES_SYSTEM_PROMPT
+        summarizer = MeetingSummarizer(); summarizer.model = "openai/gpt-oss-120b"
+        self.assertTrue(summarizer._groq_gold_budget(GOLD_SYSTEM_PROMPT))
+        self.assertTrue(summarizer._groq_gold_budget(GOLD_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE))
+        self.assertFalse(summarizer._groq_gold_budget(SILVER_NOTES_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE))
+
     def test_chunked_silver_receives_manual_context_and_preserves_raw(self):
         summarizer = MeetingSummarizer(); summarizer.provider = "groq"; summarizer.api_key = "fixture"
         calls = []
