@@ -122,8 +122,13 @@ class CastanhaEngine:
         if state.get("status") in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Gravação ou finalização já está em andamento. Retome com castanha sync --all."}
 
-        if meeting_slug and (self.storage.get_meeting(meeting_slug) or {}).get("cleanup_status") == "pending":
-            return {"status": "error", "message": "Aguarde a retirada do conteúdo anterior do Zinom antes de anexar outra gravação"}
+        if meeting_slug:
+            from castanha.recording_exclusion import capture_blocked
+            try:
+                if capture_blocked(meeting_slug, self.storage):
+                    return {"status": "error", "message": "Conclua a exclusão ou restauração anterior antes de anexar outra gravação"}
+            except (OSError, ValueError, KeyError, TypeError):
+                return {"status": "error", "message": "Controle da exclusão inválido; anexar gravação foi interrompido"}
         audio_cfg = self.config.get("audio", {})
         chosen_mode = mode or audio_cfg.get("default_mode", "dual")
         bitrate = audio_cfg.get("bitrate", "64k")
@@ -334,7 +339,8 @@ class CastanhaEngine:
                 }
                 metadata["recording_revision"] = metadata.get("recording_revision", 0) + 1
                 if metadata.get("exclusion_id"):
-                    metadata["content_status"] = "rebuilding"
+                    metadata.update(content_status="rebuilding", can_restore=False,
+                                    restore_reason="Nova gravação adicionada; cópia anterior preservada")
                 metadata["processing_status"] = "pending"
                 metadata.setdefault("transcription_provider", "pending")
                 write_json(bronze / "metadata.json", metadata)
@@ -656,6 +662,8 @@ class CastanhaEngine:
                         audio_diagnostico=audio_status_message(audio_status),
                         audio_levels=last_job.get("audio_levels", []),
                         processing_status="pending" if errors or pending_jobs else "complete")
+        if metadata.get("exclusion_id"):
+            metadata.update(remaining_count=len(records), can_reprocess=bool(records))
         write_json(bronze / "metadata.json", metadata)
         if (errors and self._por_canal()) or pending_jobs:
             # Canal recusado não pode gerar Silver/Gold parcial nem entrega nova.
@@ -695,13 +703,14 @@ class CastanhaEngine:
                 # rodada é pendente, senão a fila zera o backoff e o CLI diz "salvo".
                 "zinom": {"status": "pending", "reason": t("engine.problem_summary_pending", exc=exc)},
                 "problemas": errors + [t("engine.problem_summary_pending", exc=exc)]}}
-        if metadata.get("exclusion_id"):
-            metadata["content_status"] = "current"
         # Quem resumiu fica no Bronze antes do recibo: record_zinom_result relê o disco.
         metadata["summary_provider"] = silver_provider
         write_json(bronze / "metadata.json", metadata)
         silver_path = self.storage.save_silver(slug, silver_content)
         gold_path = self.storage.save_gold(slug, gold_data)
+        if metadata.get("exclusion_id"):
+            metadata["content_status"] = "current"
+            write_json(bronze / "metadata.json", metadata)
         zinom_status = self.zinom.ingest_meeting(
             metadata, silver_content, gold_data,
             on_remember=lambda receipt: self.storage.record_zinom_result(slug, receipt),
@@ -971,6 +980,9 @@ class CastanhaEngine:
             self.storage.write_bronze_metadata(slug, meta)
             silver_path = self.storage.save_silver(slug, silver_content)
             gold_path = self.storage.save_gold(slug, gold_data)
+            if meta.get("exclusion_id"):
+                meta["content_status"] = "current"
+                self.storage.write_bronze_metadata(slug, meta)
             anterior = (meta.get("zinom") or {}).get("remember_id")
             zinom_status = self.zinom.ingest_meeting(
                 meta, silver_content, gold_data, previous_remember_id=anterior,

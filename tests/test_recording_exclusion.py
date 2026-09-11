@@ -96,6 +96,104 @@ class TestRecordingExclusion(unittest.TestCase):
         client=Mock();client.call_tool.return_value={'content':[{'type':'text','text':json.dumps(reply)}]}
         return client
 
+
+    def test_summary_quota_keeps_rebuild_pending_without_republishing(self):
+        from castanha.summarizer import LlmUnavailable
+        self.exclude()
+        self.engine.summarizer.generate_silver.side_effect=LlmUnavailable('fixture quota')
+        result=self.engine.reprocess_meeting(self.slug)
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(self.storage.get_meeting(self.slug)['content_status'],'rebuilding')
+        self.assertFalse((self.storage.silver_dir/(self.slug+'.md')).exists())
+        self.engine.zinom.ingest_meeting.assert_not_called()
+        self.assertIn(('',self.slug),pending_candidates(self.storage))
+
+    def test_delivery_pending_reports_local_complete_without_false_remote_success(self):
+        self.exclude()
+        self.engine.zinom.ingest_meeting.return_value={'status':'pending','reason':'fixture queue'}
+        result=self.engine.reprocess_meeting(self.slug)
+        self.assertEqual(result['status'],'partial')
+        self.assertIn('entrega ao Zinom pendente',result['message'])
+        self.assertEqual(self.storage.get_meeting(self.slug)['content_status'],'current')
+        self.assertEqual(self.storage.get_meeting(self.slug)['zinom']['status'],'pending')
+
+    def test_corrupt_control_does_not_abort_inventory(self):
+        from castanha.sync import sync_pending
+        (self.bronze/POINTER).write_bytes(b'invalid-json')
+        other=self.storage.bronze_dir/'second';other.mkdir()
+        write_json(other/'metadata.json',{'slug':'second','zinom':{'status':'error'}})
+        inventory=pending_candidates(self.storage)
+        self.assertIn(('',self.slug),inventory)
+        self.assertIn(('', 'second'),inventory)
+        result=sync_pending(storage=self.storage)
+        self.assertEqual(next(r for r in result if r['slug']==self.slug)['status'],'error')
+
+    def test_changed_credentials_before_attempt_still_allows_local_restore(self):
+        self.one_audio();self.receipts();excluded=self.exclude()
+        adapter=ZinomAdapter();adapter.token='different-fixture'
+        with patch('castanha.zinom_adapter.ZinomMcpClient') as factory:
+            pending=resume_exclusion(self.slug,self.storage,adapter=adapter)
+            factory.assert_not_called()
+        self.assertTrue(pending['can_restore'])
+        self.assertEqual(restore_recording(self.slug,excluded['exclusion_id'],self.storage)['status'],'ok')
+
+    def test_cleanup_error_category_is_safe_and_durable(self):
+        self.one_audio();self.receipts();excluded=self.exclude()
+        client=self.client({'ok':False,'error':'workspace_forbidden','message':'fixture SECRET'})
+        with patch('castanha.zinom_adapter.ZinomMcpClient',return_value=client):
+            pending=resume_exclusion(self.slug,self.storage)
+        self.assertIn('workspace_forbidden',pending['cleanup_reason'])
+        self.assertNotIn('SECRET',json.dumps(pending))
+        op=json.loads((self.bronze/ARCHIVE/excluded['exclusion_id']/'operation.json').read_text())
+        self.assertEqual(op['last_error_code'],'workspace_forbidden')
+
+    def test_old_annotation_regeneration_checkpoint_is_archived(self):
+        checkpoint=self.bronze/'.annotations-regeneration.json'
+        checkpoint.write_text('{"stage":"old","silver":"excluded content"}')
+        result=self.exclude()
+        self.assertFalse(checkpoint.exists())
+        self.engine.reprocess_meeting(self.slug)
+        self.assertNotIn('excluded content',(self.storage.silver_dir/(self.slug+'.md')).read_text())
+        op=json.loads((self.bronze/ARCHIVE/result['exclusion_id']/'operation.json').read_text())
+        self.assertTrue(any(item['parts']==['.annotations-regeneration.json'] and item['sha256'] for item in op['files']))
+
+    def test_new_capture_after_empty_meeting_uses_new_revision_and_not_old_operation(self):
+        from castanha.recording_exclusion import applicable
+        self.one_audio();self.exclude()
+        from castanha.audio import ChannelLevels
+        from castanha.transcription import TranscriptionResult
+        audio=self.root/'new-capture.ogg';audio.write_bytes(b'new capture')
+        self.engine.state_mgr.write({'status':'recording','pid':None,'audio_path':str(audio),
+            'target_meeting_slug':self.slug,'capture_slug':None,'capture_job_id':'newjob',
+            'current_meeting':{'title':'Fixture'},'mode':'mic-only'})
+        with patch('castanha.engine.get_transcriber') as provider, \
+             patch('castanha.engine.measure_channel_levels',return_value=[ChannelLevels(0,'mic',-30,-10,False)]), \
+             patch('castanha.engine.probe_duration_seconds',return_value=10),patch('castanha.engine.notify'):
+            provider.return_value.transcribe.return_value=TranscriptionResult('NEW RECORDING',[],'fixture',{})
+            result=self.engine.stop_recording()
+            provider.return_value.transcribe.assert_called_once()
+        self.assertFalse(applicable(self.slug,self.storage))
+        self.assertEqual(result['status'],'success')
+        self.assertEqual(self.storage.read_transcript(self.slug),'NEW RECORDING')
+        self.assertEqual(self.storage.get_meeting(self.slug)['content_status'],'current')
+        self.assertEqual(self.storage.get_meeting(self.slug)['recording_revision'],2)
+        self.assertEqual(self.storage.get_meeting(self.slug)['remaining_count'],1)
+        self.assertFalse(self.storage.get_meeting(self.slug)['can_restore'])
+        self.assertEqual([r['job_id'] for r in self.storage._read_bronze_metadata(self.slug)['recordings']],['newjob'])
+
+    def test_capture_refused_during_interrupted_local_exclusion_before_recorder(self):
+        from castanha import recording_exclusion as module
+        original=os.unlink
+        def interrupted(name,*args,**kwargs):
+            if name=='transcript_raw.txt':raise OSError('fixture crash')
+            return original(name,*args,**kwargs)
+        with patch.object(module.os,'unlink',side_effect=interrupted):
+            with self.assertRaises(OSError):self.exclude()
+        with patch.object(self.engine.recorder,'start') as recorder:
+            result=self.engine.start_recording(meeting_slug=self.slug)
+            self.assertEqual(result['status'],'error')
+            recorder.assert_not_called()
+
     def test_exclude_preserves_quarantine_notes_and_hides_all_old_derivatives(self):
         result=self.exclude(expected_revision=0)
         self.assertEqual(result['content_status'],'invalidated');self.assertEqual(result['remaining_count'],1)
@@ -254,6 +352,26 @@ class TestRecordingExclusion(unittest.TestCase):
         with self.assertRaises(ExclusionError):self.exclude()
         self.assertTrue((self.bronze/'capture_job1.ogg').exists())
         self.assertFalse((self.bronze/POINTER).exists())
+
+    def test_capture_start_and_exclusion_share_nonblocking_mutation_gate(self):
+        import fcntl
+        from castanha.capture_gate import open_lock
+        from castanha.config import get_state_dir
+        with open_lock(get_state_dir()) as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            result=self.exclude()
+            self.assertEqual(result['status'],'error')
+            self.assertFalse((self.bronze/POINTER).exists())
+            self.assertTrue((self.bronze/'capture_job1.ogg').exists())
+
+    def test_cli_retry_empty_is_valid_and_never_invokes_providers(self):
+        self.one_audio();self.exclude()
+        cli=str(Path(__file__).resolve().parents[1]/'bin/castanha')
+        result=subprocess.run([cli,'retry',self.slug,'--json'],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['results'][0]['status'],'empty')
+        self.assertFalse((self.bronze/'transcript_raw.txt').exists())
+        self.assertFalse((self.storage.silver_dir/(self.slug+'.md')).exists())
 
     def test_cli_exclude_and_restore_use_same_meeting_and_revision(self):
         cli=str(Path(__file__).resolve().parents[1]/'bin/castanha')

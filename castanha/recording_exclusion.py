@@ -8,8 +8,8 @@ import re
 import stat
 import uuid
 
+from castanha.capture_gate import capture_start
 from castanha.annotations import (_directory, _read, _write, _json, _write_json, _metadata, AnnotationError)
-from castanha.durability import file_sha256
 
 POINTER = '.recording-exclusion.json'
 ARCHIVE = '.recording-exclusions'
@@ -176,6 +176,7 @@ def _projection(metadata, op):
         'can_restore', 'restore_reason', 'remote_cleanup_required')} | {'slug': op['slug'], 'status': 'ok'}
 
 
+@capture_start
 def exclude_recording(slug, filename, storage=None, expected_revision=None):
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
@@ -257,7 +258,7 @@ def _apply(fd, storage, op):
         try:
             info = os.stat(op['filename'], dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
-            if not stat.S_ISREG(os.stat('audio', dir_fd=archive, follow_symlinks=False).st_mode):
+            if _audio_hash(archive, 'audio') != op['audio_sha256']:
                 raise ExclusionError('Áudio de recuperação ausente')
         else:
             if not stat.S_ISREG(info.st_mode) or _audio_hash(fd, op['filename']) != op['audio_sha256']:
@@ -306,6 +307,15 @@ def applicable(slug, storage):
                      metadata.get('cleanup_status') == 'pending'))
 
 
+def capture_blocked(slug, storage):
+    if not pending_exclusion(storage.bronze_dir / slug): return False
+    with _directory(storage, slug) as fd:
+        op = _load(fd)
+        metadata = _metadata(fd, slug)
+        return bool(op and (op['phase'] in ('applying', 'restoring') or
+                            metadata.get('cleanup_status') == 'pending'))
+
+
 def engine_result(result, storage):
     metadata = storage.get_meeting(result['slug']) or {}
     content = metadata.get('content_status')
@@ -329,6 +339,8 @@ def _remote_cleanup(fd, op, metadata, adapter):
     if op.get('unscoped_remote'):
         metadata['cleanup_reason'] = 'Recibo remoto sem escopo verificável; retirada pendente de revisão'
         _write_json(fd, 'metadata.json', metadata)
+        if not op.get('attempted'):
+            op['after_metadata_sha256'] = _sha(_read(fd, 'metadata.json')); _save(fd, op)
         return False
     from castanha.bronze_ingest import frozen_destination
     from castanha.zinom_adapter import ZinomMcpClient, tool_json
@@ -337,6 +349,8 @@ def _remote_cleanup(fd, op, metadata, adapter):
                 workspace=adapter.workspace, account_id=adapter.account_id)):
         metadata['cleanup_reason'] = 'Destino ou credencial mudou; retome com a configuração original'
         _write_json(fd, 'metadata.json', metadata)
+        if not op.get('attempted'):
+            op['after_metadata_sha256'] = _sha(_read(fd, 'metadata.json')); _save(fd, op)
         return False
     for target in op['targets']:
         if target['source_id'] in op['acked']: continue
@@ -346,16 +360,27 @@ def _remote_cleanup(fd, op, metadata, adapter):
         _save(fd, op)
         metadata.update(can_restore=False, restore_reason='Retirada remota iniciada; cópia do áudio preservada na quarentena')
         _write_json(fd, 'metadata.json', metadata)
+        category = 'transport'
         try:
             client = ZinomMcpClient(adapter.endpoint, adapter.token)
             client.connect()
             reply = tool_json(client.call_tool('brain_forget_source', target))
+            category = 'invalid_ack'
+            if reply.get('ok') is False:
+                code = reply.get('error')
+                category = code if code in ('workspace_forbidden', 'unauthorized', 'forbidden',
+                    'feature_disabled', 'bronze_disabled', 'bronze_forget_disabled', 'account_mismatch', 'rate_limited', 'confirmation_required',
+                    'source_not_found', 'invalid_request') else 'remote_rejected'
             counters = ('revisions', 'contentHashes', 'chunks', 'facts', 'profileFacts', 'rechecks')
             if (reply.get('ok') is not True or reply.get('tombstoned') is not True or
                     any(type(reply.get(k)) is not int or reply[k] < 0 for k in counters)):
                 raise ExclusionError('Zinom não confirmou a retirada da origem')
-        except Exception:
-            metadata['cleanup_reason'] = 'Retirada do conteúdo anterior ainda não confirmada; tentativa será retomada'
+        except Exception as exc:
+            if isinstance(exc, TimeoutError): category = 'timeout'
+            elif getattr(exc, 'code', None) in (401, 403): category = 'authorization'
+            elif getattr(exc, 'code', None) == 429: category = 'rate_limited'
+            op['last_error_code'] = category; _save(fd, op)
+            metadata['cleanup_reason'] = 'Retirada ainda não confirmada (' + category + '); tentativa será retomada'
             _write_json(fd, 'metadata.json', metadata)
             return False
         op['acked'].append(target['source_id'])
@@ -402,18 +427,23 @@ def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapte
         jobs = list((storage.bronze_dir / slug / '.jobs').glob('*.json'))
         result = engine._process_pending_locked(slug) if jobs else engine._reprocess_legacy_locked(slug)
         metadata = _metadata(fd, slug)
-        complete = result.get('status') == 'success'
+        complete = metadata.get('content_status') == 'current'
+        delivery = (result.get('result') or {}).get('zinom') or {}
+        delivered = delivery.get('status') in ('ok', 'disabled', 'local_only', 'not_needed')
         metadata.update(content_status='current' if complete else 'rebuilding', can_restore=False,
                         restore_reason='Novo processamento iniciado; cópia anterior preservada')
         _write_json(fd, 'metadata.json', metadata)
         if complete:
             op['phase'] = 'done'
             _save(fd, op)
-        return {**_projection(metadata, op), 'status': 'ok' if complete else 'pending',
-                'message': 'Conteúdo atualizado com os áudios restantes' if complete else 'Processamento dos áudios restantes pendente',
+        return {**_projection(metadata, op), 'status': 'ok' if complete and delivered else 'pending',
+                'message': ('Conteúdo atualizado com os áudios restantes' if delivered else
+                            'Conteúdo local atualizado; entrega ao Zinom pendente') if complete else
+                           'Processamento dos áudios restantes pendente',
                 'result': result.get('result', {})}
 
 
+@capture_start
 def restore_recording(slug, identity, storage=None):
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
@@ -432,6 +462,8 @@ def restore_recording(slug, identity, storage=None):
             originals = [(item, _backup(archive, item)) for item in op['files']]
             restored_meta = json.loads(next(text for item, text in originals if item['parts'] == ['metadata.json']))
             restored_meta['recording_revision'] = op['new_metadata']['recording_revision'] + 1
+            if restored_meta.get('exclusion_id'):
+                restored_meta.update(can_restore=False, restore_reason='Uma operação posterior alterou a reunião')
             accepted = {op.get('after_metadata_sha256')}
             if op['phase'] == 'restoring':
                 accepted.add(_sha(json.dumps(restored_meta, ensure_ascii=False, indent=2)))

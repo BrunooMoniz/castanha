@@ -88,7 +88,7 @@ def cmd_stop(args):
     engine = CastanhaEngine()
     print(t("cli.stop.processing"))
     res = engine.stop_recording()
-    if res.get("status") not in ("success", "partial"):
+    if res.get("status") not in ("success", "partial", "empty"):
         print(t("cli.erro", message=res.get("message")))
         sys.exit(1)
 
@@ -480,7 +480,7 @@ def cmd_retry(args):
             print(t("cli.retry.reprocessing", slug=s))
         res = engine.reprocess_meeting(s)
         resultados.append({"slug": s, **res})
-        if res.get("status") not in ("success", "partial"):
+        if res.get("status") not in ("success", "partial", "empty"):
             falhou = True
         elif (res.get("result") or {}).get("transcription_provider") == "failed":
             falhou = True
@@ -490,7 +490,9 @@ def cmd_retry(args):
         sys.exit(2 if falhou else 0)
 
     for r in resultados:
-        if r.get("status") in ("success", "partial"):
+        if r.get("status") == "empty":
+            print(r.get("message") or "Reunião sem gravações; anotações preservadas")
+        elif r.get("status") in ("success", "partial"):
             res_data = r.get("result", {})
             problemas = res_data.get("problemas") or []
             if not problemas:

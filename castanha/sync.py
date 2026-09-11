@@ -235,10 +235,16 @@ def pending_candidates(storage: MeetingStorage):
         if not bronze.is_dir():
             continue
         from castanha.recording_exclusion import pending_exclusion, applicable, needs_resume
-        if pending_exclusion(bronze) and applicable(bronze.name, storage):
-            if needs_resume(bronze.name, storage):
+        if pending_exclusion(bronze):
+            try:
+                if applicable(bronze.name, storage):
+                    if needs_resume(bronze.name, storage):
+                        candidates.append(("", bronze.name))
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                # Controle inválido vira erro desta reunião, sem bloquear outras.
                 candidates.append(("", bronze.name))
-            continue
+                continue
         from castanha.annotations import regeneration_pending
         if regeneration_pending(bronze):
             candidates.append(("", bronze.name))
