@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from typing import Any, Dict, List, Optional
 from castanha.config import get_state_dir, load_config
+from castanha.annotations import MANUAL_GUIDANCE
 from castanha.secure_io import (MAX_HTTP_ERROR_BYTES, read_bounded, read_json_bounded,
                                ensure_private_dir, read_private_json, write_private_json)
 
@@ -730,7 +731,7 @@ class MeetingSummarizer:
         for i, parte in enumerate(partes, 1):
             prompt = f"{cabecalho}\nParte {i} de {n} da transcrição:\n{parte}\n"
             try:
-                saida = self._call_llm(PARTIAL_SYSTEM_PROMPT, prompt)
+                saida = self._call_llm(PARTIAL_SYSTEM_PROMPT + ("\n" + MANUAL_GUIDANCE if MANUAL_GUIDANCE in cabecalho else ""), prompt)
             except LlmTooLarge:
                 if tentativa >= 2:
                     return ""
@@ -741,7 +742,7 @@ class MeetingSummarizer:
 
         juntas = "\n\n".join(parciais)
         try:
-            final = self._call_llm(COMBINE_SYSTEM_PROMPT, f"{cabecalho}\n{juntas}\n")
+            final = self._call_llm(COMBINE_SYSTEM_PROMPT + ("\n" + MANUAL_GUIDANCE if MANUAL_GUIDANCE in cabecalho else ""), f"{cabecalho}\n{juntas}\n")
         except LlmTooLarge:
             final = ""
         if not isinstance(final, str) or not final.strip():
@@ -759,6 +760,9 @@ class MeetingSummarizer:
 Data: {date_str}
 Convidados (presença não confirmada): {attendees_str}
 """
+        manual = metadata.get("manual_annotations") or ""
+        if manual.strip():
+            cabecalho += "\nContexto manual separado da transcrição:\n" + MANUAL_GUIDANCE + "\n" + manual + "\n"
         prompt = f"""{cabecalho}
 Transcrição Bruta:
 {raw_transcript}
@@ -769,23 +773,26 @@ Transcrição Bruta:
 
         # Hermes tem contexto grande: sem partes, e a transcrição íntegra é
         # anexada aqui em vez de pedir ao modelo que a reescreva.
-        sem_transcricao = self.provider == "hermes_ssh"
+        sem_transcricao = self.provider == "hermes_ssh" or bool(manual.strip())
         llm_output = ""
         narrativa = ""  # só o que a LLM escreveu, sem a transcrição anexada
-        if raw_transcript.strip():
+        if raw_transcript.strip() or manual.strip():
             try:
                 narrativa = llm_output = self._call_llm(
-                    SILVER_NOTES_SYSTEM_PROMPT if sem_transcricao else SILVER_SYSTEM_PROMPT, prompt)
-                if sem_transcricao and isinstance(narrativa, str) and narrativa.strip():
+                    (SILVER_NOTES_SYSTEM_PROMPT if sem_transcricao else SILVER_SYSTEM_PROMPT)
+                    + ("\n" + MANUAL_GUIDANCE if manual.strip() else ""), prompt)
+                if sem_transcricao and raw_transcript.strip() and isinstance(narrativa, str) and narrativa.strip():
                     llm_output = narrativa.strip() + f"\n\n## 📝 Transcrição Bruta\n{raw_transcript}\n"
             except LlmTooLarge as e:
                 print(f"[Castanha] Transcrição grande para uma chamada ({e}); resumindo em partes...", file=sys.stderr)
+                if not raw_transcript.strip():
+                    raise LlmUnavailable("Anotações excedem o contexto do provedor; síntese pendente") from e
                 narrativa = llm_output = self._silver_em_partes(title, cabecalho, raw_transcript, self._tamanho_da_parte(prompt, e))
 
         # Sem LLM configurada não existe resumo. O template abaixo diz isso em vez
         # de inventar "decisões tomadas" que ninguém tomou.
         if not isinstance(llm_output, str) or not llm_output.strip():
-            if raw_transcript.strip() and self._requires_summary():
+            if (raw_transcript.strip() or manual.strip()) and self._requires_summary():
                 raise LlmInvalidResponse("Resumo vazio; síntese pendente, transcrição preservada")
             motivo = (
                 "a gravação não tem áudio para resumir"
@@ -811,10 +818,20 @@ _Pendente: depende do resumo automático._
 {raw_transcript or "_(nenhum áudio capturado)_"}
 """
 
+        if manual.strip():
+            # Texto autoral preservado literalmente, antes da transcrição que o Gold remove.
+            section = "\n\n## Anotações manuais do usuário\n> Contexto escrito, não transcrição nem prova de fala.\n\n" + "\n".join("> " + line for line in manual.splitlines()) + "\n"
+            marker = "\n## 📝 Transcrição"
+            index = llm_output.find(marker)
+            llm_output = (llm_output[:index] + section + llm_output[index:] if index >= 0
+                          else llm_output + section)
+            if not raw_transcript.strip():
+                llm_output = "> Resumo das anotações manuais. Não houve gravação ou transcrição.\n\n" + llm_output
+
         # Adiciona Frontmatter YAML padrão para Markdown / Obsidian / LLM Wiki
         frontmatter = f"""---
-title: "{title}"
-date: "{date_str}"
+title: {json.dumps(title, ensure_ascii=False)}
+date: {json.dumps(date_str, ensure_ascii=False)}
 duration_seconds: {metadata.get('duration_seconds', 0)}
 mode: "{metadata.get('mode', 'dual')}"
 attendees:
@@ -835,11 +852,12 @@ attendees:
         return frontmatter + llm_output
 
     def _gold_response(self, prompt: str) -> Dict[str, Any]:
-        output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=True)
+        system = GOLD_SYSTEM_PROMPT + ("\n" + MANUAL_GUIDANCE if MANUAL_GUIDANCE in prompt else "")
+        output = self._call_llm(system, prompt, json_mode=True)
         if not _valid_gold(_extrair_json(output)):
             # Compatibilidade com modelos que recusam response_format mas
             # produzem o objeto válido sem esse modo. Inválido nunca é cacheado.
-            output = self._call_llm(GOLD_SYSTEM_PROMPT, prompt, json_mode=False)
+            output = self._call_llm(system, prompt, json_mode=False)
         data = _extrair_json(output)
         if _valid_gold(data):
             return _ground_gold(data)
@@ -920,7 +938,11 @@ attendees:
         # fonte de fatos. A reserva precisa só de título/data para contexto.
         groq_meta = {key: metadata[key] for key in ("title", "recorded_at") if key in metadata}
         groq_header = "Metadados da Reunião:\n" + json.dumps(groq_meta, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
-        if raw_transcript.strip():
+        manual = metadata.get("manual_annotations") or ""
+        if manual.strip():
+            header += "\n" + MANUAL_GUIDANCE + "\n"
+            groq_header += "\n" + MANUAL_GUIDANCE + "\n"
+        if raw_transcript.strip() or manual.strip():
             using_groq = self._provider_in_use() == "groq"
             try:
                 if using_groq:

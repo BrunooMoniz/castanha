@@ -33,6 +33,37 @@ def _evento_da_agenda(uid):
     return None
 
 
+def cmd_annotations(args):
+    from castanha.annotations import (AnnotationError, AnnotationConflict, MAX_BYTES,
+        get_annotations, save_annotations, create_annotations, regenerate_annotations)
+    try:
+        if args.annotations_cmd == "create":
+            result = create_annotations(args.title)
+        elif args.annotations_cmd == "get":
+            result = get_annotations(args.slug)
+        elif args.annotations_cmd == "save":
+            raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+            if len(raw) > MAX_BYTES:
+                raise AnnotationError("As anotações excedem 64 KiB")
+            result = save_annotations(args.slug, raw.decode("utf-8"),
+                                      expected_sha=args.expected_revision)
+        else:
+            result = regenerate_annotations(args.slug)
+    except AnnotationConflict as exc:
+        result = {"status": "conflict", "slug": args.slug, "message": str(exc)}
+    except AnnotationError as exc:
+        result = {"status": "error", "slug": getattr(args, "slug", None), "message": str(exc)}
+    except (OSError, ValueError, TypeError, KeyError):
+        result = {"status": "error", "slug": getattr(args, "slug", None),
+                  "message": "Não foi possível acessar as anotações com segurança; arquivos preservados"}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(result.get("message") or result.get("text") or result["status"])
+    if result["status"] in ("error", "conflict"):
+        sys.exit(1)
+
+
 def cmd_start(args):
     engine = CastanhaEngine()
     mode = "mic_only" if args.mic_only else (args.mode or "dual")
@@ -699,6 +730,20 @@ def main():
     p_recs_del.add_argument("arquivo", nargs="?", default=None)
     p_recs_del.add_argument("--json", action="store_true")
     p_recs_del.set_defaults(func=cmd_delete_recording)
+
+    p_annotations = subparsers.add_parser("annotations", help="Anotações manuais da reunião")
+    annotations_sub = p_annotations.add_subparsers(dest="annotations_cmd", required=True)
+    for operation in ("get", "save", "regenerate", "create"):
+        command = annotations_sub.add_parser(operation)
+        command.add_argument("--json", action="store_true")
+        if operation == "create":
+            command.add_argument("--title", required=True)
+        else:
+            command.add_argument("slug")
+        if operation == "save":
+            command.add_argument("--stdin", action="store_true", required=True)
+            command.add_argument("--expected-revision", default=None)
+        command.set_defaults(func=cmd_annotations)
 
     # Sync
     p_sync = subparsers.add_parser("sync", help=t("cli.help.sync"))

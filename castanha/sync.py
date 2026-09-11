@@ -31,6 +31,8 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def meeting_needs_sync(metadata: Dict[str, Any]) -> bool:
     """Precisa de sync quando nunca foi, ou quando a última tentativa falhou."""
+    if metadata.get("source") == "manual" and not metadata.get("recordings"):
+        return False
     z = metadata.get("zinom") or {}
     if not isinstance(z, dict):
         return True
@@ -113,6 +115,12 @@ def sync_meeting(slug: str, storage: Optional[MeetingStorage] = None) -> Dict[st
     bronze = storage.bronze_dir / slug
     if not bronze.exists():
         return {"slug": slug, "status": "error", "errors": [f"Reunião {slug} não existe no Bronze"]}
+    from castanha.annotations import regeneration_pending, regenerate_annotations
+    if regeneration_pending(bronze):
+        return regenerate_annotations(slug, storage, resume=True)
+    annotation_metadata = _read_json(bronze / "metadata.json")
+    if annotation_metadata.get("source") == "manual" and not annotation_metadata.get("recordings"):
+        return {"slug": slug, "status": "local_only", "reason": "Anotações manuais locais; sem envio ao Zinom"}
     # Manifestos legados congelam inclusive metadata.json. Não passar pelo
     # escritor nativo: somente retomar uma recuperação já iniciada explicitamente.
     recovery = bronze / ".legacy-recovery"
@@ -222,6 +230,13 @@ def pending_candidates(storage: MeetingStorage):
     z_cfg = load_config().get("zinom", {})
     for bronze in storage.bronze_dir.iterdir():
         if not bronze.is_dir():
+            continue
+        from castanha.annotations import regeneration_pending
+        if regeneration_pending(bronze):
+            candidates.append(("", bronze.name))
+            continue
+        annotation_metadata = _read_json(bronze / "metadata.json")
+        if annotation_metadata.get("source") == "manual" and not annotation_metadata.get("recordings"):
             continue
         recovery = bronze / ".legacy-recovery"
         if (recovery.exists() or recovery.is_symlink()) and not (bronze / ".brain-ingest" / "destination.json").exists():
