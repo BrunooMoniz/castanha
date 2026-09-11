@@ -37,7 +37,11 @@ function notesDocument(value, title) {
   String(value || "").split(/\r?\n/).forEach(function(line) {
     var fenceMatch = line.match(/^\s*(`{3,}|~{3,})/)
     if (fenceMatch && !fence) {
-      flush(); fence = fenceMatch[1][0]
+      flush()
+      if (line.indexOf(fenceMatch[1], line.indexOf(fenceMatch[1]) + fenceMatch[1].length) >= 0) {
+        blocks.push({level: 0, text: line}); firstContent = false; return
+      }
+      fence = fenceMatch[1][0]
       paragraph.push(line); firstContent = false; return
     }
     if (fenceMatch && fence === fenceMatch[1][0]) {
@@ -49,7 +53,7 @@ function notesDocument(value, title) {
       var text = plainNotes(heading[2]).trim()
       if (!(firstContent && heading[1].length === 1 && text === String(title || "").trim()))
         blocks.push({level: heading[1].length, text: text})
-      var label = text.toLocaleLowerCase().replace(/^[^a-zà-ÿ]+/, "")
+      var label = text.toLocaleLowerCase().replace(/^[^a-zà-ÿ]+/, "").replace(/\s*[:：]\s*$/, "")
       activeSection = /^decis(?:ões|oes)(?: tomadas)?$/.test(label) ? "decisions"
         : /^(pr(?:ó|o)ximos passos|itens de a(?:ç|c)(?:ã|a)o|a(?:ç|c)(?:ões|oes)|tarefas|action items)$/.test(label) ? "actions" : ""
       firstContent = false

@@ -51,4 +51,11 @@ TestCase {
     compare(Logic.extraFacts(["Decisão adicional"], Logic.notesDocument("## Decisões", ""), "decisions").length, 1)
     compare(notes, "## Decisões\n• Publicar o protótipo.\n\n## Próximos passos\n- Preparar demonstração\n\n## Contexto\nMudar o contrato.")
   }
+  function test_heading_colon_and_single_line_fence_preserve_structure() {
+    var doc = Logic.notesDocument("```codigo```\n## Decisões:\n- Publicar o protótipo.", "")
+    compare(doc.blocks[0].text, "```codigo```")
+    compare(doc.blocks[1].level, 2)
+    compare(Logic.extraFacts(["Publicar o protótipo."], doc, "decisions").length, 0)
+  }
+
 }
