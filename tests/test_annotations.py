@@ -210,10 +210,23 @@ class TestAnnotations(unittest.TestCase):
         result = self.run_summary()
         self.assertEqual(result["status"], "pending")
         self.assertEqual(result["summary_status"], "complete")
+        self.assertIn("entrega pendente", result["message"])
         self.summarizer.reset_mock()
         self.adapter.ingest_meeting.return_value = {"status": "ok"}
         self.assertEqual(self.run_summary(resume=True)["status"], "ok")
         self.summarizer.generate_silver.assert_not_called()
+
+    def test_native_success_clears_old_pending_summary_projection(self):
+        metadata = self.recorded(); self.save()
+        metadata.update(summary_status="pending", processing_status="pending", summary_error="old failure")
+        (self.bronze / "metadata.json").write_text(json.dumps(metadata))
+        result = self.run_summary()
+        current = self.storage.get_meeting(self.slug)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(current["summary_status"], "complete")
+        self.assertEqual(current["processing_status"], "complete")
+        self.assertEqual(current["summary_error"], "")
+        self.assertEqual(self.adapter.ingest_meeting.call_args.args[0]["processing_status"], "complete")
 
     def test_changed_transcript_blocks_resume(self):
         self.recorded(); self.save()

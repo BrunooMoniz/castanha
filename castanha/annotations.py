@@ -278,6 +278,12 @@ def regenerate_annotations(slug, storage=None, *, resume=False, summarizer=None,
             metadata.update(summary_status="complete", summary_provider=checkpoint["summary_provider"])
             _write_json(fd, "metadata.json", metadata)
         else:
+            # O resumo atual substitui somente o estado operacional nativo.
+            # Manifestos legados acima continuam byte a byte preservados.
+            metadata.update(summary_status="complete", processing_status="complete",
+                            summary_provider=checkpoint["summary_provider"])
+            metadata.pop("summary_error", None)
+            _write_json(fd, "metadata.json", metadata)
             from castanha.zinom_adapter import ZinomAdapter
             adapter = adapter or ZinomAdapter()
             delivery = adapter.ingest_meeting(metadata, checkpoint["silver"], checkpoint["gold"],
@@ -287,9 +293,12 @@ def regenerate_annotations(slug, storage=None, *, resume=False, summarizer=None,
         changed = _hash(_read(fd, "annotations.md", limit=MAX_BYTES, missing="")) != checkpoint["annotations_sha256"]
         checkpoint.update(status=("ready" if delivery.get("status") in ("pending", "error") else "done"), delivery=delivery)
         _write_json(fd, CHECKPOINT, checkpoint)
+        message = ("Resumo local atualizado; entrega pendente" if checkpoint["status"] == "ready" else
+                   "Resumo atualizado com as anotações manuais")
+        if changed:
+            message += "; há anotações novas para atualizar"
         return {"slug": slug, "status": ("pending" if checkpoint["status"] == "ready" else "ok"), "summary_status": "complete",
-                "message": ("Resumo anterior concluído; há anotações novas para atualizar" if changed else
-                            "Resumo atualizado com as anotações manuais"),
+                "message": message,
                 "notes_changed_since_request": changed,
                 "annotations_sha256": checkpoint["annotations_sha256"], "delivery": delivery,
                 "silver_file": str(storage.silver_dir / (slug + ".md")),
