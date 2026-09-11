@@ -201,7 +201,7 @@ ShellRoot {
       Qt.callLater(function() {
         if (expectError) {
           root.checar(code !== 0 && castanha.notesActionError !== "", "falha de exclusão não ficou visível")
-          root.terminar()
+          root.testRetry(slug, 0)
         } else {
           root.checar(code === 0 && castanha.notesActionError === "", "exclusão individual falhou")
           root.testDeleteAudio(slug, true)
@@ -209,7 +209,60 @@ ShellRoot {
       })
     }
     process.exited.connect(completed)
+    var state = root.prepareLibraryState(slug)
     castanha.deleteRecording(slug, "first.wav")
+    root.checkLibraryInvalidated(state, "exclusão")
+  }
+
+  function prepareLibraryState(slug) {
+    var library = null, player = null
+    for (var i = 0; i < castanha.data.length; i++) {
+      if (typeof castanha.data[i].prepareRecordingMutation === "function") library = castanha.data[i]
+    }
+    root.checar(!!library, "biblioteca compartilhada não encontrada")
+    if (!library) return null
+    for (var j = 0; j < library.data.length; j++) {
+      if (library.data[j].objectName === "libraryMediaPlayer") player = library.data[j]
+    }
+    root.checar(!!player, "player compartilhado não encontrado")
+    library.selectedSlug = slug
+    library.detail = {slug: slug, title: "Fixture", status_label: "Fixture pronta", summary: "Resumo sintético anterior", transcript: "Texto.",
+      decisions: [], action_items: [], warnings: [], segments: [], recordings: []}
+    library.audioIndex = 0; library.playWhenReady = true; library.pendingSeek = 120
+    if (player) { player.audioOutput.volume = 0; player.source = "file://" + Quickshell.env("CASTANHA_TEST_AUDIO") }
+    return {library: library, player: player}
+  }
+
+  function checkLibraryInvalidated(state, operation) {
+    if (!state) return
+    root.checar(state.library.detail === null && state.library.audioIndex === -1
+      && !state.library.playWhenReady && state.library.pendingSeek === -1,
+      operation + " pelo painel não invalidou biblioteca compartilhada")
+    root.checar(state.player && state.player.source.toString() === "", operation + " pelo painel deixou mídia carregada")
+  }
+
+  function testRetry(slug, index) {
+    if (index >= 4) return root.terminar()
+    var state = root.prepareLibraryState(slug)
+    castanha.retryMeeting(slug)
+    root.checkLibraryInvalidated(state, "retry")
+    var process = null
+    for (var i = 0; i < castanha.data.length; i++) {
+      var obj = castanha.data[i]
+      if (obj.command && obj.command.length > 1 && obj.command[1] === "retry") process = obj
+    }
+    if (!process) { root.checar(false, "processo retry não encontrado"); return root.terminar() }
+    var completed = function(code) {
+      process.exited.disconnect(completed)
+      Qt.callLater(function() {
+        if (index === 0) root.checar(code !== 0 && castanha.notesActionError === "Falha sintética de retry", "erro retry não ficou visível")
+        else if (index === 3) root.checar(code !== 0 && castanha.notesActionError !== "" && castanha.notesActionError.indexOf("Sucesso") < 0, "rc1 retry aceitou mensagem de sucesso")
+        else root.checar(code === 0 && castanha.notesActionError === "", "retry pending/empty virou falha")
+        root.checar(castanha.retryingSlug === "", "retry deixou indicador preso")
+        root.testRetry(slug, index + 1)
+      })
+    }
+    process.exited.connect(completed)
   }
 
   function refreshAndWait(callback) {

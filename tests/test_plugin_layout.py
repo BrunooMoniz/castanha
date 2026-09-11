@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -306,7 +307,28 @@ class PluginLayoutTest(unittest.TestCase):
             environment["QT_QPA_PLATFORM"] = "wayland"
             environment["XDG_CONFIG_HOME"] = str(acervo["xdg_config"])
             environment["XDG_STATE_HOME"] = str(acervo["xdg_state"])
-            environment["PATH"] = f"{ROOT / 'bin'}:{environment.get('PATH', '')}"
+            shim_bin = Path(temporary) / "retry-shim"
+            shim_bin.mkdir()
+            shim = shim_bin / "castanha"
+            shim.write_text(f"#!{sys.executable}\n" + """
+import json, os, pathlib, sys
+if len(sys.argv) > 1 and sys.argv[1] == 'retry':
+    marker = pathlib.Path(os.environ['CASTANHA_TEST_RETRY_CALLS'])
+    count = int(marker.read_text()) if marker.exists() else 0
+    marker.write_text(str(count + 1))
+    responses = [({'status': 'error', 'message': 'Falha sintética de retry'}, 1),
+                 ({'status': 'ok', 'results': [{'status': 'pending'}]}, 0),
+                 ({'status': 'empty'}, 0),
+                 ({'status': 'ok', 'message': 'Sucesso inventado'}, 1)]
+    output, code = responses[count]
+    print(json.dumps(output)); sys.exit(code)
+os.execv(os.environ['CASTANHA_TEST_REAL_CLI'], ['castanha', *sys.argv[1:]])
+""")
+            shim.chmod(0o700)
+            environment["CASTANHA_TEST_RETRY_CALLS"] = str(Path(temporary) / "retry-count")
+            environment["CASTANHA_TEST_REAL_CLI"] = str(ROOT / "bin/castanha")
+            environment["CASTANHA_TEST_AUDIO"] = str(Path(temporary) / "meetings/bronze" / acervo["slug"] / "second.wav")
+            environment["PATH"] = f"{shim_bin}:{ROOT / 'bin'}:{environment.get('PATH', '')}"
             result = subprocess.run(
                 ["quickshell", "--no-duplicate", "--path", str(config / "shell.qml"), "--no-color"],
                 text=True,
@@ -317,11 +339,20 @@ class PluginLayoutTest(unittest.TestCase):
                 check=False,
             )
 
+            self.assertEqual((Path(temporary) / "retry-count").read_text(), "4", result.stdout)
             note_dir = acervo["xdg_config"].parent / "meetings" / "bronze" / acervo["slug"]
             self.assertFalse((note_dir / "first.wav").exists(), result.stdout)
             self.assertTrue((note_dir / "second.wav").exists(), result.stdout)
-            self.assertTrue((note_dir / "transcript_raw.txt").exists())
-            self.assertTrue((note_dir.parent.parent / "silver" / (acervo["slug"] + ".md")).exists())
+            self.assertFalse((note_dir / "transcript_raw.txt").exists())
+            self.assertFalse((note_dir.parent.parent / "silver" / (acervo["slug"] + ".md")).exists())
+            metadata = json.loads((note_dir / "metadata.json").read_text())
+            self.assertEqual(metadata['content_status'], 'invalidated')
+            archive = note_dir / '.recording-exclusions' / metadata['exclusion_id']
+            operation = json.loads((archive / 'operation.json').read_text())
+            import hashlib
+            self.assertEqual(hashlib.sha256((archive / 'audio').read_bytes()).hexdigest(), operation['audio_sha256'])
+            transcript = next(item for item in operation['files'] if item['parts'] == ['transcript_raw.txt'])
+            self.assertEqual((archive / transcript['backup']).read_text(), 'Texto.')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CASTANHA_PANEL_OK", result.stdout)
         self.assertNotIn("CASTANHA_PANEL_FAIL", result.stdout)

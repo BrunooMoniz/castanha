@@ -96,9 +96,10 @@ class TestMeetingNotesUi(unittest.TestCase):
         self.assertTrue(shutil.which('quickshell'), 'quickshell obrigatório para prova do editor')
         with tempfile.TemporaryDirectory(prefix='castanha-notes-ui-') as temporary:
             root = Path(temporary)
-            for name in ['MeetingNotes.qml'] + [path.name for path in ROOT.glob('Library*') if path.is_file()]:
+            for name in ['MeetingNotes.qml'] + [path.name for path in list(ROOT.glob('Library*')) + [ROOT/'RecordingActions.qml'] if path.is_file()]:
                 (root/name).symlink_to(ROOT/name)
             (root/'Commons').symlink_to(SHELL/'Commons', target_is_directory=True)
+            (root/'Ui').symlink_to(SHELL/'Ui', target_is_directory=True)
             for slug in ('a', 'b'):
                 (root/(slug+'.json')).write_text(json.dumps({'text': 'initial '+slug, 'revision': 'r1'}))
             (root/'fake.py').write_text(FAKE_CLI)

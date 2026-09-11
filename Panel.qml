@@ -61,7 +61,7 @@ Panel {
   IpcHandler {
     enabled: root.manageIpc
     target: "castanha-view"
-    function health(): string { return "castanha-gui-v5" }
+    function health(): string { return "castanha-gui-v6" }
     function library(): void { root.openLibrary("") }
   }
   readonly property var meeting: isBusy ? currentMeeting : nextMeeting
@@ -81,7 +81,7 @@ Panel {
   readonly property var dayUpcoming: upcoming.filter(function(m) { return !!m.all_day })
   readonly property color waiting: Qt.hsla(0.10, 0.72, darkPanel ? 0.72 : 0.33, 1)
   function openLibrary(slug) { root.close(); library.showMeeting(String(slug || "")) }
-  LibraryWindow { id: library; foreground: root.foreground; fontFamily: root.fontFamily }
+  LibraryWindow { id: library }
 
 
   // Uma reunião aberta por vez. Vazio = nenhuma.
@@ -455,6 +455,7 @@ Panel {
   Process {
     id: deleteRecProcess
     objectName: "castanhaDeleteAudioProcess"
+    property string requestedSlug: ""
     running: false
     stdout: StdioCollector {}
     onExited: function(code) {
@@ -465,6 +466,7 @@ Panel {
       } catch (error) {
         root.notesActionError = "Não foi possível apagar o áudio selecionado. Atualize a reunião e tente novamente."
       }
+      library.finishRecordingMutation(requestedSlug)
       root.refreshNotes()
     }
   }
@@ -472,8 +474,11 @@ Panel {
   function deleteRecording(slug, filename) {
     if (!slug || deleteRecProcess.running) return
     root.notesActionError = ""
-    var args = ["castanha", "delete-recording", "--json", "--", String(slug)]
+    var note = root.recentNotes.find(function(item) { return item.slug === slug })
+    var args = ["castanha", "recordings", "exclude", "--json", "--expected-revision", String(note ? note.recording_revision || 0 : 0), "--", String(slug)]
     if (filename) args.push(String(filename))
+    library.prepareRecordingMutation(String(slug))
+    deleteRecProcess.requestedSlug = String(slug)
     deleteRecProcess.command = args
     deleteRecProcess.running = true
   }
@@ -497,16 +502,18 @@ Panel {
   Process {
     id: retryProcess
     running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.retryingSlug = ""
-        root.refreshNotes()
-        stateFile.reload()
-      }
-    }
-    onExited: {
+    property string requestedSlug: ""
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      try {
+        var envelope = JSON.parse(stdout.text)
+        var result = Array.isArray(envelope.results) ? envelope.results[0] : envelope
+        if (code !== 0 || !result || ["ok", "success", "partial", "pending", "empty"].indexOf(result.status) < 0)
+          throw new Error(result && result.status === "error" && result.message ? result.message : "Não foi possível reprocessar a reunião. Atualize e tente novamente.")
+        root.notesActionError = ""
+      } catch (error) { root.notesActionError = String(error.message || error) }
       root.retryingSlug = ""
+      library.finishRecordingMutation(requestedSlug)
       root.refreshNotes()
       stateFile.reload()
     }
@@ -514,6 +521,9 @@ Panel {
 
   function retryMeeting(slug) {
     if (!slug || retryProcess.running) return
+    root.notesActionError = ""
+    library.prepareRecordingMutation(String(slug))
+    retryProcess.requestedSlug = String(slug)
     root.retryingSlug = slug
     retryProcess.command = ["castanha", "retry", String(slug), "--json"]
     retryProcess.running = true
@@ -1594,6 +1604,16 @@ Panel {
           onClicked: root.renameMeeting(noteRow.note ? noteRow.note.slug : "", renomearField.text)
         }
 
+        Text {
+          width: parent.width
+          visible: !!root.deleteAudioArmed && root.deleteAudioArmed.indexOf(noteRow.note.slug + "/") === 0
+          text: "O áudio deixará de alimentar a transcrição, o resumo e os insights. Uma cópia local será preservada. A retirada do Zinom não poderá ser desfeita."
+          wrapMode: Text.Wrap
+          textFormat: Text.PlainText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
         Repeater {
           model: noteRow.gravacoes
           Button {
@@ -1601,7 +1621,7 @@ Panel {
             required property int index
             readonly property string recordingName: String(modelData.filename || "")
             readonly property string armKey: noteRow.note.slug + "/" + recordingName
-            text: (root.deleteAudioArmed === armKey ? "Confirmar exclusão do áudio" : "Apagar áudio")
+            text: (root.deleteAudioArmed === armKey ? "Confirmar exclusão" : "Excluir áudio da reunião")
               + (noteRow.gravacoes.length > 1 ? " " + (index + 1) : "")
             enabled: recordingName !== "" && !deleteRecProcess.running
             foreground: root.deleteAudioArmed === armKey ? root.contrasting(root.urgent) : root.foreground

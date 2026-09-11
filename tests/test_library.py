@@ -67,6 +67,26 @@ class TestLibrary(unittest.TestCase):
         for excluded in ('Resumo completo', 'A proposta', 'file://', 'secret_fixture', 'calendar_event', 'sha256'):
             self.assertNotIn(excluded, encoded)
 
+    def test_invalidated_content_hides_stale_derivatives_until_rebuilt(self):
+        slug, bronze = self.meeting()
+        path = bronze / 'metadata.json'
+        meta = json.loads(path.read_text())
+        for status in ('invalidated', 'rebuilding', 'empty'):
+            meta.update(content_status=status, recording_revision=2, can_reprocess=status != 'empty')
+            path.write_text(json.dumps(meta))
+            result = self.library.detail(slug)['meeting']
+            self.assertEqual(result['recording_revision'], 2)
+            self.assertEqual(result['summary'], '')
+            self.assertEqual(result['transcript'], '')
+            self.assertEqual(result['decisions'], [])
+            self.assertEqual(result['segments'], [])
+            self.assertFalse(result['has_summary'])
+            self.assertFalse(result['has_transcript'])
+            self.assertNotEqual(result['status_label'], 'Concluída')
+        meta.update(cleanup_status='pending', zinom={'status': 'pending_cleanup'})
+        path.write_text(json.dumps(meta))
+        self.assertEqual(self.library.list()['meetings'][0]['status_label'], 'Limpeza no Zinom pendente')
+
     def test_manual_annotations_are_local_without_fake_transcript(self):
         from castanha.annotations import create_annotations
         item = create_annotations("Anotação sem gravação", self.storage)
@@ -206,6 +226,39 @@ class TestLibrary(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertEqual(json.loads(bad.stdout)['status'], 'error')
 
+    def test_refresh_during_inflight_detail_discards_stale_response(self):
+        config = self.root / 'race-shell'; config.mkdir()
+        for name in ('Commons', 'Ui'):
+            (config / name).symlink_to(SHELL / name, target_is_directory=True)
+        for source in list(ROOT.glob('Library*')) + [ROOT / 'MeetingNotes.qml', ROOT / 'RecordingActions.qml']:
+            (config / source.name).symlink_to(source)
+        fake = self.root / 'delayed.py'
+        fake.write_text("import json,pathlib,time,sys\nif sys.argv[2]!='library': print(json.dumps({'status':'ok','slug':'race','text':'','revision':0})); raise SystemExit(0)\nif len(sys.argv)==4: print(json.dumps({'status':'ok','meetings':[]})); raise SystemExit(0)\np=pathlib.Path(sys.argv[1]); n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1))\ntime.sleep(.4)\nprint(json.dumps({'status':'ok','meeting':{'slug':'race','title':'Fixture','recording_revision':n,'summary':'STALE' if n==0 else '', 'transcript':'', 'decisions':[], 'action_items':[], 'recordings':[], 'segments':[], 'warnings':[], 'status_label':'Sem gravações válidas', 'content_status':'current' if n==0 else 'empty'}}))\n")
+        command = ['python3', str(fake), str(self.root / 'calls')]
+        (config / 'shell.qml').write_text('''import QtQuick
+import Quickshell
+ShellRoot {
+  property int ticks: 0
+  LibraryWindow {
+    id: library; cliCommand: COMMAND
+    onDetailChanged: if (detail && detail.summary === "STALE") { console.error("STALE_RESPONSE_APPLIED"); Qt.exit(1) }
+  }
+  Timer { interval: 50; running: true; repeat: true; onTriggered: {
+    ticks++
+    if (ticks === 1) library.selectMeeting("race")
+    if (ticks === 3) { library.prepareRecordingMutation("race"); library.finishRecordingMutation("race") }
+    if (library.current && library.current.recording_revision === 1 && !library.detailLoading) {
+      console.log("DETAIL_RACE_OK"); Qt.exit(0)
+    }
+    if (ticks > 60) { console.error("DETAIL_RACE_TIMEOUT " + library.detailError + " revision=" + (library.current ? library.current.recording_revision : "none")); Qt.exit(1) }
+  } }
+}'''.replace('COMMAND', json.dumps(command)))
+        result = subprocess.run(['quickshell', '--no-duplicate', '--path', str(config / 'shell.qml'), '--no-color'],
+                                capture_output=True, text=True, timeout=6,
+                                env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DETAIL_RACE_OK', result.stdout + result.stderr)
+
     def test_real_quickshell_library_loads_local_cli_and_audio(self):
         self.assertTrue(os.environ.get('WAYLAND_DISPLAY'), 'verificação real exige sessão Wayland')
         self.assertTrue(shutil.which('quickshell'), 'quickshell precisa estar instalado')
@@ -213,7 +266,7 @@ class TestLibrary(unittest.TestCase):
         config = self.root/'shell'; config.mkdir()
         for name in ('Commons', 'Ui'):
             (config/name).symlink_to(SHELL/name, target_is_directory=True)
-        for file in list(ROOT.glob('Library*')) + [ROOT/'MeetingNotes.qml']:
+        for file in list(ROOT.glob('Library*')) + [ROOT/'MeetingNotes.qml', ROOT/'RecordingActions.qml']:
             (config/file.name).symlink_to(file)
         copy_path = self.root/'copied.txt'
         shell = '''import QtQuick
@@ -253,7 +306,7 @@ ShellRoot {
     if (!media || !media.seekable || media.duration < 2900) { console.log("LIBRARY_FAIL audio not loaded"); Qt.exit(1) }
     var speed = findObject(library, "librarySpeed", 0)
     if (!speed) { console.log("LIBRARY_FAIL speed control missing"); Qt.exit(1) }
-    speed.currentIndex = 3; speed.activated(3)
+    speed.changed("1.5")
     if (media.playbackRate !== 1.5) { console.log("LIBRARY_FAIL speed control"); Qt.exit(1) }
     library.seekSegment(library.current.segments[0])
     library.copyText(library.current.transcript)

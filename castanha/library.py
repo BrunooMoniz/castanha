@@ -164,10 +164,25 @@ class MeetingLibrary:
         manual = meta.get('source') == 'manual'
         if manual:
             pending = bool(warnings) or not present['has_summary'] or meta.get('summary_status') in ('pending', 'error', 'failed')
-        entry = {'source': _text(meta.get('source')), 'slug': slug, 'title': _text(meta.get('title')) or _title_from_slug(slug),
+        content_status = _text(meta.get('content_status'))
+        invalidated = content_status in ('invalidated', 'empty', 'rebuilding')
+        if invalidated:
+            present = {key: False for key in present}
+            pending = content_status != 'empty'
+        cleanup_pending = meta.get('cleanup_status') == 'pending' or delivery.get('status') == 'pending_cleanup'
+        if cleanup_pending:
+            pending = True
+        entry = {'content_status': content_status,
+                 'recording_revision': int(_number(meta.get('recording_revision'))),
+                 'can_reprocess': bool(meta.get('can_reprocess', bool(audio))),
+                 'can_restore': meta.get('can_restore') is True,
+                 'exclusion_id': _text(meta.get('exclusion_id')),
+                 'cleanup_status': _text(meta.get('cleanup_status')),
+                 'remote_cleanup_required': meta.get('remote_cleanup_required') is True or delivery.get('status') in ('ok', 'success', 'synced', 'pending_cleanup'),
+                 'source': _text(meta.get('source')), 'slug': slug, 'title': _text(meta.get('title')) or _title_from_slug(slug),
                  'when': _text(meta.get('recorded_at')), 'duration_seconds': _number(meta.get('duration_seconds')),
-                 'status': 'pending' if pending else 'complete',
-                 'status_label': ('Resumo local pronto' if manual and not pending else 'Anotações locais' if manual else 'Gravação sem áudio detectado' if meta.get('audio_status') == 'sem_audio'
+                 'status': 'pending' if pending else 'empty' if content_status == 'empty' else 'complete',
+                 'status_label': ('Limpeza no Zinom pendente' if cleanup_pending else 'Sem gravações válidas' if content_status == 'empty' else 'Reprocessando os áudios atuais' if content_status == 'rebuilding' else 'Áudios alterados · reprocessamento necessário' if invalidated else 'Resumo local pronto' if manual and not pending else 'Anotações locais' if manual else 'Gravação sem áudio detectado' if meta.get('audio_status') == 'sem_audio'
                      else 'Microfone sem áudio na gravação' if meta.get('audio_status') == 'mic_mudo'
                      else 'Notas prontas · entrega não confirmada'
                      if present['has_summary'] and delivery.get('status') not in ('ok', 'success', 'synced', 'disabled')
@@ -209,6 +224,9 @@ class MeetingLibrary:
                               label='Tempos da transcrição', json_data=True) or {}
         if silver is None and gold is None and transcript is None and not recordings and not meta:
             raise LibraryError('Reunião não encontrada ou indisponível para leitura.')
+        if entry['content_status'] in ('invalidated', 'empty', 'rebuilding'):
+            # Até a reconstrução terminar, derivados antigos nunca são conteúdo atual.
+            silver, gold, transcript, timeline = None, None, None, {}
         decisions, actions = [], []
         for value in (gold or {}).get('decisions', []) if isinstance((gold or {}).get('decisions', []), list) else []:
             line = value if isinstance(value, str) else value.get('decision') if isinstance(value, dict) else ''

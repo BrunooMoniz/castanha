@@ -1,8 +1,8 @@
 # Biblioteca local de reuniões
 
-`LibraryWindow { id: library; foreground: root.foreground; fontFamily: root.fontFamily }`
+`LibraryWindow { id: library }`
 
-A janela começa invisível. `library.showMeeting(slug)` abre o detalhe; `library.showMeeting("")` abre o histórico. Fechar interrompe somente a reprodução da biblioteca. `background`, `accent` e `readingFontFamily` são opcionais; o texto de leitura usa Sans. `cliCommand` e `clipboardCommand` permitem fixtures isoladas nos testes.
+A janela começa invisível. `library.showMeeting(slug)` abre o detalhe; `library.showMeeting("")` abre o histórico. Fechar interrompe somente a reprodução da biblioteca. Cores, fontes, arredondamento e bordas seguem os tokens dinâmicos do Omarchy. `background`, `accent` e `readingFontFamily` são opcionais. `cliCommand` e `clipboardCommand` permitem fixtures isoladas nos testes.
 
 `castanha library --json` retorna todas as reuniões locais, com título, data, duração, disponibilidade e estado. `castanha library SLUG --json` acrescenta notas, decisões e próximos passos do Gold, texto integral, segmentos existentes e áudios originais. Falhas retornam JSON de erro e código diferente de zero. A consulta não usa rede, não executa LLM e não altera os arquivos das reuniões.
 
@@ -20,3 +20,11 @@ O estado utiliza os metadados locais. Sem confirmação conhecida de entrega, a 
 - `QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml/tst_library.qml -o -,txt`: filtros, tempos, URLs locais e texto literal.
 
 Risco AMARELO: nova interface e nova consulta local. Reversão: restaurar a revisão anterior pelo deployment do projeto; nenhum dado de reunião é migrado.
+
+## Excluir gravações e reprocessar
+
+Na aba Áudio, cada gravação tem Ouvir e Excluir. A exclusão exige confirmação, interrompe a reprodução e envia o identificador exato do arquivo e a revisão observada. Uma cópia recuperável fica na quarentena da reunião. A transcrição, o resumo e os insights anteriores deixam de ser apresentados como válidos. Minhas notas e a reunião são preservadas.
+
+Reprocessar reunião usa somente os áudios restantes. Sem áudio válido, o botão fica desabilitado e a reunião não dispara transcrição ou síntese. Pendências de processamento e de retirada do conteúdo no Zinom continuam visíveis. Desfazer exclusão só aparece quando o backend confirma que a restauração ainda é permitida; o início de uma retirada remota torna essa restauração indisponível.
+
+Risco VERMELHO para exclusão: testes de retomada, isolamento e preservação dos originais, mais revisão independente antes da entrega. A quarentena preserva o áudio e os snapshots locais. Tombstones remotos não são desfeitos pelo rollback de código.

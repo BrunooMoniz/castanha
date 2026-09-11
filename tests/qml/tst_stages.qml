@@ -13,6 +13,15 @@ TestCase {
         compare(StageStatus.status(n).label, "Resumo local pronto")
         compare(StageStatus.stages(n)[3].state, "removed")
     }
+    function test_excluded_recording_never_exposes_old_complete_stages() {
+        var n = {content_status: "invalidated", recordings_count: 1, has_transcript: true, summary_status: "complete", zinom: {status: "ok"}}
+        compare(StageStatus.stages(n)[1].state, "waiting")
+        compare(StageStatus.status(n).tone, "waiting")
+        n.content_status = "empty"; n.recordings_count = 0
+        compare(StageStatus.status(n).label, "Sem gravações válidas")
+        n.cleanup_status = "pending"
+        compare(StageStatus.status(n).label, "Limpeza no Zinom pendente")
+    }
     function test_summary_pending_never_becomes_transcription_failure() {
         var n = {recordings_count: 1, has_transcript: true, summary_status: "pending", summary_error: "Cota esgotada", zinom: {}}
         compare(StageStatus.stages(n)[1].state, "done")

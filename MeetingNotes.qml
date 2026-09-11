@@ -2,15 +2,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell.Io
+import qs.Commons
+import qs.Ui as OmarchyUi
 
 ColumnLayout {
   id: root
   property string meetingSlug: ""
   property var cliCommand: ["castanha"]
-  SystemPalette { id: systemPalette }
-  property color foreground: systemPalette.windowText
+  property color foreground: Color.popups.text
   property color accent: foreground
-  property string fontFamily: "sans-serif"
+  property string fontFamily: Style.font.family
   property var buffers: ({})
   property string regenerationMessage: ""
   property string regenerateAfterSave: ""
@@ -22,7 +23,7 @@ ColumnLayout {
   readonly property bool loading: !currentBuffer || !currentBuffer.loaded
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.7)
   signal summaryUpdated(string slug)
-  spacing: 12
+  spacing: Style.space(12)
 
   function put(slug, buffer) {
     var next = Object.assign({}, buffers)
@@ -163,22 +164,24 @@ ColumnLayout {
     }
   }
 
-  Text { text: "Minhas anotações"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: 21; font.bold: true }
-  Text { Layout.fillWidth: true; text: "Escreva aqui o contexto, decisões e pontos importantes. Suas notas complementam o resumo sem alterar a transcrição."; wrapMode: Text.Wrap; color: root.muted; font.family: root.fontFamily; font.pixelSize: 13 }
-  Rectangle {
+  Text { text: "Minhas anotações"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.display; font.bold: true }
+  Text { Layout.fillWidth: true; text: "Escreva aqui o contexto, decisões e pontos importantes. Suas notas complementam o resumo sem alterar a transcrição."; wrapMode: Text.Wrap; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
+  OmarchyUi.BorderSurface {
+    objectName: "meetingNotesSurface"
     Layout.fillWidth: true
     Layout.fillHeight: true
     Layout.minimumHeight: 100
-    radius: 8
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+    radius: Style.cornerRadius
+    color: Style.controlFill(editor.activeFocus, editor.hovered, root.foreground, root.accent)
+    borderSpec: Border.controlSpec(editor.activeFocus ? "focus" : editor.hovered ? "hover-cursor" : "normal", root.foreground, root.accent)
     ScrollView {
       anchors.fill: parent
-      anchors.margins: 8
+      anchors.margins: Style.space(8)
       contentWidth: availableWidth
       clip: true
       TextArea {
         id: editor
+        hoverEnabled: true
         objectName: "meetingNotesEditor"
         enabled: !root.loading
         text: root.text
@@ -189,7 +192,7 @@ ColumnLayout {
         color: root.foreground
         selectionColor: root.accent
         font.family: root.fontFamily
-        font.pixelSize: 16
+        font.pixelSize: Math.round(Style.font.body * 4 / 3)
         background: null
         selectByMouse: true
       }
@@ -198,12 +201,12 @@ ColumnLayout {
   Text {
     Layout.fillWidth: true
     text: root.currentBuffer && root.currentBuffer.error ? root.currentBuffer.error : root.saving ? "Salvando…" : root.dirty ? "Alterações ainda não salvas" : root.loading ? "" : "Salvo no computador · Markdown"
-    textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.fontFamily; font.pixelSize: 12
+    textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.fontFamily; font.pixelSize: Style.font.body
   }
   Flow {
     Layout.fillWidth: true
     Layout.preferredHeight: childrenRect.height
-    spacing: 8
+    spacing: Style.space(8)
     LibraryButton { text: root.saving ? "Salvando…" : "Salvar agora"; enabled: root.dirty && !root.saving; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.saveNow() }
     LibraryButton { objectName: "meetingNotesRegenerate"; text: regenerateProcess.running || root.regenerateAfterSave ? "Atualizando resumo…" : "Atualizar resumo com minhas notas"; enabled: !root.loading && !!root.text.trim() && !regenerateProcess.running && !root.regenerateAfterSave; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.regenerate() }
     LibraryButton { objectName: "meetingNotesReload"; text: "Recarregar"; enabled: !root.saving && !loadProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.requestReload() }
@@ -211,20 +214,20 @@ ColumnLayout {
   ColumnLayout {
     Layout.fillWidth: true
     visible: root.reloadConfirmation
-    spacing: 8
+    spacing: Style.space(8)
     Text {
       objectName: "meetingNotesReloadWarning"
       Layout.fillWidth: true
       text: "Recarregar substituirá seu rascunho pela versão salva. Copie o texto antes se quiser mantê-lo."
-      textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: 13
+      textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle
     }
     Flow {
       Layout.fillWidth: true
       Layout.preferredHeight: childrenRect.height
-      spacing: 8
+      spacing: Style.space(8)
       LibraryButton { id: keepDraft; objectName: "meetingNotesKeepDraft"; text: "Manter rascunho"; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.reloadConfirmation = false }
       LibraryButton { objectName: "meetingNotesConfirmReload"; text: "Recarregar versão salva"; enabled: !root.saving && !loadProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.reloadSaved() }
     }
   }
-  Text { Layout.fillWidth: true; visible: !!root.regenerationMessage; text: root.regenerationMessage; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: 13 }
+  Text { Layout.fillWidth: true; visible: !!root.regenerationMessage; text: root.regenerationMessage; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
 }

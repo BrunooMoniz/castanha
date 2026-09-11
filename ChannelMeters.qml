@@ -21,7 +21,7 @@ Column {
     Timer { interval: 120; repeat: true; running: root.visible; onTriggered: root.nowMs = Date.now() }
     Repeater {
         model: 2
-        delegate: Rectangle {
+        delegate: BorderSurface {
             id: channel
             required property int index
             readonly property var modelData: index === 0
@@ -37,8 +37,7 @@ Column {
             height: Style.space(82)
             radius: Style.cornerRadius
             color: Qt.rgba(modelData.tone.r, modelData.tone.g, modelData.tone.b, 0.07)
-            border.width: 1
-            border.color: Qt.rgba(modelData.tone.r, modelData.tone.g, modelData.tone.b, 0.25)
+            borderSpec: Border.controlSpec("normal", root.foreground, modelData.tone)
             opacity: modelData.enabled ? 1 : 0.55
             Text {
                 anchors { left: parent.left; top: parent.top; margins: Style.space(9) }
