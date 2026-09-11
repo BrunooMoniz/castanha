@@ -101,12 +101,19 @@ def deploy(root, sha):
             launcher_snapshot = install_launcher(root, state_dir)
             health(root, verify_ui="candidate")
         except BaseException:
-            restore_launcher(launcher_snapshot)
+            launcher_error = None
+            try:
+                restore_launcher(launcher_snapshot)
+            except BaseException as error:
+                # Restaurar um lançador não pode impedir recuperar o serviço.
+                launcher_error = error
             run("systemctl", "--user", "stop", "castanha.service")
             git("reset", "--keep", previous)
             run("systemctl", "--user", "start", "castanha.service")
             time.sleep(2)
             health(root, verify_ui="rollback")
+            if launcher_error is not None:
+                raise RuntimeError("Código e serviço restaurados; falha ao restaurar lançador. Backup em launcher-before-release.desktop") from launcher_error
             print("Falha na atualização; versão anterior restaurada.", file=sys.stderr)
             raise
     print(f"Castanha instalado e saudável: {sha}")

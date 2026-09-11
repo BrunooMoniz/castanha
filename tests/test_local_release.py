@@ -35,7 +35,9 @@ class LocalReleaseTest(unittest.TestCase):
 
     def install(self, health):
         original = release.run
+        self.commands = []
         def command(*args):
+            self.commands.append(args)
             return "" if args[0] == "systemctl" else original(*args)
         with patch.object(release, "run", side_effect=command), \
              patch.object(release, "health", side_effect=health), \
@@ -88,3 +90,11 @@ class LocalReleaseTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 release.install_launcher(self.repo, self.root)
         self.assertEqual(external.read_text(), "preserved")
+
+    def test_launcher_restore_failure_does_not_block_code_and_daemon_recovery(self):
+        with patch.object(release, "restore_launcher", side_effect=PermissionError("fixture")):
+            with self.assertRaisesRegex(RuntimeError, "Código e serviço restaurados"):
+                self.install([None, RuntimeError("candidate failed"), None])
+        self.assertEqual(self.commands.count(("systemctl", "--user", "start", "castanha.service")), 2)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.old)
+        self.assertEqual((self.repo / "version").read_text(), "old")
