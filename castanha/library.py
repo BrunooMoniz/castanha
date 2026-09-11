@@ -64,8 +64,17 @@ def _read(root, *parts, json_data=False):
             os.close(fd)
 
 
+def _valid_number(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
 def _number(value):
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else 0
+    return float(value) if _valid_number(value) else 0
 
 
 def _text(value):
@@ -242,9 +251,7 @@ class MeetingLibrary:
                 if not isinstance(utterance, dict) or not isinstance(utterance.get('text'), str):
                     continue
                 start, end = utterance.get('start'), utterance.get('end')
-                valid_time = (isinstance(start, (int, float)) and not isinstance(start, bool)
-                              and math.isfinite(start) and start >= 0 and isinstance(end, (int, float))
-                              and not isinstance(end, bool) and math.isfinite(end) and end >= start)
+                valid_time = _valid_number(start) and _valid_number(end) and end >= start
                 channel = utterance.get('channel')
                 if not isinstance(channel, int) or isinstance(channel, bool):
                     channel = None

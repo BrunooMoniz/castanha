@@ -138,6 +138,22 @@ class TestLibrary(unittest.TestCase):
         self.assertFalse(result['segments'][0]['can_seek'])
         self.assertNotIn('/etc/passwd', json.dumps(result))
 
+    def test_oversized_json_numbers_do_not_break_history_or_transcript(self):
+        slug, bronze = self.meeting()
+        path = bronze/'metadata.json'
+        meta = json.loads(path.read_text())
+        meta['duration_seconds'] = 10**400
+        path.write_text(json.dumps(meta))
+        self.assertEqual(self.library.list()['meetings'][0]['duration_seconds'], 0)
+        path = bronze/'transcript_segments.json'
+        timeline = json.loads(path.read_text())
+        timeline['recordings'][0]['utterances'][0].update(start=10**400, end=10**401)
+        path.write_text(json.dumps(timeline))
+        detail = self.library.detail(slug)['meeting']
+        self.assertTrue(detail['transcript'])
+        self.assertIsNone(detail['segments'][0]['start'])
+        self.assertFalse(detail['segments'][0]['can_seek'])
+
     def test_corrupt_metadata_retains_entry_with_explicit_warning(self):
         slug, bronze = self.meeting()
         (bronze/'metadata.json').write_text('not json')
