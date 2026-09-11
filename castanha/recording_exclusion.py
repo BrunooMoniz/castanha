@@ -301,10 +301,11 @@ def applicable(slug, storage):
     with _directory(storage, slug) as fd:
         op = _load(fd)
         metadata = _metadata(fd, slug)
-        return bool(op and op['phase'] != 'restored' and
-                    metadata.get('recording_revision') == op['new_metadata']['recording_revision'] and
-                    (metadata.get('content_status') in ('invalidated', 'empty', 'rebuilding') or
-                     metadata.get('cleanup_status') == 'pending'))
+        return bool(op and (op['phase'] in ('applying', 'restoring') or
+                    (op['phase'] != 'restored' and
+                     metadata.get('recording_revision') == op['new_metadata']['recording_revision'] and
+                     (metadata.get('content_status') in ('invalidated', 'empty', 'rebuilding') or
+                      metadata.get('cleanup_status') == 'pending'))))
 
 
 def capture_blocked(slug, storage):

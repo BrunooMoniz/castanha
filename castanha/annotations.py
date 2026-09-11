@@ -193,6 +193,10 @@ def regeneration_pending(bronze):
 
 
 def _inputs(fd, slug):
+    from castanha.recording_exclusion import _load as load_exclusion
+    exclusion = load_exclusion(fd)
+    if exclusion and exclusion.get("phase") in ("applying", "restoring"):
+        raise AnnotationError("Conclua a exclusão ou restauração interrompida antes de atualizar o resumo")
     metadata = _metadata(fd, slug)
     if metadata.get("content_status") in ("invalidated", "empty", "rebuilding"):
         raise AnnotationError("Conteúdo invalidado pela exclusão de áudio; conclua o processamento dos restantes")

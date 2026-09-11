@@ -364,6 +364,28 @@ class TestRecordingExclusion(unittest.TestCase):
             self.assertFalse((self.bronze/POINTER).exists())
             self.assertTrue((self.bronze/'capture_job1.ogg').exists())
 
+    def test_crash_after_pointer_before_metadata_blocks_old_synthesis_and_resumes(self):
+        from castanha import recording_exclusion as module
+        from castanha.annotations import regenerate_annotations, AnnotationError
+        original=module._write_json
+        def interrupted(fd,name,value):
+            if name=='metadata.json' and value.get('content_status')=='invalidated':
+                raise OSError('fixture before first metadata write')
+            return original(fd,name,value)
+        with patch.object(module,'_write_json',side_effect=interrupted):
+            with self.assertRaises(OSError):self.exclude()
+        self.assertEqual(self.storage.get_meeting(self.slug)['recording_revision'],0)
+        self.assertTrue((self.bronze/'transcript_raw.txt').exists())
+        self.assertTrue(module.applicable(self.slug,self.storage))
+        self.assertIn(('',self.slug),pending_candidates(self.storage))
+        with self.assertRaises(AnnotationError):
+            regenerate_annotations(self.slug,self.storage,summarizer=self.engine.summarizer)
+        self.engine.summarizer.generate_silver.assert_not_called()
+        result=sync_meeting(self.slug,self.storage)
+        self.assertEqual(result['content_status'],'invalidated')
+        self.assertFalse((self.bronze/'transcript_raw.txt').exists())
+        self.assertFalse((self.bronze/'capture_job1.ogg').exists())
+
     def test_cli_retry_empty_is_valid_and_never_invokes_providers(self):
         self.one_audio();self.exclude()
         cli=str(Path(__file__).resolve().parents[1]/'bin/castanha')
