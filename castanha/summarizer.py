@@ -847,6 +847,33 @@ attendees:
             raise LlmInvalidResponse("Extração de fatos inválida; síntese pendente, transcrição preservada")
         return {"facts": [], "decisions": [], "action_items": [], "people_notes": []}
 
+    def _repair_uncitable_gold(self, data, silver_content):
+        """Um reparo estável quando todas as citações apontam fora da síntese.
+
+        A transcrição continua disponível na extração inicial como contexto.
+        O reparo usa só os bytes publicáveis do Silver; o validador de entrega
+        continua descartando qualquer candidato sem passagem verificável.
+        """
+        from castanha.bronze_ingest import cite_facts, synthesis_text
+        from castanha.zinom_adapter import is_fato_util
+        facts = data.get("facts", [])
+        notes = synthesis_text(silver_content)
+        candidates = [fact for fact in facts if is_fato_util(fact)
+                      and isinstance(fact.get("evidencia"), str)
+                      and len(fact["evidencia"].strip()) >= 20]
+        if not candidates or cite_facts(notes, facts)[0]:
+            return data
+        # Identidade determinística distinta mantém o cache original e limita
+        # o reparo a uma chamada lógica, inclusive após reinício do processo.
+        return self._gold_response(
+            "[castanha-citation-repair-v1]\n"
+            "A extração anterior não citou nenhuma passagem verificável das notas. "
+            "Reextraia somente fatos sustentados pelas Notas Silver abaixo. "
+            "Copie evidencia literalmente delas, preservando espaços, pontuação e Markdown. "
+            "Não use a transcrição ou metadados como fonte de citações. "
+            "Se nenhum fato for sustentado, devolva as listas vazias.\n\n"
+            f"Notas Silver:\n{notes}")
+
     def _gold_from_notes(self, header: str, notes: str) -> Dict[str, Any]:
         # Evidência do Gold deve existir literalmente nas Notas Silver. Elas
         # são processadas por inteiro; a transcrição já foi coberta no Silver
@@ -898,7 +925,9 @@ attendees:
             try:
                 if using_groq:
                     return self._gold_from_notes(groq_header, notas)
-                return self._gold_response(f"{header}\nNotas Silver:\n{notas}\n\nTranscrição:\n{raw_transcript}\n")
+                data = self._gold_response(f"{header}\nNotas Silver:\n{notas}\n\nTranscrição:\n{raw_transcript}\n")
+                return (self._repair_uncitable_gold(data, silver_content)
+                        if self._provider_in_use() == "hermes_ssh" else data)
             except LlmTooLarge as e:
                 # A reserva pode ter sido selecionada durante a primeira
                 # chamada. Recalcule o pedido usando seu orçamento real.

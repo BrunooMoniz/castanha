@@ -705,6 +705,52 @@ class TestHermesNoSummarizer(unittest.TestCase):
             s.generate_gold(self._meta(), "# Nora\n\nnota", longa)
         self.assertIn(longa.strip(), prompts[0])
 
+    def test_gold_repairs_transcript_only_quotes_with_stable_silver_only_request(self):
+        from castanha.bronze_ingest import cite_facts, synthesis_text
+        note = "A empresa aprovou o orçamento anual de dez milhões."
+        raw = "A empresa decidiu investir dez milhões neste ano."
+        silver = "# Nota\n\n" + note + "\n\n## 📝 Transcrição Bruta\n" + raw
+        def fact(quote):
+            return {"facts": [{"subject": "Empresa", "predicate": "orçamento anual",
+                               "object": "dez milhões", "evidencia": quote}]}
+        original, repaired = fact(raw), fact(note)
+        self.assertEqual(cite_facts(synthesis_text(silver), original["facts"])[0], [])
+        prompts = []
+        for _ in range(2):
+            s = self.summarizer()
+            with patch.object(s, "_gold_response", side_effect=[original, repaired]) as call:
+                result = s.generate_gold(self._meta(), silver, raw)
+            self.assertEqual(result, repaired)
+            self.assertEqual(len(cite_facts(synthesis_text(silver), result["facts"])[0]), 1)
+            prompts.append([c.args[0] for c in call.call_args_list])
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertIn(raw, prompts[0][0])
+        self.assertNotIn(raw, prompts[0][1])
+        self.assertIn(note, prompts[0][1])
+        self.assertIn("[castanha-citation-repair-v1]", prompts[0][1])
+        self.assertEqual(original["facts"][0]["evidencia"], raw)
+
+    def test_gold_bad_citation_repair_is_bounded_and_delivery_still_rejects_it(self):
+        from castanha.bronze_ingest import cite_facts
+        bad = {"facts": [{"subject": "Empresa", "predicate": "orçamento anual",
+                          "object": "dez milhões", "evidencia": "Uma passagem que não existe nas notas Silver."}]}
+        s = self.summarizer()
+        with patch.object(s, "_gold_response", return_value=bad) as call:
+            result = s.generate_gold(self._meta(), "# Nota\nConversa sem decisão.", "Transcrição")
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(cite_facts("# Nota\nConversa sem decisão.", result["facts"]), ([], 1))
+
+    def test_gold_valid_or_empty_citations_do_not_trigger_repair(self):
+        note = "A empresa aprovou o orçamento anual de dez milhões."
+        valid = {"subject": "Empresa", "predicate": "orçamento anual", "object": "dez milhões",
+                 "evidencia": note}
+        for facts in ([], [valid], [valid, {**valid, "evidencia": "Uma passagem ausente das notas Silver."}]):
+            with self.subTest(facts=facts):
+                s = self.summarizer()
+                with patch.object(s, "_gold_response", return_value={"facts": facts}) as call:
+                    s.generate_gold(self._meta(), note, "Transcrição")
+                call.assert_called_once()
+
 
 class TestSynthesisReliability(unittest.TestCase):
     def setUp(self):
