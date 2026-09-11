@@ -175,7 +175,9 @@ Panel {
   // O teste de 04/09 gravou 35 minutos de silêncio porque o mic estava mudo no
   // teclado. O painel passa a dizer isso antes, não depois.
   readonly property var micSource: Pipewire.defaultAudioSource
-  readonly property bool micMuted: micSource && micSource.audio ? micSource.audio.muted : false
+  // Durante captura o nível vem do dispositivo fixado no FFmpeg, não do
+  // microfone padrão (que pode mudar no meio da reunião).
+  readonly property bool micMuted: !isBusy && micSource && micSource.audio ? micSource.audio.muted : false
 
   RecordingAudioMeter {
     id: audioMeter
