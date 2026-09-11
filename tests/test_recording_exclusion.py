@@ -386,6 +386,19 @@ class TestRecordingExclusion(unittest.TestCase):
         self.assertFalse((self.bronze/'transcript_raw.txt').exists())
         self.assertFalse((self.bronze/'capture_job1.ogg').exists())
 
+    def test_mixed_legacy_receipt_never_claims_full_cleanup_from_bronze_only(self):
+        self.one_audio();self.receipts()
+        metadata=self.storage._read_bronze_metadata(self.slug)
+        metadata['zinom']['remember_id']='legacy-note-fixture'
+        write_json(self.bronze/'metadata.json',metadata)
+        self.exclude()
+        with patch('castanha.zinom_adapter.ZinomMcpClient') as client:
+            result=resume_exclusion(self.slug,self.storage)
+            client.assert_not_called()
+        self.assertEqual(result['status'],'pending')
+        self.assertEqual(result['cleanup_status'],'pending')
+        self.assertIn('sem escopo verificável',result['cleanup_reason'])
+
     def test_cli_retry_empty_is_valid_and_never_invokes_providers(self):
         self.one_audio();self.exclude()
         cli=str(Path(__file__).resolve().parents[1]/'bin/castanha')

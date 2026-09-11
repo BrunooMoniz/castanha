@@ -166,7 +166,7 @@ def _targets(files, archive, removed_job, metadata):
         if not destination or any(t['workspace'] != destination.get('workspace') for t in targets.values()):
             raise ExclusionError('Escopo remoto não comprovado; arquivos preservados')
     previous = metadata.get('zinom') or {}
-    unscoped = not targets and bool(previous.get('remember_id') or (previous.get('source') or {}).get('revisions'))
+    unscoped = bool(previous.get('remember_id')) or (not targets and bool((previous.get('source') or {}).get('revisions')))
     return list(targets.values()), retained, destination, unscoped
 
 
