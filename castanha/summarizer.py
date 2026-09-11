@@ -614,7 +614,8 @@ class MeetingSummarizer:
             raise LlmUnavailable("Checkpoint da síntese ilegível; original preservado para revisão") from exc
         def valid(content):
             return (isinstance(content, str) and bool(content.strip())
-                    and (system_prompt != GOLD_SYSTEM_PROMPT or _valid_gold(_extrair_json(content))))
+                    and (system_prompt not in (GOLD_SYSTEM_PROMPT, GOLD_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE)
+                         or _valid_gold(_extrair_json(content))))
         if cached is not None:
             if not isinstance(cached, dict) or cached.get("identity") != identity or not valid(cached.get("content")):
                 raise LlmUnavailable("Checkpoint da síntese inválido; original preservado para revisão")

@@ -351,6 +351,24 @@ class TestAnnotations(unittest.TestCase):
         self.assertTrue(summarizer._groq_gold_budget(GOLD_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE))
         self.assertFalse(summarizer._groq_gold_budget(SILVER_NOTES_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE))
 
+    def test_manual_gold_http_budget_and_invalid_output_not_cached(self):
+        import io
+        from castanha.summarizer import GOLD_SYSTEM_PROMPT
+        summarizer = MeetingSummarizer(); summarizer.model = "openai/gpt-oss-120b"; summarizer.api_key = "fixture"
+        system = GOLD_SYSTEM_PROMPT + "\n" + MANUAL_GUIDANCE
+        def response(text):
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}).encode())
+        with patch("urllib.request.urlopen", side_effect=[response("not json"), response(json.dumps(GOLD))]) as http:
+            self.assertEqual(summarizer._call_groq(system, TEXT, json_mode=True), "not json")
+            self.assertFalse(list((self.root / "state").rglob("*.json")))
+            self.assertEqual(json.loads(summarizer._call_groq(system, TEXT, json_mode=True)), GOLD)
+            self.assertEqual(http.call_count, 2)
+            payload = json.loads(http.call_args.args[0].data)
+            self.assertEqual(payload["max_completion_tokens"], 4096)
+            self.assertEqual(payload["reasoning_effort"], "low")
+            self.assertEqual(json.loads(summarizer._call_groq(system, TEXT, json_mode=True)), GOLD)
+            self.assertEqual(http.call_count, 2)
+
     def test_chunked_silver_receives_manual_context_and_preserves_raw(self):
         summarizer = MeetingSummarizer(); summarizer.provider = "groq"; summarizer.api_key = "fixture"
         calls = []
