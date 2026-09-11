@@ -128,10 +128,17 @@ ColumnLayout {
     onExited: function(code) {
       try {
         var result = JSON.parse(stdout.text)
-        if (result.status !== "ok" && result.status !== "pending") throw new Error(result.message || "Não foi possível atualizar o resumo agora.")
-        if (requestedSlug === root.meetingSlug) root.regenerationMessage = result.status === "pending"
-          ? (result.message || "Pedido salvo na fila. O resumo será retomado quando o processamento estiver disponível.")
-          : (result.message || "Resumo atualizado com suas anotações.")
+        if (code !== 0 || (result.status !== "ok" && result.status !== "pending")) {
+          throw new Error(result.status === "error" && typeof result.message === "string" && result.message
+            ? result.message : "Não foi possível atualizar o resumo agora.")
+        }
+        if (requestedSlug === root.meetingSlug) {
+          root.regenerationMessage = result.status === "pending"
+            ? (result.message || "Pedido salvo na fila. O resumo será retomado quando o processamento estiver disponível.")
+            : (result.message || "Resumo atualizado com suas anotações.")
+          if (result.delivery && result.delivery.status === "local_only" && typeof result.delivery.reason === "string" && result.delivery.reason)
+            root.regenerationMessage += " " + result.delivery.reason
+        }
         root.summaryUpdated(requestedSlug)
       } catch (error) {
         if (requestedSlug === root.meetingSlug) root.regenerationMessage = String(error.message || error)
