@@ -189,6 +189,32 @@ class TestAnnotations(unittest.TestCase):
         self.assertNotEqual(get_annotations(self.slug, self.storage)["text"], TEXT)
         self.assertEqual(pending_candidates(self.storage), [])
 
+    def test_previous_pair_saved_before_synthesis_and_restorable(self):
+        self.save()
+        silver = self.storage.silver_dir / (self.slug + ".md")
+        gold = self.storage.gold_dir / (self.slug + ".json")
+        before = {"silver": "# Resumo anterior\n\nAção com café 😊\n", "gold": '{ "facts": [] }\n'}
+        silver.write_text(before["silver"]); gold.write_text(before["gold"])
+        def generate(metadata, transcript):
+            checkpoint = json.loads((self.bronze / CHECKPOINT).read_text())
+            self.assertEqual(checkpoint["previous_outputs"], before)
+            self.assertEqual(silver.read_text(), before["silver"])
+            self.assertEqual(gold.read_text(), before["gold"])
+            return "novo resumo"
+        self.summarizer.generate_silver.side_effect = generate
+        self.run_summary()
+        checkpoint = json.loads((self.bronze / CHECKPOINT).read_text())
+        from castanha.durability import atomic_write
+        atomic_write(silver, checkpoint["previous_outputs"]["silver"])
+        atomic_write(gold, checkpoint["previous_outputs"]["gold"])
+        self.assertEqual(silver.read_bytes(), before["silver"].encode())
+        self.assertEqual(gold.read_bytes(), before["gold"].encode())
+
+    def test_first_summary_backup_records_absent_outputs_explicitly(self):
+        self.save(); self.run_summary()
+        checkpoint = json.loads((self.bronze / CHECKPOINT).read_text())
+        self.assertEqual(checkpoint["previous_outputs"], {"silver": None, "gold": None})
+
     def test_ready_checkpoint_resumes_pair_without_llm(self):
         self.save()
         from castanha.annotations import _write

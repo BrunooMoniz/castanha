@@ -241,7 +241,15 @@ def regenerate_annotations(slug, storage=None, *, resume=False, summarizer=None,
             return {"slug": slug, "status": "ok", "summary_status": "complete",
                     "delivery": checkpoint.get("delivery", {})}
         else:
-            checkpoint = {"status": "pending", "annotations_sha256": _hash(notes),
+            previous = {}
+            for kind, directory, name in (("silver", storage.silver_dir, slug + ".md"),
+                                          ("gold", storage.gold_dir, slug + ".json")):
+                out = os.open(directory.resolve(), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    previous[kind] = _read(out, name, limit=8 * 1024 * 1024)
+                finally:
+                    os.close(out)
+            checkpoint = {"status": "pending", "previous_outputs": previous, "annotations_sha256": _hash(notes),
                 "transcript_sha256": _hash(transcript), "metadata": {**metadata, "manual_annotations": notes},
                 "reason": "Resumo das anotações aguardando síntese"}
             _write_json(fd, CHECKPOINT, checkpoint)
