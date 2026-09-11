@@ -14,6 +14,7 @@ ColumnLayout {
   property var buffers: ({})
   property string regenerationMessage: ""
   property string regenerateAfterSave: ""
+  property bool reloadConfirmation: false
   readonly property var currentBuffer: buffers[meetingSlug] || null
   readonly property string text: currentBuffer ? currentBuffer.text : ""
   readonly property bool dirty: !!currentBuffer && currentBuffer.text !== currentBuffer.savedText
@@ -65,8 +66,24 @@ ColumnLayout {
     if (currentBuffer) put(meetingSlug, Object.assign({}, currentBuffer, {error: ""}))
     flush()
   }
+  function requestReload() {
+    if (saving || loadProcess.running) return
+    if (dirty) {
+      reloadConfirmation = true
+      Qt.callLater(function() { if (reloadConfirmation) keepDraft.forceActiveFocus() })
+    } else reloadSaved()
+  }
+  function reloadSaved() {
+    if (saving || loadProcess.running) return
+    autosave.stop()
+    reloadConfirmation = false
+    var next = Object.assign({}, buffers)
+    delete next[meetingSlug]
+    buffers = next
+    requestLoad()
+  }
   function regenerate() {
-    if (!currentBuffer || !text.trim() || regenerateProcess.running) return
+    if (!currentBuffer || !text.trim() || regenerateProcess.running || regenerateAfterSave) return
     regenerateAfterSave = meetingSlug
     regenerationMessage = "Salvando notas antes de atualizar o resumo…"
     saveNow()
@@ -75,10 +92,10 @@ ColumnLayout {
     regenerateProcess.requestedSlug = slug
     regenerateProcess.command = cliCommand.concat(["annotations", "regenerate", slug, "--json"])
     regenerateProcess.running = true
-    regenerationMessage = "Preparando resumo e insights com suas anotações…"
+    if (slug === meetingSlug) regenerationMessage = "Preparando resumo e insights com suas anotações…"
   }
   Component.onCompleted: requestLoad()
-  onMeetingSlugChanged: { regenerationMessage = ""; flush(); requestLoad() }
+  onMeetingSlugChanged: { reloadConfirmation = false; regenerationMessage = ""; flush(); requestLoad() }
   Timer { id: autosave; interval: 700; onTriggered: root.flush() }
 
   Process {
@@ -115,7 +132,7 @@ ColumnLayout {
         root.put(requestedSlug, Object.assign({}, buffer, {error: String(error.message || error)}))
         if (root.regenerateAfterSave === requestedSlug) {
           root.regenerateAfterSave = ""
-          root.regenerationMessage = "Salve as anotações antes de atualizar o resumo."
+          if (requestedSlug === root.meetingSlug) root.regenerationMessage = "Salve as anotações antes de atualizar o resumo."
         }
       }
       Qt.callLater(root.flush)
@@ -188,8 +205,26 @@ ColumnLayout {
     Layout.preferredHeight: childrenRect.height
     spacing: 8
     LibraryButton { text: root.saving ? "Salvando…" : "Salvar agora"; enabled: root.dirty && !root.saving; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.saveNow() }
-    LibraryButton { objectName: "meetingNotesRegenerate"; text: regenerateProcess.running ? "Atualizando resumo…" : "Atualizar resumo com minhas notas"; enabled: !root.loading && !!root.text.trim() && !regenerateProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.regenerate() }
-    LibraryButton { text: "Recarregar"; enabled: !root.dirty && !root.saving && !loadProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: { var next = Object.assign({}, root.buffers); delete next[root.meetingSlug]; root.buffers = next; root.requestLoad() } }
+    LibraryButton { objectName: "meetingNotesRegenerate"; text: regenerateProcess.running || root.regenerateAfterSave ? "Atualizando resumo…" : "Atualizar resumo com minhas notas"; enabled: !root.loading && !!root.text.trim() && !regenerateProcess.running && !root.regenerateAfterSave; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.regenerate() }
+    LibraryButton { objectName: "meetingNotesReload"; text: "Recarregar"; enabled: !root.saving && !loadProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.requestReload() }
+  }
+  ColumnLayout {
+    Layout.fillWidth: true
+    visible: root.reloadConfirmation
+    spacing: 8
+    Text {
+      objectName: "meetingNotesReloadWarning"
+      Layout.fillWidth: true
+      text: "Recarregar substituirá seu rascunho pela versão salva. Copie o texto antes se quiser mantê-lo."
+      textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: 13
+    }
+    Flow {
+      Layout.fillWidth: true
+      Layout.preferredHeight: childrenRect.height
+      spacing: 8
+      LibraryButton { id: keepDraft; objectName: "meetingNotesKeepDraft"; text: "Manter rascunho"; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.reloadConfirmation = false }
+      LibraryButton { objectName: "meetingNotesConfirmReload"; text: "Recarregar versão salva"; enabled: !root.saving && !loadProcess.running; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.reloadSaved() }
+    }
   }
   Text { Layout.fillWidth: true; visible: !!root.regenerationMessage; text: root.regenerationMessage; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: 13 }
 }

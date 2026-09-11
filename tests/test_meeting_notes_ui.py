@@ -27,10 +27,10 @@ if action == 'get':
     print(json.dumps(dict(status='ok', **result)))
 elif action == 'save':
     text = sys.stdin.read()
-    time.sleep(.20)
+    time.sleep(.50 if scenario == 'switch_regeneration' else .20)
     current = json.loads(path.read_text())
     expected = rest[rest.index('--expected-revision') + 1]
-    if scenario == 'conflict':
+    if scenario in ('conflict', 'switch_regeneration_conflict'):
         current = {'text': 'external preserved', 'revision': 'external'}
         path.write_text(json.dumps(current))
     if expected != current['revision']:
@@ -173,6 +173,22 @@ class TestMeetingNotesUi(unittest.TestCase):
           harness.require(notes.dirty && notes.text === 'my unsaved draft' && harness.editor.text === notes.text,
                           'switch lost unsaved conflict draft')
           harness.require(!!notes.currentBuffer.error && !notes.saving, 'conflict retried without explicit user action')
+          var reload = harness.find(notes, 'meetingNotesReload', 0)
+          harness.require(reload.enabled, 'conflict leaves no way to reload')
+          reload.clicked(); harness.stage = 4
+        } else if (harness.stage === 4) {
+          harness.require(notes.reloadConfirmation && notes.text === 'my unsaved draft', 'reload discarded draft before confirmation')
+          var keep = harness.find(notes, 'meetingNotesKeepDraft', 0)
+          harness.require(keep.activeFocus, 'safe confirmation choice is not the default')
+          var warning = harness.find(notes, 'meetingNotesReloadWarning', 0)
+          harness.require(warning.visible && warning.text.indexOf('Copie o texto antes') >= 0, 'destructive reload lacks warning')
+          keep.clicked()
+          harness.require(!notes.reloadConfirmation && notes.dirty && notes.text === 'my unsaved draft', 'cancel discarded draft')
+          harness.find(notes, 'meetingNotesReload', 0).clicked()
+          harness.find(notes, 'meetingNotesConfirmReload', 0).clicked(); harness.stage = 5
+        } else if (harness.stage === 5 && !notes.loading) {
+          harness.require(!notes.dirty && !notes.reloadConfirmation && notes.text === 'external preserved'
+                          && harness.editor.text === notes.text, 'explicit reload did not load external version')
           console.log('NOTES_PASS'); Qt.quit()
         }
         ''')
@@ -220,6 +236,43 @@ class TestMeetingNotesUi(unittest.TestCase):
         }
         ''')
         self.assertEqual([event['action'] for event in events], ['get', 'regenerate'])
+
+    def test_queued_regeneration_does_not_change_another_meetings_message(self):
+        data, events = self.run_editor('switch_regeneration', r'''
+        if (harness.stage === 0 && !notes.loading && harness.editor) {
+          harness.replaceText('context for meeting a'); notes.regenerate()
+          notes.meetingSlug = 'b'; harness.stage = 1
+        } else if (harness.stage === 1 && !notes.loading) {
+          harness.require(notes.regenerateAfterSave === 'a', 'regeneration was not waiting for A save')
+          var button = harness.find(notes, 'meetingNotesRegenerate', 0)
+          harness.require(!button.enabled && button.text === 'Atualizando resumo…', 'pending save accepts another summary request')
+          notes.regenerate()
+          harness.require(notes.regenerateAfterSave === 'a', 'second request overwrote queued meeting A')
+          harness.stage = 2
+        } else if (harness.stage === 2 && harness.updates === 1) {
+          harness.require(notes.meetingSlug === 'b' && notes.text === 'initial b', 'regeneration changed selected meeting')
+          harness.require(notes.regenerationMessage === '', 'meeting A progress leaked into meeting B')
+          console.log('NOTES_PASS'); Qt.quit()
+        }
+        ''')
+        self.assertEqual(data['a']['text'], 'context for meeting a')
+        self.assertEqual([event['slug'] for event in events if event['action'] == 'regenerate'], ['a'])
+
+    def test_queued_save_failure_does_not_change_another_meetings_message(self):
+        data, events = self.run_editor('switch_regeneration_conflict', r'''
+        if (harness.stage === 0 && !notes.loading && harness.editor) {
+          harness.replaceText('conflicting context for a'); notes.regenerate()
+          notes.meetingSlug = 'b'; harness.stage = 1
+        } else if (harness.stage === 1 && !notes.loading && notes.buffers.a.error) {
+          harness.require(notes.meetingSlug === 'b' && notes.text === 'initial b', 'failed save changed selected meeting')
+          harness.require(notes.regenerationMessage === '', 'meeting A save error leaked into meeting B')
+          harness.require(notes.regenerateAfterSave === '' && harness.updates === 0, 'failed save kept summary request')
+          harness.require(notes.buffers.a.text === 'conflicting context for a', 'failed save lost draft A')
+          console.log('NOTES_PASS'); Qt.quit()
+        }
+        ''')
+        self.assertEqual(data['a']['text'], 'external preserved')
+        self.assertFalse(any(event['action'] == 'regenerate' for event in events))
 
 
 if __name__ == '__main__':
