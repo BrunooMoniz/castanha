@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Adiciona o diretório do pacote ao sys.path para execução direta
@@ -126,6 +127,19 @@ def cmd_status(args):
     if state.get("next_meeting"):
         next_m = state["next_meeting"]
         print(t("cli.status.next_meeting", title=next_m.get("title"), start=next_m.get("start")))
+
+def cmd_library(args):
+    from castanha.library import LibraryError, MeetingLibrary
+    try:
+        library = MeetingLibrary()
+        result = library.detail(args.slug) if args.slug else library.list()
+    except (LibraryError, OSError) as exc:
+        result = {"status": "error", "error": str(exc) if isinstance(exc, LibraryError)
+                  else "Não foi possível ler a biblioteca local."}
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
 
 def cmd_daemon(args):
     from castanha.daemon import run_daemon, running_daemon_pid
@@ -497,6 +511,7 @@ def cmd_agenda_refresh(args):
             "next_meeting": _proxima_com_hora(proximas_dicts),
             "upcoming_meetings": proximas_dicts,
             "agenda_error": None,
+            "agenda_updated_at": time.time(),
         })
         if getattr(args, "json", False):
             print(json.dumps({
@@ -646,6 +661,11 @@ def main():
     p_notes.add_argument("--json", action="store_true", help=t("cli.help.notes_json"))
     p_notes.add_argument("--limit", type=int, default=10, help=t("cli.help.notes_limit"))
     p_notes.set_defaults(func=cmd_notes)
+
+    p_library = subparsers.add_parser("library", help="Biblioteca local de reuniões")
+    p_library.add_argument("slug", nargs="?", default=None)
+    p_library.add_argument("--json", action="store_true", help="Resposta estruturada")
+    p_library.set_defaults(func=cmd_library)
 
     # Delete Recording (atalho direto)
     p_del = subparsers.add_parser("delete-recording", aliases=["del-rec", "delete-audio"], help=t("cli.help.delete_recording"))
