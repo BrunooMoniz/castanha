@@ -21,6 +21,8 @@ function status(note) {
         return {label: n.audio_status === "mic_mudo" ? "Microfone sem áudio na gravação" : "Gravação sem áudio detectado", tone: "error"}
     if (steps[1].state === "done" && steps[2].state === "done" && steps[3].state === "done")
         return {label: "Concluída · disponível no Zinom", tone: "done"}
+    if (steps[1].state === "done" && steps[2].state === "done" && z.status === "error")
+        return {label: "Entrega precisa de atenção", tone: "error"}
     var reason = String(n.summary_error || n.transcription_pending_reason || "").toLowerCase()
     if (/cota|quota|limite|429/.test(reason)) return {label: "Aguardando cota · retomada automática", tone: "waiting"}
     if (/conex|offline|rede|timeout/.test(reason)) return {label: "Aguardando conexão", tone: "waiting"}

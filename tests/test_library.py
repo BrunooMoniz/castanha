@@ -154,6 +154,15 @@ class TestLibrary(unittest.TestCase):
         self.assertIsNone(detail['segments'][0]['start'])
         self.assertFalse(detail['segments'][0]['can_seek'])
 
+    def test_invalid_folder_does_not_hide_valid_meetings(self):
+        slug, bronze = self.meeting()
+        invalid = self.storage.bronze_dir / ('fixture' + chr(92) + 'invalid')
+        invalid.mkdir()
+        result = self.library.list()
+        self.assertEqual([item['slug'] for item in result['meetings']], [slug])
+        self.assertTrue(result['warnings'])
+        self.assertTrue(invalid.is_dir())
+
     def test_corrupt_metadata_retains_entry_with_explicit_warning(self):
         slug, bronze = self.meeting()
         (bronze/'metadata.json').write_text('not json')

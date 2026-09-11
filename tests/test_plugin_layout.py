@@ -316,6 +316,11 @@ class PluginLayoutTest(unittest.TestCase):
                 check=False,
             )
 
+            note_dir = acervo["xdg_config"].parent / "meetings" / "bronze" / acervo["slug"]
+            self.assertFalse((note_dir / "first.wav").exists(), result.stdout)
+            self.assertTrue((note_dir / "second.wav").exists(), result.stdout)
+            self.assertTrue((note_dir / "transcript_raw.txt").exists())
+            self.assertTrue((note_dir.parent.parent / "silver" / (acervo["slug"] + ".md")).exists())
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CASTANHA_PANEL_OK", result.stdout)
         self.assertNotIn("CASTANHA_PANEL_FAIL", result.stdout)
@@ -346,6 +351,11 @@ class PluginLayoutTest(unittest.TestCase):
             "title": "Reunião de Teste", "recorded_at": "2026-01-01T10:00:00",
             "duration_seconds": 600, "mode": "dual", "audio_status": "ok",
         }), encoding="utf-8")
+        import wave
+        for name in ("first.wav", "second.wav"):
+            with wave.open(str(bronze / slug / name), "wb") as stream:
+                stream.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                stream.writeframes(b"\0\0" * 16000)
         (silver / f"{slug}.md").write_text("# Reunião de Teste\n", encoding="utf-8")
         return {"xdg_config": xdg_config, "xdg_state": xdg_state, "slug": slug}
 

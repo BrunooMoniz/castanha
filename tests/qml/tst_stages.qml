@@ -25,6 +25,12 @@ TestCase {
         var n = {has_transcript: true, summary_status: "complete", zinom: {status: "ok"}, audio_status: "mic_mudo"}
         compare(StageStatus.status(n).tone, "error")
     }
+    function test_current_delivery_failure_precedes_old_summary_error() {
+        var n = {has_transcript: true, summary_status: "complete", summary_error: "timeout antigo", zinom: {status: "error"}}
+        compare(StageStatus.status(n).tone, "error")
+        n.summary_status = "pending"
+        compare(StageStatus.status(n).tone, "waiting")
+    }
     function test_missing_audio_is_not_claimed_preserved() {
         verify(StageStatus.status({}).label.indexOf("preservado") < 0)
     }

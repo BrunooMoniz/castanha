@@ -73,6 +73,7 @@ Panel {
   // As notas saem da CLI, que é quem sabe onde o acervo mora.
   property var recentNotes: []
   property string notesLoadError: ""
+  property string notesActionError: ""
   property double notesLoadedAt: 0
   property bool showAllDay: false
   property string deleteAudioArmed: ""
@@ -453,15 +454,25 @@ Panel {
 
   Process {
     id: deleteRecProcess
+    objectName: "castanhaDeleteAudioProcess"
     running: false
-    onExited: {
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      try {
+        var result = JSON.parse(stdout.text)
+        if (code !== 0 || result.status !== "ok") throw new Error("failed")
+        root.notesActionError = ""
+      } catch (error) {
+        root.notesActionError = "Não foi possível apagar o áudio selecionado. Atualize a reunião e tente novamente."
+      }
       root.refreshNotes()
     }
   }
 
   function deleteRecording(slug, filename) {
     if (!slug || deleteRecProcess.running) return
-    var args = ["castanha", "delete-recording", String(slug)]
+    root.notesActionError = ""
+    var args = ["castanha", "delete-recording", "--json", "--", String(slug)]
     if (filename) args.push(String(filename))
     deleteRecProcess.command = args
     deleteRecProcess.running = true
@@ -993,9 +1004,9 @@ Panel {
         }
         Text {
           width: parent.width
-          visible: root.notesLoadError !== "" || (root.recentNotes.length === 0 && root.notesLoadedAt > 0)
-          text: root.notesLoadError || "Suas reuniões aparecerão aqui após a primeira gravação."
-          color: root.notesLoadError ? root.waiting : root.dim
+          visible: root.notesActionError !== "" || root.notesLoadError !== "" || (root.recentNotes.length === 0 && root.notesLoadedAt > 0)
+          text: root.notesActionError || root.notesLoadError || "Suas reuniões aparecerão aqui após a primeira gravação."
+          color: root.notesActionError ? root.contrasting(root.urgent) : root.notesLoadError ? root.waiting : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -1582,18 +1593,25 @@ Panel {
           onClicked: root.renameMeeting(noteRow.note ? noteRow.note.slug : "", renomearField.text)
         }
 
-        Button {
-          visible: noteRow.gravacoes.length > 0
-          text: root.deleteAudioArmed === noteRow.note.slug ? "Confirmar apagar áudios" : "Apagar apenas os áudios"
-          foreground: root.deleteAudioArmed === noteRow.note.slug ? root.contrasting(root.urgent) : root.foreground
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          onClicked: {
-            if (root.deleteAudioArmed === noteRow.note.slug) {
-              root.deleteRecording(noteRow.note.slug, "")
-              root.deleteAudioArmed = ""
-              root.closeContext()
-            } else root.deleteAudioArmed = noteRow.note.slug
+        Repeater {
+          model: noteRow.gravacoes
+          Button {
+            required property var modelData
+            required property int index
+            readonly property string recordingName: String(modelData.filename || "")
+            readonly property string armKey: noteRow.note.slug + "/" + recordingName
+            text: (root.deleteAudioArmed === armKey ? "Confirmar exclusão do áudio" : "Apagar áudio")
+              + (noteRow.gravacoes.length > 1 ? " " + (index + 1) : "")
+            enabled: recordingName !== "" && !deleteRecProcess.running
+            foreground: root.deleteAudioArmed === armKey ? root.contrasting(root.urgent) : root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: {
+              if (root.deleteAudioArmed === armKey) {
+                root.deleteRecording(noteRow.note.slug, recordingName)
+                root.closeContext()
+              } else root.deleteAudioArmed = armKey
+            }
           }
         }
         Button {

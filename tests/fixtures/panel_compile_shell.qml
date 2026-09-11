@@ -145,12 +145,36 @@ ShellRoot {
             root.refreshAndWait(function() {
               root.checar(castanha.recentNotes !== originalNotes && castanha.recentNotes.length > 0,
                           "controle positivo: refresh fora da edicao nao atualizou a lista")
-              root.terminar()
+              root.testDeleteAudio(slug, false)
             })
           })
         })
       })
     })
+  }
+
+  // CLI real no acervo isolado: apagar somente o arquivo escolhido e
+  // apresentar erro quando o mesmo arquivo já não existe.
+  function testDeleteAudio(slug, expectError) {
+    var process = null
+    for (var i = 0; i < castanha.data.length; i++) {
+      if (castanha.data[i].objectName === "castanhaDeleteAudioProcess") process = castanha.data[i]
+    }
+    if (!process) { root.checar(false, "processo de exclusão ausente"); return root.terminar() }
+    var completed = function(code) {
+      process.exited.disconnect(completed)
+      Qt.callLater(function() {
+        if (expectError) {
+          root.checar(code !== 0 && castanha.notesActionError !== "", "falha de exclusão não ficou visível")
+          root.terminar()
+        } else {
+          root.checar(code === 0 && castanha.notesActionError === "", "exclusão individual falhou")
+          root.testDeleteAudio(slug, true)
+        }
+      })
+    }
+    process.exited.connect(completed)
+    castanha.deleteRecording(slug, "first.wav")
   }
 
   function refreshAndWait(callback) {

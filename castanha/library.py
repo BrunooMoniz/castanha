@@ -171,21 +171,26 @@ class MeetingLibrary:
 
     def list(self):
         slugs = set()
+        skipped = 0
         try:
             for root, extension in ((self.storage.bronze_dir, None), (self.storage.silver_dir, '.md'), (self.storage.gold_dir, '.json')):
                 with os.scandir(root) as entries:
                     for entry in entries:
                         if entry.name.startswith('.'):
                             continue
-                        if extension is None and entry.is_dir(follow_symlinks=False):
-                            slugs.add(_component(entry.name))
-                        elif extension and entry.is_file(follow_symlinks=False) and entry.name.endswith(extension):
-                            slugs.add(_component(Path(entry.name).stem))
+                        try:
+                            if extension is None and entry.is_dir(follow_symlinks=False):
+                                slugs.add(_component(entry.name))
+                            elif extension and entry.is_file(follow_symlinks=False) and entry.name.endswith(extension):
+                                slugs.add(_component(Path(entry.name).stem))
+                        except LibraryError:
+                            skipped += 1
         except (OSError, LibraryError) as exc:
             raise LibraryError('Não foi possível carregar o histórico. Os arquivos permanecem preservados.') from exc
         meetings = [self._entry(slug)[0] for slug in slugs]
         meetings.sort(key=lambda item: (item['when'] or item['slug'], item['slug']), reverse=True)
-        return {'status': 'ok', 'meetings': meetings}
+        return {'status': 'ok', 'meetings': meetings,
+                'warnings': ([f'{skipped} entrada(s) com identificador inválido foram preservadas e não exibidas.'] if skipped else [])}
 
     def detail(self, slug):
         slug = _component(slug)

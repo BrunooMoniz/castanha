@@ -125,7 +125,7 @@ FloatingWindow {
         var result = JSON.parse(stdout.text)
         if (code !== 0 || result.status !== "ok" || !Array.isArray(result.meetings)) throw new Error("failed")
         root.meetings = result.meetings
-        root.historyError = ""
+        root.historyError = Array.isArray(result.warnings) ? result.warnings.join("\n") : ""
       } catch (error) {
         root.historyError = "Não foi possível atualizar o histórico. A lista anterior foi preservada."
       }
