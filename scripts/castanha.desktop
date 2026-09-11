@@ -6,7 +6,7 @@ Exec=omarchy-shell castanha-view library
 Terminal=false
 Type=Application
 Icon=audio-input-microphone
-Categories=AudioVideo;Audio;Recorder;Office;
+Categories=AudioVideo;Audio;Recorder;
 Keywords=meeting;reuniao;gravador;audio;castanha;notas;
 Actions=Record;Notes;
 
