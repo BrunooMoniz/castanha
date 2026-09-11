@@ -30,6 +30,8 @@ entra na chamada — o áudio é capturado na sua própria máquina.
 - Trechos com timestamps verificados abrem o ponto correspondente do áudio. Reuniões antigas sem essa informação continuam legíveis, sem tempos ou participantes inventados.
 - Áudio, transcrição, resumo e entrega ao Zinom têm estados separados. Apagar áudios exige confirmação e preserva as notas.
 
+![Biblioteca de reuniões, com dados fictícios](docs/images/library.png)
+
 Para abrir a biblioteca por um atalho: `omarchy-shell castanha-view library`.
 
 ## Comece aqui: sua primeira gravação em 3 minutos
