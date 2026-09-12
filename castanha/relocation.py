@@ -45,7 +45,6 @@ _EVENT_FIELDS = ("uid", "title", "start", "end", "organizer", "conference_url", 
                  "html_link", "calendar_name", "account", "location")
 _ATTENDEE_FIELDS = ("name", "email", "response", "organizer", "optional")
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n\n?", re.DOTALL)
-_LINK = re.compile(r"^Link da chamada: [^\n]*$", re.MULTILINE)
 # Transcrição e anotações manuais são conteúdo histórico ou autoral: nada a
 # partir da primeira dessas seções é reescrito.
 _TRANSCRICAO = re.compile(r"^##\s+(?:.{0,3}\s*Transcri|Anotações manuais)", re.MULTILINE)
@@ -191,11 +190,13 @@ def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str, previou
         body = re.sub(r"^(#\s+.*)$", lambda m: f"{m.group(1)}\n\nConvidados (presença não confirmada): {nomes}.",
                       body, count=1, flags=re.MULTILINE)
     # O link da chamada também é conteúdo da nota (e do envelope), não só metadata.
+    # O link da chamada também é conteúdo da nota (e do envelope). Só a linha colada
+    # à linha controlada de convidados é nossa; um "Link da chamada:" em outra seção
+    # (uma sala alternativa anotada nos próximos passos) é texto do resumo e fica.
     link = str((metadata.get("calendar_event") or {}).get("conference_url") or "").strip()
-    body = _LINK.sub("", body)
-    if link:
-        controlada = re.compile(r"^Convidados \(presença não confirmada\): " + re.escape(nomes) + r"\.$", re.MULTILINE)
-        body = controlada.sub(lambda m: m.group(0) + f"\nLink da chamada: {link}", body, count=1)
+    controlada = re.compile(r"^(Convidados \(presença não confirmada\): " + re.escape(nomes) + r"\.)(\nLink da chamada: [^\n]*)?$",
+                            re.MULTILINE)
+    body = controlada.sub(lambda m: m.group(1) + (f"\nLink da chamada: {link}" if link else ""), body, count=1)
     return frontmatter + body + transcricao
 
 
@@ -363,14 +364,22 @@ def _create_destination(storage, title: str, job: Dict[str, Any], record_event: 
     recorded_at = str(job.get("recorded_at") or _agora())
     dest_slug = slug or _planned_slug(storage, title, job)
     bronze_b = storage.bronze_dir / dest_slug
+    if bronze_b.is_symlink():
+        raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
     if bronze_b.exists():
         # Uma tentativa anterior já criou esta reunião (e caiu antes do journal): reutilizar,
         # desde que seja a nossa e ainda vazia; nunca criar uma segunda com sufixo.
         existente = storage._read_bronze_metadata(dest_slug) or {}
-        if existente.get("created_by") != "move_recording" or existente.get("recordings"):
+        if existente:
+            if existente.get("created_by") != "move_recording" or existente.get("recordings"):
+                raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
+            return dest_slug
+        # Pasta criada e metadata não gravado (queda ou disco cheio no meio): concluir
+        # a criação, desde que a pasta esteja vazia além da trava.
+        if any(p.name != ".processing.lock" for p in bronze_b.iterdir()):
             raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
-        return dest_slug
-    bronze_b.mkdir(parents=True, exist_ok=False)
+    else:
+        bronze_b.mkdir(parents=True, exist_ok=False)
     state = job.get("state") if isinstance(job.get("state"), dict) else {}
     storage.write_bronze_metadata(dest_slug, {
         "slug": dest_slug, "title": title, "recorded_at": recorded_at, "mode": state.get("mode", "dual"),
@@ -642,7 +651,8 @@ def _adopt_intent(fd, storage, slug: str) -> bool:
         return False
     dest_slug = str(intent.get("dest_slug") or "")
     _slug_ok(dest_slug)
-    if intent.get("create_new") and not (storage.bronze_dir / dest_slug).exists():
+    if intent.get("create_new"):
+        # Idempotente: cria, ou conclui uma criação interrompida, ou reutiliza a já pronta.
         job = _job_from_quarantine(fd, op)
         _create_destination(storage, str(intent.get("dest_title") or "Reunião"), job,
                             intent.get("event") if isinstance(intent.get("event"), dict) else None, slug=dest_slug)

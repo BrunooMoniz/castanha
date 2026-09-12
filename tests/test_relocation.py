@@ -627,6 +627,27 @@ class TestMoveRecording(RelocationFixture):
         dest = self.operation(self.a)['moved_to']['slug']
         self.assertIn(dest, criadas); self.assertEqual(len(self.metadata(dest)['recordings']), 1)
 
+    def test_interrupted_destination_creation_is_completed_on_resume(self):
+        from castanha.relocation import resume_move
+        real = self.storage.write_bronze_metadata
+        estado = {'n': 0}
+        def disco_cheio_na_criacao(slug, meta):
+            if meta.get('created_by') == 'move_recording' and estado['n'] == 0:
+                estado['n'] += 1; raise OSError(28, 'No space left on device')  # pasta criada, metadata não
+            return real(slug, meta)
+        antes = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()}
+        with patch.object(self.storage, 'write_bronze_metadata', side_effect=disco_cheio_na_criacao):
+            with self.assertRaises(OSError):
+                self.move(new_title='Reunião nova', event=EVENT)
+        novas = [self.storage.bronze_dir / n for n in ({p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes)]
+        self.assertEqual(len(novas), 1); self.assertFalse((novas[0] / 'metadata.json').exists())
+        self.assertTrue(resume_move(self.a, self.storage))
+        dest = self.operation(self.a)['moved_to']['slug']
+        self.assertEqual(novas[0].name, dest)
+        meta = self.metadata(dest)
+        self.assertEqual(meta['created_by'], 'move_recording'); self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
+        self.assertEqual(len(meta['recordings']), 1)
+
     def test_restored_destination_job_from_a_finished_move_is_deletable(self):
         from castanha import relocation
         from castanha.relocation import resume_move
@@ -954,6 +975,15 @@ class TestLinkMeetingToEvent(RelocationFixture):
         out = relink_silver(corpo, meta, silver_frontmatter(meta), previous_attendees=[{'name': 'Zé'}])
         self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\n\n## Resumo\nConvidados (presença não confirmada): Zé.\n', out)
         self.assertEqual(out.count('Convidados (presença não confirmada): Ana.'), 1)
+
+    def test_relink_silver_keeps_call_links_written_in_the_summary(self):
+        meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}], 'conference_url': 'https://meet.google.com/abc-defg-hij'}}
+        corpo = ('# Velho\n\nConvidados (presença não confirmada): Zé.\nLink da chamada: https://antigo.example/sala\n\n'
+                 '## Próximos passos\nLink da chamada: https://outra.example/sala-alternativa\n')
+        out = relink_silver(corpo, meta, silver_frontmatter(meta), previous_attendees=[{'name': 'Zé'}])
+        self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\nLink da chamada: https://meet.google.com/abc-defg-hij\n\n## Próximos passos', out)
+        self.assertIn('Link da chamada: https://outra.example/sala-alternativa', out)
+        self.assertNotIn('antigo.example', out)
 
     def test_relink_silver_never_touches_manual_annotations(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
