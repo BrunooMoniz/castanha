@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from castanha.calendar import MeetingEvent, get_upcoming_meetings
+from castanha.calendar import MeetingEvent, fetch_feed_events, get_upcoming_meetings
 from castanha.config import load_config
 from castanha.hidden import is_hidden, load_hidden
 from castanha.zinom_calendar import ZinomCalendar, motivo_curto
@@ -102,7 +102,17 @@ def events_on_day(dia: datetime.date, config: Optional[Dict[str, Any]] = None) -
     inicio = datetime.datetime(dia.year, dia.month, dia.day).astimezone()
     fim = (datetime.datetime(dia.year, dia.month, dia.day) + datetime.timedelta(days=1)).astimezone()
     eventos, avisos = _zinom_source(cfg).events_between(inicio, fim)
-    do_dia = [e for e in eventos if not e.all_day and inicio <= e.start < fim]
+    # Feeds iCal configurados entram como na agenda normal: sem Zinom, são a única fonte.
+    for feed in (cfg.get("calendar") or {}).get("feeds") or []:
+        url = feed.get("url") if isinstance(feed, dict) else None
+        if url:
+            eventos.extend(fetch_feed_events(url))
+    do_dia, vistos = [], set()
+    for e in sorted(eventos, key=lambda e: e.start):
+        if e.all_day or e.uid in vistos or not (inicio <= e.start < fim):
+            continue
+        vistos.add(e.uid)
+        do_dia.append(e)
     return {"meetings": do_dia, "warnings": avisos}
 
 

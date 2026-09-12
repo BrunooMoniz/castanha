@@ -616,11 +616,42 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(result['remaining_count'], 0)
         op = self.operation(self.a)
         self.assertTrue(op['reprocess_requested']); self.assertEqual(self.metadata(self.a)['content_status'], 'rebuilding')
+        self.assertTrue(self.metadata(self.a)['can_reprocess'])  # o botão Reprocessar continua disponível
         rebuilt = self.engine.process_pending(self.a)
         self.assertEqual(rebuilt['status'], 'success', rebuilt)
         self.assertEqual(self.storage.read_transcript(self.a), 'CONTEUDO job1')
         self.assertEqual(self.metadata(self.a)['content_status'], 'current')
         self.assertIn('RESUMO NOVO CONTEUDO job1', (self.storage.silver_dir / f'{self.a}.md').read_text())
+
+    def test_last_job_of_a_meeting_with_legacy_base_text_cannot_be_moved(self):
+        (self.storage.bronze_dir / self.a / '.jobs' / 'base_transcript.txt').write_text('TEXTO LEGADO DA ORIGEM')
+        self.move(to=self.b)  # ainda sobra job2: pode
+        self.engine.process_pending(self.a)
+        with self.assertRaisesRegex(RelocationError, 'transcrição legada'):
+            move_recording(self.a, 'capture_job2.ogg', to=self.b, storage=self.storage)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job2.ogg').exists())
+        self.assertIn('TEXTO LEGADO DA ORIGEM', self.storage.read_transcript(self.a))
+
+    def test_resume_does_not_resurrect_audio_deleted_with_the_legacy_command(self):
+        from castanha import relocation
+        from castanha.relocation import resume_move
+        real = relocation.write_json
+        def falha_no_committed(path, value):
+            if isinstance(value, dict) and (value.get('moved_from') or {}).get('committed') is True:
+                raise RuntimeError('queda antes do committed')
+            return real(path, value)
+        with patch('castanha.relocation.write_json', side_effect=falha_no_committed):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        self.assertEqual(self.jobs(self.b)[new_id]['moved_from']['phase'], 'audio')
+        self.assertEqual(self.storage.delete_recording(self.b, f'capture_{new_id}.ogg')['status'], 'ok')  # apagou de propósito
+        antes = self.metadata(self.b)
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertFalse((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
+        self.assertEqual(self.metadata(self.b)['recordings'], antes['recordings'])
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['moved_to']['removed_at_destination'])
 
     def test_move_message_tells_the_truth_about_automatic_resume(self):
         self.assertIn('castanha sync', self.move(to=self.b)['message'])  # fixture sem retry automático
@@ -838,6 +869,22 @@ class TestAgendaDoDia(unittest.TestCase):
             if tz_antes is None: os.environ.pop('TZ', None)
             else: os.environ['TZ'] = tz_antes
             time.tzset()
+
+    def test_day_query_includes_configured_ical_feeds(self):
+        from castanha import agenda
+        from castanha.agenda import events_on_day
+        agenda._zinom = None; self.addCleanup(lambda: setattr(agenda, '_zinom', None))
+        tz = datetime.datetime.now().astimezone()
+        offset = tz.strftime('%z')
+        ics = tempfile.NamedTemporaryFile('w', suffix='.ics', delete=False); self.addCleanup(lambda: os.unlink(ics.name))
+        ics.write('BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:ical-1\nSUMMARY:Reunião do feed\n'
+                  'DTSTART;TZID=UTC:' + datetime.datetime(2026, 9, 12, 14, 0, tzinfo=tz.tzinfo).astimezone(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S') + '\n'
+                  'DTEND;TZID=UTC:' + datetime.datetime(2026, 9, 12, 15, 0, tzinfo=tz.tzinfo).astimezone(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S') + '\n'
+                  'END:VEVENT\nBEGIN:VEVENT\nUID:ical-dia\nSUMMARY:Feriado\nDTSTART;VALUE=DATE:20260912\nEND:VEVENT\nEND:VCALENDAR\n'); ics.close()
+        cfg = {'calendar': {'feeds': [{'url': ics.name}], 'zinom': {'enabled': False}}, 'zinom': {'token': ''}}
+        resultado = events_on_day(datetime.date(2026, 9, 12), cfg)
+        self.assertEqual([e.uid for e in resultado['meetings']], ['ical-1'])
+        self.assertEqual(resultado['warnings'], [])
 
     def test_failed_calendar_becomes_warning_not_silence(self):
         from castanha.agenda import events_on_day

@@ -278,6 +278,29 @@ def _refuse_retired_source(bronze: Path, metadata: Any, job: Dict[str, Any]) -> 
                 raise RelocationError("Esta gravação foi retirada do Zinom e não pode ser movida para outra identidade")
 
 
+def _refuse_orphan_legacy_base(bronze: Path, metadata: Any, job: Dict[str, Any]) -> None:
+    """Mover o último job de uma reunião com texto legado na base a deixaria vazia.
+
+    O engine não reconstrói uma reunião só a partir de `base_transcript.txt`
+    (sem áudio e sem job), então a exclusão apagaria a transcrição consolidada e
+    os derivados sem ninguém para refazê-los. Melhor recusar do que esconder.
+    """
+    base = bronze / ".jobs" / "base_transcript.txt"
+    try:
+        legado = base.read_text(encoding="utf-8").strip() if base.exists() else ""
+    except OSError:
+        legado = ""
+    if not legado:
+        return
+    removed = set((metadata or {}).get("removed_job_ids") or []) if isinstance(metadata, dict) else set()
+    outros_jobs = [p for p in (bronze / ".jobs").glob("*.json") if p.stem != job.get("id") and p.stem not in removed]
+    outros_audios = [p for p in bronze.iterdir() if p.is_file() and p.suffix.lower() in {".ogg", ".opus", ".wav", ".flac", ".mp3", ".m4a"}
+                     and p.name != Path(str(job.get("audio_path"))).name]
+    if not outros_jobs and not outros_audios:
+        raise RelocationError("Esta é a última gravação de uma reunião com transcrição legada; movê-la deixaria a "
+                              "reunião sem como ser reconstruída. Use uma reunião nova para a gravação ou mantenha-a aqui")
+
+
 def _job_for(bronze: Path, filename: str) -> Dict[str, Any]:
     jobs_dir = bronze / ".jobs"
     jobs: List[Dict[str, Any]] = []
@@ -357,16 +380,23 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
     else:
         new_job = {**job, "id": new_job_id, "audio_path": str(dest_audio), "state": state, "stage": "transcribed",
                    "moved_from": {"slug": origin_slug, "job_id": job.get("id"),
-                                  "filename": Path(str(job.get("audio_path"))).name, "at": now, "committed": False}}
+                                  "filename": Path(str(job.get("audio_path"))).name, "at": now,
+                                  "phase": "job", "committed": False}}
         write_json(job_file, new_job)
     if dest_audio.exists():
         if file_sha256(dest_audio) != sha:
             raise RelocationError("Já existe outro áudio com essa identidade no destino; nada anexado")
+    elif (new_job.get("moved_from") or {}).get("phase") in ("audio", "metadata"):
+        # O áudio já tinha sido copiado numa tentativa anterior e não está mais aqui:
+        # alguém o apagou de propósito (`delete-recording`). Não ressuscitar.
+        return None
     else:
         atomic_write(dest_audio, quarantine)
         if file_sha256(dest_audio) != sha:
             dest_audio.unlink(missing_ok=True)
             raise RelocationError("Cópia do áudio divergente; nada anexado")
+        new_job = {**new_job, "moved_from": {**(new_job.get("moved_from") or {}), "phase": "audio"}}
+        write_json(job_file, new_job)
     # Artefatos por hash do áudio (canais já transcritos, escolha de provedor):
     # com eles o destino não precisa voltar ao ASR nem à VPS.
     for relative in (Path(".channels") / sha, Path(".providers") / f"{sha}.json"):
@@ -400,7 +430,7 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
                     restore_reason="Nova gravação adicionada; cópia anterior preservada")
     storage.write_bronze_metadata(dest_slug, meta)
     moved_from = dict(new_job.get("moved_from") or {})
-    moved_from["committed"] = True
+    moved_from.update(phase="metadata", committed=True)
     write_json(job_file, {**new_job, "moved_from": moved_from})
     return dest_audio
 
@@ -433,6 +463,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
     _refuse_unscoped_remote(storage._read_bronze_metadata(slug))
     job = _job_for(bronze_a, filename)
     _refuse_retired_source(bronze_a, storage._read_bronze_metadata(slug), job)
+    _refuse_orphan_legacy_base(bronze_a, storage._read_bronze_metadata(slug), job)
     record_event = event_record(event) if event is not None else None
     if to is not None:
         _slug_ok(to)
@@ -465,6 +496,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         _refuse_unscoped_remote(metadata_a)
         job = _job_for(bronze_a, filename)  # relido sob a trava: um retry concorrente pode tê-lo mudado
         _refuse_retired_source(bronze_a, metadata_a, job)
+        _refuse_orphan_legacy_base(bronze_a, metadata_a, job)
         try:
             excluded = _exclude_locked(fd, storage, slug, filename, expected_revision)
         except ExclusionConflict as exc:
@@ -536,7 +568,9 @@ def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str, storage=N
     sobras = bool(op.get("remaining")) or bool(surviving_jobs(storage, slug, metadata))
     metadata.update(can_restore=False, restore_reason=f"Gravação movida para {dest_title}")
     if sobras:
-        metadata.update(content_status="rebuilding", processing_status="pending")
+        # `can_reprocess` vem da exclusão contando só arquivos; transcrição
+        # preservada também se reprocessa, e o botão da janela depende disso.
+        metadata.update(content_status="rebuilding", processing_status="pending", can_reprocess=True)
     _write_json(fd, "metadata.json", metadata)
     op["moved_to"]["phase"] = "attached"
     if sobras:
@@ -604,8 +638,10 @@ def resume_move(slug: str, storage=None) -> bool:
                 with _archive(fd, op["id"]) as archive:
                     if _audio_hash(archive, "audio") != op["audio_sha256"]:
                         raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
-                _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
-                        op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
+                anexado = _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
+                                  op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
+                if anexado is None:
+                    op["moved_to"]["removed_at_destination"] = True
             _finish_origin(fd, slug, op, title, storage)
             return True
     raise RelocationError("O journal do movimento mudou repetidamente; tente de novo")
