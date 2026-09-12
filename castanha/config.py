@@ -90,6 +90,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_key": os.environ.get("GROQ_API_KEY", ""),
         "model": "openai/gpt-oss-120b",  # llama-3.3-70b-versatile foi descontinuado na Groq
     },
+    "relocation": {
+        # Mover gravação entre reuniões. Desligue para manter só o "Vincular a evento".
+        "move_enabled": True,
+    },
     "zinom": {
         "enabled": False,
         "endpoint": "https://zinom.ai/mcp",

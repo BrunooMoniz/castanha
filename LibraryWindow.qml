@@ -559,6 +559,7 @@ FloatingWindow {
             canReprocess: root.current ? root.current.can_reprocess === undefined ? root.audioRecords.length > 0 : root.current.can_reprocess : false
             cliCommand: root.cliCommand
             moveTargets: LibraryLogic.moveTargets(root.meetings, root.selectedSlug, root.current ? root.current.when : "", 20)
+            moveEnabled: root.current ? root.current.move_enabled !== false : true
             foreground: root.foreground; accent: root.accent; fontFamily: root.readingFontFamily
             onListen: function(index) { root.loadAudio(index, 0, true) }
             onBeforeMutation: root.prepareRecordingMutation(root.selectedSlug)

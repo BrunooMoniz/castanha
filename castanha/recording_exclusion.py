@@ -462,6 +462,11 @@ def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapte
     from castanha.zinom_adapter import ZinomAdapter
     storage = storage or MeetingStorage()
     _capture_guard(slug)
+    # Exclusão interrompida em `applying`: concluí-la primeiro, para a retomada do
+    # movimento encontrar o áudio na quarentena e o metadata já invalidado.
+    with _directory(storage, slug, lock=True) as fd:
+        interrompida = _load(fd)
+        if interrompida and interrompida.get('phase') == 'applying': _apply(fd, storage, interrompida)
     # Movimento interrompido depois do journal: anexar no destino antes de tocar na origem.
     from castanha.relocation import resume_move
     resume_move(slug, storage)

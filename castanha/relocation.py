@@ -348,14 +348,29 @@ def _job_for(bronze: Path, filename: str) -> Dict[str, Any]:
     return job
 
 
-def _create_destination(storage, title: str, job: Dict[str, Any], record_event: Optional[Dict[str, Any]]) -> str:
+def _planned_slug(storage, title: str, job: Dict[str, Any]) -> str:
+    """O nome da reunião nova, decidido antes de qualquer alteração e guardado na intenção."""
     recorded_at = str(job.get("recorded_at") or _agora())
     try:
         quando = datetime.datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
     except ValueError:
         quando = datetime.datetime.now()
-    dest_slug = storage.create_meeting_slug(title, dt=quando.astimezone() if quando.tzinfo else quando)
-    (storage.bronze_dir / dest_slug).mkdir(parents=True, exist_ok=False)
+    return storage.create_meeting_slug(title, dt=quando.astimezone() if quando.tzinfo else quando)
+
+
+def _create_destination(storage, title: str, job: Dict[str, Any], record_event: Optional[Dict[str, Any]],
+                        slug: Optional[str] = None) -> str:
+    recorded_at = str(job.get("recorded_at") or _agora())
+    dest_slug = slug or _planned_slug(storage, title, job)
+    bronze_b = storage.bronze_dir / dest_slug
+    if bronze_b.exists():
+        # Uma tentativa anterior já criou esta reunião (e caiu antes do journal): reutilizar,
+        # desde que seja a nossa e ainda vazia; nunca criar uma segunda com sufixo.
+        existente = storage._read_bronze_metadata(dest_slug) or {}
+        if existente.get("created_by") != "move_recording" or existente.get("recordings"):
+            raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
+        return dest_slug
+    bronze_b.mkdir(parents=True, exist_ok=False)
     state = job.get("state") if isinstance(job.get("state"), dict) else {}
     storage.write_bronze_metadata(dest_slug, {
         "slug": dest_slug, "title": title, "recorded_at": recorded_at, "mode": state.get("mode", "dual"),
@@ -473,6 +488,8 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
                                               _exclude_locked, _load, _save)
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
+    if not move_enabled():
+        raise RelocationError("Mover gravação está desligado nesta instalação (relocation.move_enabled)")
     _slug_ok(slug)
     if (not isinstance(filename, str) or Path(filename).name != filename or filename in ("", ".", "..")
             or "\\" in filename):
@@ -521,8 +538,9 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         # Intenção ANTES da exclusão: se o processo cair entre as duas, a retomada
         # sabe que aquela exclusão era um movimento e o conclui, em vez de tratá-la
         # como exclusão comum (retirada remota e sem destino).
+        planned = to if to is not None else _planned_slug(storage, dest_title, job)
         _write_json(fd, MOVE_INTENT, {"version": 1, "filename": filename, "job_id": job.get("id"),
-                                      "dest_slug": to, "new_title": None if to is not None else dest_title,
+                                      "dest_slug": planned, "create_new": to is None,
                                       "dest_title": dest_title, "event": record_event, "at": now})
         try:
             excluded = _exclude_locked(fd, storage, slug, filename, expected_revision)
@@ -540,9 +558,11 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         if not op or op.get("filename") != filename or op.get("phase") in ("restored", "restoring"):
             raise RelocationError("Exclusão da origem não encontrada; a gravação segue na quarentena")
         if op.get("moved_to"):
+            _remove_intent(fd)
             raise RelocationError("Esta gravação já foi movida")
         if op.get("unscoped_remote"):
             # Ainda sem `moved_to`: a exclusão fica restaurável pelo "Desfazer".
+            _remove_intent(fd)
             raise RelocationError("A retirada remota desta reunião não tem escopo verificável; a gravação foi "
                                   "excluída e continua restaurável, mas não foi movida")
         with _archive(fd, op["id"]) as archive:
@@ -558,7 +578,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
                     _destination_guards(to, slug, storage)
                 dest_slug = to
             else:
-                dest_slug = _create_destination(storage, dest_title, job, record_event)
+                dest_slug = _create_destination(storage, dest_title, job, record_event, slug=planned)
                 travas.enter_context(meeting_lock(storage.bronze_dir / dest_slug))
         except RelocationError as exc:
             # A origem já foi excluída com a intenção gravada: o daemon conclui o
@@ -606,22 +626,26 @@ def _adopt_intent(fd, storage, slug: str) -> bool:
 
     Cria o destino novo se a intenção o pedia. Devolve True se assumiu algo.
     """
-    from castanha.recording_exclusion import _load, _move_intent, _save
+    from castanha.recording_exclusion import _apply, _load, _move_intent, _save
     intent = _move_intent(fd)
     op = _load(fd)
     if not intent:
         return False
+    if op and op.get("phase") == "applying":
+        _apply(fd, storage, op)  # exclusão interrompida: concluí-la antes de assumir o movimento
+        op = _load(fd)
     if not op or op.get("phase") == "restored" or op.get("filename") != intent.get("filename"):
         _remove_intent(fd)  # a exclusão não chegou a acontecer: nada a mover
         return False
     if op.get("moved_to"):
         _remove_intent(fd)  # o journal já tinha assumido; sobrou só o arquivo
         return False
-    dest_slug = intent.get("dest_slug")
-    if not dest_slug:
+    dest_slug = str(intent.get("dest_slug") or "")
+    _slug_ok(dest_slug)
+    if intent.get("create_new") and not (storage.bronze_dir / dest_slug).exists():
         job = _job_from_quarantine(fd, op)
-        dest_slug = _create_destination(storage, str(intent.get("dest_title") or intent.get("new_title") or "Reunião"),
-                                        job, intent.get("event") if isinstance(intent.get("event"), dict) else None)
+        _create_destination(storage, str(intent.get("dest_title") or "Reunião"), job,
+                            intent.get("event") if isinstance(intent.get("event"), dict) else None, slug=dest_slug)
     op["moved_to"] = {"slug": dest_slug, "job_id": uuid.uuid4().hex, "title": str(intent.get("dest_title") or dest_slug),
                       "at": _agora(), "phase": "attaching", "adopted_from_intent": True}
     _save(fd, op)
@@ -658,6 +682,31 @@ def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str, storage=N
     return metadata
 
 
+def move_enabled() -> bool:
+    return bool((load_config().get("relocation") or {}).get("move_enabled", True))
+
+
+def attach_in_progress(storage, job: Any) -> bool:
+    """O movimento que trouxe este job ainda está anexando? (Só então o áudio não pode ser apagado.)
+
+    Um job restaurado no destino pode carregar `committed=False` de um snapshot
+    antigo mesmo com o movimento já encerrado na origem: aí não há o que esperar.
+    """
+    from castanha.annotations import _directory
+    from castanha.recording_exclusion import _load
+    moved_from = job.get("moved_from") if isinstance(job, dict) and isinstance(job.get("moved_from"), dict) else {}
+    origem = str(moved_from.get("slug") or "")
+    if not origem:
+        return False
+    try:
+        _slug_ok(origem)
+        with _directory(storage, origem) as fd:
+            op = _load(fd)
+    except (OSError, ValueError, KeyError, TypeError, RelocationError):
+        return False
+    return move_pending(op) and str(op["moved_to"].get("job_id")) == str(job.get("id"))
+
+
 def move_pending(op: Any) -> bool:
     """True quando o journal registra um movimento ainda não anexado no destino."""
     return bool(op) and isinstance(op.get("moved_to"), dict) and op["moved_to"].get("phase") == "attaching"
@@ -672,7 +721,7 @@ def resume_move(slug: str, storage=None) -> bool:
     destino e das travas recomeça. Sem nada a concluir, não faz nada.
     """
     from castanha.annotations import _directory
-    from castanha.recording_exclusion import _archive, _audio_hash, _load, _move_intent
+    from castanha.recording_exclusion import _apply, _archive, _audio_hash, _load, _move_intent
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
     bronze_a = storage.bronze_dir / slug
@@ -706,6 +755,9 @@ def resume_move(slug: str, storage=None) -> bool:
                 else:
                     travas.enter_context(meeting_lock(bronze_b))
             op = _load(fd)
+            if op and op.get("phase") == "applying":
+                _apply(fd, storage, op)  # exclusão interrompida: a quarentena precisa existir antes de anexar
+                op = _load(fd)
             if not move_pending(op):
                 return False
             if op.get("id") != visto.get("id") or op["moved_to"].get("slug") != dest_slug \

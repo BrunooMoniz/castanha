@@ -270,7 +270,8 @@ class MeetingLibrary:
         guests = event.get('attendees') if isinstance(event.get('attendees'), list) else []
         event_attendees = [_text(a.get('name') or a.get('email')) for a in guests
                            if isinstance(a, dict) and _text(a.get('name') or a.get('email'))]
-        return {'status': 'ok', 'meeting': {**entry, 'summary': _notes(silver or ''),
+        from castanha.relocation import move_enabled
+        return {'status': 'ok', 'meeting': {**entry, 'summary': _notes(silver or ''), 'move_enabled': move_enabled(),
                 'event_title': _text(event.get('title')), 'event_uid': _text(event.get('uid')),
                 'event_start': _text(event.get('start')), 'event_attendees': event_attendees,
                 'event_linked': bool(_text(event.get('uid'))),

@@ -241,6 +241,19 @@ class TestRecordingActionsUi(unittest.TestCase):
         ''')
         self.assertEqual(calls, [['recordings', 'move', '--json', '--expected-revision', '17', '--new-title=-Conversa avulsa', '--', 'fixture-a', 'second.ogg']])
 
+    def test_move_button_hidden_when_move_is_disabled(self):
+        calls = self.run_actions('no_action', r'''
+        if (harness.stage === 0) {
+          actions.moveEnabled = false
+          harness.require(!harness.control('recordingMove0').visible, 'move button shown while disabled')
+          harness.require(harness.control('recordingExclude0').visible, 'exclude button hidden too')
+          actions.moveEnabled = true
+          harness.require(harness.control('recordingMove0').visible, 'move button not restored')
+          harness.finish()
+        }
+        ''')
+        self.assertEqual(calls, [])
+
     def test_retry_results_array_with_pending_summary_never_claims_complete(self):
         for scenario in ('retry', 'retry_transcription', 'retry_zinom', 'retry_problems', 'retry_outer_pending'):
             with self.subTest(scenario=scenario):

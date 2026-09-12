@@ -352,8 +352,10 @@ class MeetingStorage:
                     continue
                 if (isinstance(job, dict) and Path(str(job.get("audio_path") or "")).name == target_rec["filename"]
                         and isinstance(job.get("moved_from"), dict) and job["moved_from"].get("committed") is False):
-                    return {"status": "error", "message": "Esta gravação está sendo anexada a partir de outra reunião; "
-                                                          "aguarde a retomada concluir antes de apagá-la."}
+                    from castanha.relocation import attach_in_progress
+                    if attach_in_progress(self, job):
+                        return {"status": "error", "message": "Esta gravação está sendo anexada a partir de outra reunião; "
+                                                              "aguarde a retomada concluir antes de apagá-la."}
 
         target_path = Path(target_rec["path"])
         if target_path.exists():

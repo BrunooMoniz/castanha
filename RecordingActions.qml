@@ -26,6 +26,7 @@ ColumnLayout {
   property string movingFile: ""
   property string moveTarget: ""
   property var moveTargets: []
+  property bool moveEnabled: true
   readonly property var moveOptions: [{value: "", label: "Escolha a reunião de destino…"}, {value: "__new__", label: "Nova reunião…"}]
     .concat(moveTargets.map(function(m) { return {value: m.slug, label: m.title + " · " + LibraryLogic.date(m.when)} }))
   readonly property bool canMove: !!movingFile && (moveTarget === "__new__" ? !!moveTitleField.text.trim() : !!moveTarget)
@@ -125,7 +126,7 @@ ColumnLayout {
           Text { Layout.fillWidth: true; text: LibraryLogic.clock(modelData.duration_seconds) + " · " + (modelData.size_bytes / (1024 * 1024)).toFixed(1) + " MB"; color: root.foreground; opacity: 0.7; font.family: root.fontFamily; font.pixelSize: Style.font.caption; textFormat: Text.PlainText }
         }
         LibraryButton { objectName: "recordingListen" + index; text: "Ouvir"; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.listen(index) }
-        LibraryButton { objectName: "recordingMove" + index; text: "Mover…"; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: { root.armedFile = ""; root.moveTarget = ""; root.movingFile = modelData.id } }
+        LibraryButton { objectName: "recordingMove" + index; text: "Mover…"; visible: root.moveEnabled; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: { root.armedFile = ""; root.moveTarget = ""; root.movingFile = modelData.id } }
         LibraryButton { objectName: "recordingExclude" + index; text: "Excluir"; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: { root.cancelMove(); root.armedFile = modelData.id } }
       }
     }

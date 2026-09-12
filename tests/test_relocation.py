@@ -586,6 +586,90 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(self.engine.process_pending(self.a)['status'], 'success')
         self.assertIn('TEXTO LEGADO', self.storage.read_transcript(self.a))
 
+    def test_exclusion_interrupted_in_applying_is_finished_before_the_move_resumes(self):
+        from castanha import recording_exclusion
+        real_apply = recording_exclusion._apply
+        estado = {'n': 0}
+        def cai_no_apply(fd, storage, op):
+            estado['n'] += 1
+            if estado['n'] == 1: raise RuntimeError('queda no meio da exclusão')  # ponteiro escrito, quarentena não
+            return real_apply(fd, storage, op)
+        with patch('castanha.recording_exclusion._apply', side_effect=cai_no_apply):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.assertEqual(self.operation(self.a)['phase'], 'applying')
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())  # áudio ainda no lugar
+        resumed = self.engine.process_pending(self.a)
+        self.assertEqual(resumed['status'], 'success', resumed)
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached')
+        self.assertFalse((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        self.assertIn(op['moved_to']['job_id'], self.jobs(self.b))
+        self.assertEqual(self.storage.read_transcript(self.a), 'CONTEUDO job2')
+
+    def test_planned_new_destination_is_reused_on_resume_not_duplicated(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        def falha_no_moved_to(fd, op):
+            if op.get('moved_to') and not op['moved_to'].get('adopted_from_intent'):
+                raise RuntimeError('queda depois de criar o destino')
+            return real_save(fd, op)
+        antes = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()}
+        with patch('castanha.recording_exclusion._save', side_effect=falha_no_moved_to):
+            with self.assertRaises(RuntimeError):
+                self.move(new_title='Reunião nova', event=EVENT)
+        criadas = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes
+        self.assertEqual(len(criadas), 1)  # o destino já existe, vazio
+        self.assertTrue(resume_move(self.a, self.storage))
+        depois = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes
+        self.assertEqual(depois, criadas)  # nenhuma "reunião-nova-2"
+        dest = self.operation(self.a)['moved_to']['slug']
+        self.assertIn(dest, criadas); self.assertEqual(len(self.metadata(dest)['recordings']), 1)
+
+    def test_restored_destination_job_from_a_finished_move_is_deletable(self):
+        from castanha import relocation
+        from castanha.relocation import resume_move
+        real = relocation.write_json
+        def falha_no_committed(path, value):
+            if isinstance(value, dict) and (value.get('moved_from') or {}).get('committed') is True:
+                raise RuntimeError('queda antes do committed')
+            return real(path, value)
+        with patch('castanha.relocation.write_json', side_effect=falha_no_committed):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        exclude_recording(self.b, f'capture_{new_id}.ogg', self.storage)   # ele tira do destino
+        self.assertTrue(resume_move(self.a, self.storage))                  # origem encerra: removido no destino
+        restore_recording(self.b, self.operation(self.b)['id'], self.storage)  # e depois desfaz no destino
+        self.assertFalse(self.jobs(self.b)[new_id]['moved_from']['committed'])  # snapshot antigo
+        self.assertFalse(resume_move(self.a, self.storage))
+        self.assertEqual(self.storage.delete_recording(self.b, f'capture_{new_id}.ogg')['status'], 'ok')  # não trava para sempre
+
+    def test_unscoped_refusal_after_exclusion_leaves_no_intent_and_keeps_restore(self):
+        from castanha import recording_exclusion
+        from castanha.recording_exclusion import MOVE_INTENT
+        real = recording_exclusion._exclude_locked
+        def marca_sem_escopo(fd, storage, slug, filename, expected_revision=None):
+            result = real(fd, storage, slug, filename, expected_revision)
+            op = recording_exclusion._load(fd); op['unscoped_remote'] = True; recording_exclusion._save(fd, op)
+            return result
+        with patch('castanha.recording_exclusion._exclude_locked', side_effect=marca_sem_escopo):
+            with self.assertRaisesRegex(RelocationError, 'escopo verificável'):
+                self.move(to=self.b)
+        self.assertFalse((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())
+        restore_recording(self.a, self.operation(self.a)['id'], self.storage)  # o desfazer prometido funciona
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_move_can_be_switched_off_by_config(self):
+        cfg_path = self.root / 'config/castanha/config.json'
+        cfg = json.loads(cfg_path.read_text()); cfg['relocation'] = {'move_enabled': False}; cfg_path.write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(RelocationError, 'desligado'):
+            self.move(to=self.b)
+        self.assertFalse(MeetingLibrary(self.storage).detail(self.a)['meeting']['move_enabled'])
+        cfg['relocation'] = {'move_enabled': True}; cfg_path.write_text(json.dumps(cfg))
+        self.assertEqual(self.move(to=self.b)['status'], 'ok')
+
     def test_pending_move_blocks_another_exclusion_in_the_origin(self):
         with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
             with self.assertRaises(RuntimeError):
