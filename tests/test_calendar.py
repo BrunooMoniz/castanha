@@ -1,5 +1,6 @@
 import datetime
 import unittest
+from unittest.mock import patch
 from castanha.calendar import parse_ics_content, extract_conference_url
 
 SAMPLE_ICS = r"""BEGIN:VCALENDAR
@@ -167,6 +168,68 @@ class TestZinomCalendarFalhas(unittest.TestCase):
         fonte.upcoming()
         self.assertEqual(len(chamadas), 1)
 
+    # ---- sem rede: retentativa curta e escalonada; limite: cadência inteira
+    def test_sem_conexao_tenta_de_novo_em_30_s_e_dobra_ate_a_cadencia(self):
+        import time
+        from castanha.zinom_adapter import ZinomError
+        from castanha.zinom_calendar import MOTIVO_CONEXAO, RETRY_CONEXAO_SEC
+        fonte = self._fonte()
+        chamadas = []
+        sem_rede = ZinomError("<urlopen error [Errno -3] Temporary failure in name resolution>")
+        self._respostas(fonte, {("list_event_details", "a"): sem_rede, ("list_event_details", "b"): sem_rede}, chamadas)
+        fonte.upcoming()
+        self.assertEqual(fonte.last_error, MOTIVO_CONEXAO)
+        self.assertAlmostEqual(fonte._proxima_tentativa - time.time(), RETRY_CONEXAO_SEC, delta=2)
+        fonte.upcoming()  # ainda dentro dos 30 s: não vai ao hub
+        self.assertEqual(len(chamadas), 2)
+        fonte._proxima_tentativa = 0.0  # os 30 s passaram
+        fonte.upcoming()
+        self.assertAlmostEqual(fonte._proxima_tentativa - time.time(), 2 * RETRY_CONEXAO_SEC, delta=2)
+        for _ in range(6):
+            fonte._proxima_tentativa = 0.0
+            fonte.upcoming()
+        self.assertAlmostEqual(fonte._proxima_tentativa - time.time(), fonte.poll_interval_sec, delta=2)
+
+    def test_limite_de_chamadas_espera_a_cadencia_inteira(self):
+        import time
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        self._respostas(fonte, {("list_event_details", "a"): ZinomError("HTTP 429: Too Many Requests")})
+        fonte.upcoming()
+        self.assertAlmostEqual(fonte._proxima_tentativa - time.time(), fonte.poll_interval_sec, delta=2)
+
+    def test_ciclo_bom_volta_a_cadencia_normal_e_zera_a_escalada(self):
+        import time
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte()
+        sem_rede = ZinomError("<urlopen error [Errno 111] Connection refused>")
+        self._respostas(fonte, {("list_event_details", "a"): sem_rede, ("list_event_details", "b"): sem_rede})
+        fonte.upcoming()
+        fonte._proxima_tentativa = 0.0
+        fonte.upcoming()
+        self.assertEqual(fonte._falhas_seguidas, 2)
+        self._respostas(fonte)
+        self.assertEqual(len(fonte.upcoming(force=True)), 2)
+        self.assertEqual(fonte._falhas_seguidas, 0)
+        self.assertAlmostEqual(fonte._proxima_tentativa - time.time(), fonte.poll_interval_sec, delta=2)
+
+    def test_busca_alcanca_a_manha_seguinte_mesmo_pedindo_12_h(self):
+        """O painel mostra 12 h, mas a lista guardada precisa sobreviver a uma noite suspensa."""
+        fonte = self._fonte()
+        agendas = list(fonte._calendars)
+        janelas = []
+
+        def _call(name, args):
+            if name == "list_calendars":
+                return {"calendars": agendas}
+            janelas.append(datetime.datetime.fromisoformat(args["time_max"]))
+            return {"events": []}
+        fonte._call = _call
+        fonte.upcoming(window_hours=12)
+        piso = datetime.datetime.now().astimezone() + datetime.timedelta(hours=36) - datetime.timedelta(minutes=1)
+        self.assertEqual(len(janelas), 2)
+        self.assertTrue(all(t_max >= piso for t_max in janelas), janelas)
+
     # ---- tool ausente só pela forma JSON-RPC do hub
     def test_tool_ausente_rebaixa_para_a_listagem_magra(self):
         from castanha.zinom_adapter import ZinomError
@@ -211,3 +274,18 @@ class TestZinomCalendarFalhas(unittest.TestCase):
         longo = motivo_curto(ZinomError("list_event_details devolveu erro: " + "x" * 200))
         self.assertLessEqual(len(longo), 80)
         self.assertNotIn("http", motivo_curto(ZinomError(self.GOOGLE_404)))
+
+
+class TestIcalEmAndamento(unittest.TestCase):
+    def test_evento_em_andamento_continua_e_o_que_acabou_sai(self):
+        from castanha.calendar import MeetingEvent, get_upcoming_meetings
+        agora = datetime.datetime.now(datetime.timezone.utc)
+        em_curso = MeetingEvent(uid="a", title="Em curso", attendees=[],
+                                start=agora - datetime.timedelta(minutes=40), end=agora + datetime.timedelta(minutes=20))
+        acabou = MeetingEvent(uid="b", title="Acabou", attendees=[],
+                              start=agora - datetime.timedelta(minutes=90), end=agora - datetime.timedelta(minutes=30))
+        sem_fim = MeetingEvent(uid="c", title="Sem fim recente", attendees=[],
+                               start=agora - datetime.timedelta(minutes=10), end=agora - datetime.timedelta(minutes=10))
+        with patch("castanha.calendar.fetch_feed_events", return_value=[em_curso, acabou, sem_fim]):
+            titulos = [e.title for e in get_upcoming_meetings([{"url": "x"}], window_minutes=120)]
+        self.assertEqual(titulos, ["Em curso", "Sem fim recente"])

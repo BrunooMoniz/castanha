@@ -212,12 +212,14 @@ def get_upcoming_meetings(feeds: List[Dict[str, str]], window_minutes: int = 120
         if url:
             all_events.extend(fetch_feed_events(url))
 
-    cutoff_past = now - datetime.timedelta(minutes=15)
     cutoff_future = now + datetime.timedelta(minutes=window_minutes)
+    carencia = datetime.timedelta(minutes=15)
 
+    # Em andamento continua na lista até acabar (15 min quando o evento não
+    # diz quando acaba). Mesma regra de `agenda.collect_upcoming`.
     upcoming = [
         e for e in all_events
-        if cutoff_past <= e.start <= cutoff_future
+        if e.start <= cutoff_future and max(e.end, e.start + carencia) > now
     ]
     upcoming.sort(key=lambda x: x.start)
     return upcoming

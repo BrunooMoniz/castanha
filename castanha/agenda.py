@@ -15,6 +15,9 @@ from castanha.hidden import is_hidden, load_hidden
 from castanha.zinom_calendar import ZinomCalendar, motivo_curto
 
 _zinom: Optional[ZinomCalendar] = None
+# Evento sem hora de fim (iCal sem DTEND) continua valendo 15 min depois de
+# começar, como sempre valeu.
+CARENCIA_APOS_COMECO = datetime.timedelta(minutes=15)
 # Falha fora do ZinomCalendar (rede de segurança): a fonte não deve levantar,
 # mas se levantar o painel precisa saber.
 _erro_coleta: Optional[str] = None
@@ -53,7 +56,6 @@ def collect_upcoming(
         print(f"[Castanha] Agenda do Zinom indisponível: {e}", file=sys.stderr)
 
     agora = datetime.datetime.now(datetime.timezone.utc)
-    corte = agora - datetime.timedelta(minutes=15)
     limite = agora + datetime.timedelta(minutes=window_minutes)
 
     # Mesma reunião vinda do iCal e do Zinom: fica a que tem link de chamada.
@@ -64,12 +66,18 @@ def collect_upcoming(
             continue
         inicio = e.start if e.start.tzinfo else e.start.replace(tzinfo=datetime.timezone.utc)
         fim = e.end if e.end.tzinfo else e.end.replace(tzinfo=datetime.timezone.utc)
+        if inicio > limite:
+            continue
         if e.all_day:
-            # Dia inteiro começa à meia-noite, sempre antes do corte: vale
-            # enquanto o dia não acabou, e entra na janela pelo começo.
-            if fim <= agora or inicio > limite:
+            # Dia inteiro começa à meia-noite: vale enquanto o dia não acabou.
+            if fim <= agora:
                 continue
-        elif not (corte <= inicio <= limite):
+        elif max(fim, inicio + CARENCIA_APOS_COMECO) <= agora:
+            # Reunião em andamento fica na lista até acabar: é a que ele quer
+            # gravar. Antes o corte era 15 min depois do começo, e em 12/09/2026
+            # a Nora Weekly das 10:30 ficou de fora: a máquina acordou sem rede
+            # às 10:57, a agenda só voltou às 11:02 e a reunião já tinha
+            # "passado". Ele gravou na mão, sem título nem participantes.
             continue
         chave = f"{e.title.strip().lower()}|{inicio.isoformat()}"
         atual = por_chave.get(chave)
@@ -82,10 +90,10 @@ def collect_upcoming(
 
 
 def next_timed(eventos: List[MeetingEvent]) -> Optional[MeetingEvent]:
-    """A próxima reunião de verdade: evento de dia inteiro não conta.
+    """A reunião de agora: a que está em andamento, ou a próxima a começar.
 
-    Ele iria para a barra o dia todo e dispararia o aviso de "reunião em
-    instantes" às 23h58 da véspera.
+    Evento de dia inteiro não conta: iria para a barra o dia todo e dispararia
+    o aviso de "reunião em instantes" às 23h58 da véspera.
     """
     return next((m for m in eventos if not m.all_day), None)
 

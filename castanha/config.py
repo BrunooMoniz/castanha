@@ -37,7 +37,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             # sem credencial do Google guardada aqui.
             "enabled": True,
             "poll_interval_sec": 300,
-            "window_hours": 12,
+            # Horizonte de busca (o painel mostra 12 h): alcança a manhã
+            # seguinte mesmo com a máquina suspensa à noite.
+            "window_hours": 36,
             # Vazio = a principal de cada conta mais as agendas que ele pode
             # editar (owner/writer). Só-leitura (feriados, agenda alheia) fica fora.
             "calendars": [],

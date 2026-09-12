@@ -1,3 +1,4 @@
+import datetime
 import json
 import shutil
 import tempfile
@@ -84,6 +85,45 @@ class TestEngine(unittest.TestCase):
             )
             res = engine.stop_recording()
             return res, get_t
+
+    # ---- `castanha start` sem evento: só a reunião de agora entra sozinha
+    def _next_meeting(self, comeca_em_min, dura_min=60, **extra):
+        from castanha.state import StateManager
+        agora = datetime.datetime.now().astimezone()
+        inicio = agora + datetime.timedelta(minutes=comeca_em_min)
+        evento = {"uid": "ev", "title": "Nora Weekly", "attendees": [], "start": inicio.isoformat(),
+                  "end": (inicio + datetime.timedelta(minutes=dura_min)).isoformat(), **extra}
+        StateManager().write({"next_meeting": evento})
+        return evento
+
+    def _start_sem_evento(self):
+        engine = self._engine()
+        with patch("castanha.engine.notify"), patch("castanha.engine.is_default_source_muted", return_value=False):
+            return engine.start_recording(mode="dual")
+
+    def test_start_sem_evento_anexa_a_reuniao_em_andamento(self):
+        from castanha.state import StateManager
+        self._next_meeting(comeca_em_min=-32)
+        self.assertEqual(self._start_sem_evento()["title"], "Nora Weekly")
+        self.assertEqual(StateManager().read()["current_meeting"]["uid"], "ev")
+
+    def test_start_sem_evento_anexa_a_reuniao_prestes_a_comecar(self):
+        self._next_meeting(comeca_em_min=10)
+        self.assertEqual(self._start_sem_evento()["title"], "Nora Weekly")
+
+    def test_start_sem_evento_nao_anexa_reuniao_de_daqui_a_horas(self):
+        from castanha.state import StateManager
+        self._next_meeting(comeca_em_min=180)
+        self.assertEqual(self._start_sem_evento()["title"], "Reunião Avulsa")
+        self.assertIsNone(StateManager().read()["current_meeting"])
+
+    def test_start_sem_evento_nao_anexa_reuniao_que_ja_acabou(self):
+        self._next_meeting(comeca_em_min=-120, dura_min=60)
+        self.assertEqual(self._start_sem_evento()["title"], "Reunião Avulsa")
+
+    def test_start_sem_evento_ignora_dia_inteiro(self):
+        self._next_meeting(comeca_em_min=-60, dura_min=24 * 60, all_day=True)
+        self.assertEqual(self._start_sem_evento()["title"], "Reunião Avulsa")
 
     def test_ciclo_completo_com_audio_bom(self):
         engine = self._engine()

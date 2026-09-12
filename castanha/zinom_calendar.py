@@ -30,6 +30,13 @@ CALENDARS_TTL_SEC = 3600
 # alguém reiniciar o processo. Foi o que aconteceu em 04/09.
 DETALHE_RETRY_SEC = 1800
 
+# Sem rede (máquina recém-acordada, wifi ainda subindo), a próxima tentativa vem
+# em 30 s, dobrando até a cadência normal. Limite de chamadas (429) espera a
+# cadência inteira: bater de novo num limite compartilhado só piora. Em
+# 12/09/2026 a primeira tentativa depois da suspensão falhou 4 s antes do wifi
+# voltar, e a agenda ficou 5 min parada com a reunião já em andamento.
+RETRY_CONEXAO_SEC = 30
+
 # Como o hub diz que uma tool não existe (sondado em 07/09/2026):
 # `isError` com o texto "MCP error -32602: Tool <nome> not found". Só isso
 # rebaixa para a listagem magra. Um 404 do Google numa agenda também termina
@@ -113,7 +120,10 @@ class ZinomCalendar:
         self.endpoint = z_cfg.get("endpoint", "https://zinom.ai/mcp")
         self.token = z_cfg.get("token", "")
         self.enabled = bool(c_cfg.get("enabled", True)) and bool(self.token)
-        self.window_hours = int(c_cfg.get("window_hours", 12))
+        # Horizonte de BUSCA, maior do que as 12 h que o painel mostra: com a
+        # máquina suspensa à noite, a última lista boa precisa alcançar a
+        # reunião da manhã seguinte (em 11/09/2026 parou 5 min antes dela).
+        self.window_hours = int(c_cfg.get("window_hours", 36))
         # Dia inteiro entra por padrão desde 05/09/2026: lembrete e evento sem
         # link também são agenda, e o que não for reunião ele esconde no painel.
         self.skip_all_day = bool(c_cfg.get("skip_all_day", False))
@@ -133,7 +143,10 @@ class ZinomCalendar:
         self._detalhe_disponivel: Optional[bool] = None
         self._detalhe_negado_em: float = 0.0
         self._cache: List[MeetingEvent] = []
-        self._cache_at: float = 0.0
+        # Quando vale ir ao hub de novo (cadência normal, ou retentativa curta
+        # depois de falha de conexão).
+        self._proxima_tentativa: float = 0.0
+        self._falhas_seguidas: int = 0
         # Honestidade da agenda: em falha, a última lista boa fica e o painel
         # é avisado. Sem isto, rate limit virava "nada nas próximas horas".
         self._good_at: float = 0.0
@@ -190,10 +203,12 @@ class ZinomCalendar:
     def upcoming(self, window_hours: Optional[int] = None, force: bool = False) -> List[MeetingEvent]:
         if not self.enabled:
             return []
-        if not force and self._cache_at and (time.time() - self._cache_at) < self.poll_interval_sec:
+        if not force and time.time() < self._proxima_tentativa:
             return self._cache
 
-        horas = window_hours if window_hours is not None else self.window_hours
+        # Quem pede menos do que o horizonte configurado recebe o horizonte: a
+        # lista guardada é a rede de segurança para quando não há rede.
+        horas = max(window_hours or 0, self.window_hours)
         agora = datetime.datetime.now().astimezone()
         # Quinze minutos para trás: reunião que começou agora ainda é a de agora.
         t_min = (agora - datetime.timedelta(minutes=15)).isoformat()
@@ -229,15 +244,22 @@ class ZinomCalendar:
                 vistos.add(evento.uid)
                 eventos.append(evento)
 
-        # Mesma cadência com ou sem falha: bater de novo a cada minuto num
-        # limite compartilhado só piora.
-        self._cache_at = time.time()
+        agora_ts = time.time()
         self.last_error = falha
         if falha is not None:
+            self._falhas_seguidas += 1
+            if falha == MOTIVO_LIMITE:
+                espera = self.poll_interval_sec
+            else:
+                escalada = RETRY_CONEXAO_SEC * 2 ** min(self._falhas_seguidas - 1, 10)
+                espera = min(self.poll_interval_sec, escalada)
+            self._proxima_tentativa = agora_ts + espera
             return self._cache
+        self._falhas_seguidas = 0
+        self._proxima_tentativa = agora_ts + self.poll_interval_sec
         eventos.sort(key=lambda e: e.start)
         self._cache = eventos
-        self._good_at = self._cache_at
+        self._good_at = agora_ts
         return eventos
 
     def _quer_detalhe(self) -> bool:

@@ -287,6 +287,26 @@ class TestAgendaAviso(unittest.TestCase):
         self.assertEqual(estado["upcoming_meetings"], anteriores)
         self.assertEqual(estado["agenda_error"], "Agenda indisponível: limite de chamadas do Zinom")
 
+    def test_aviso_e_da_reuniao_prestes_a_comecar_mesmo_com_outra_em_andamento(self):
+        """A em andamento vira `next_meeting` (é a que se grava); o aviso é da emenda."""
+        from castanha.state import StateManager
+        daemon, _ = self._daemon()
+        agora = datetime.datetime.now(datetime.timezone.utc)
+        em_curso = MeetingEvent(uid="em_curso", title="Em curso", attendees=[],
+                                start=agora - datetime.timedelta(minutes=30), end=agora + datetime.timedelta(minutes=30))
+        emenda = MeetingEvent(uid="emenda", title="Emenda", attendees=[],
+                              start=agora + datetime.timedelta(seconds=60), end=agora + datetime.timedelta(minutes=61))
+        self._fonte()
+        avisadas = []
+        with patch.object(daemon, "_trigger_meeting_alert", side_effect=lambda m: avisadas.append(m.uid)):
+            daemon._apply_agenda_result(([em_curso, emenda], None))
+            for th in threading.enumerate():
+                if th.name.startswith("alert-"):
+                    th.join(timeout=2)
+        self.assertEqual(avisadas, ["emenda"])
+        self.assertEqual(daemon.notified_meeting_uids, {"emenda"})
+        self.assertEqual(StateManager().read()["next_meeting"]["uid"], "em_curso")
+
     def test_agenda_lenta_nao_bloqueia_a_projecao_do_audio(self):
         daemon, _ = self._daemon()
         daemon.state_mgr.write({
@@ -318,3 +338,53 @@ class TestAgendaAviso(unittest.TestCase):
 
         self.assertGreaterEqual(peak.call_count, 2)
         self.assertEqual(daemon.state_mgr.read()["audio_peak"], 0.8)
+
+
+class TestAgendaEmAndamento(unittest.TestCase):
+    """Reunião que já começou fica na lista até acabar: é a que ele quer gravar.
+
+    Em 12/09/2026 a Nora Weekly das 10:30 começou com a máquina suspensa. A
+    agenda só voltou às 11:02, e o corte de 15 minutos depois do começo já tinha
+    descartado a reunião: o painel não a mostrou e ele gravou na mão.
+    """
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.env = patch.dict("os.environ", {"XDG_STATE_HOME": str(self.temp)})
+        self.env.start()
+        self.cfg = {"calendar": {"feeds": [{"url": "x"}], "zinom": {"enabled": False}}, "zinom": {"token": ""}}
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def _coletar(self, eventos):
+        with patch("castanha.agenda.get_upcoming_meetings", return_value=eventos):
+            return collect_upcoming(self.cfg)
+
+    @staticmethod
+    def _reuniao(uid, title, comecou_ha_min, dura_min=60):
+        agora = datetime.datetime.now(datetime.timezone.utc)
+        inicio = agora - datetime.timedelta(minutes=comecou_ha_min)
+        return MeetingEvent(uid=uid, title=title, start=inicio,
+                            end=inicio + datetime.timedelta(minutes=dura_min), attendees=[])
+
+    def test_em_andamento_continua_na_lista_e_e_a_proxima(self):
+        eventos = [self._reuniao("weekly_20260912T133000Z", "Nora Weekly", comecou_ha_min=32, dura_min=60),
+                   _timed("depois", "Outra", 3)]
+        lista = self._coletar(eventos)
+        self.assertEqual([m.title for m in lista], ["Nora Weekly", "Outra"])
+        self.assertEqual(next_timed(lista).title, "Nora Weekly")
+
+    def test_reuniao_que_acabou_sai(self):
+        eventos = [self._reuniao("acabou", "Já acabou", comecou_ha_min=90, dura_min=60)]
+        self.assertEqual(self._coletar(eventos), [])
+
+    def test_sem_hora_de_fim_vale_a_carencia_de_15_minutos(self):
+        recente = self._reuniao("recente", "Sem fim, recente", comecou_ha_min=10, dura_min=0)
+        antiga = self._reuniao("antiga", "Sem fim, antiga", comecou_ha_min=20, dura_min=0)
+        self.assertEqual([m.title for m in self._coletar([recente, antiga])], ["Sem fim, recente"])
+
+    def test_fora_da_janela_continua_fora(self):
+        eventos = [_timed("longe", "Amanhã de noite", 30)]
+        self.assertEqual(self._coletar(eventos), [])

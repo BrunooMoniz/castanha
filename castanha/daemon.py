@@ -128,19 +128,23 @@ class CastanhaDaemon:
                 "agenda_updated_at": time.time(),
                 "agenda_error": agenda_warning(self.config, error),
             })
-            if proxima:
-                now_utc = datetime.datetime.now(datetime.timezone.utc)
-                inicio = proxima.start if proxima.start.tzinfo else proxima.start.replace(
+            # O aviso é de cada reunião prestes a começar, não só da primeira
+            # da lista: a primeira pode ser uma em andamento (ela fica até
+            # acabar), e a emenda das 11:30 não pode ficar sem aviso por isso.
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            notify_before_min = self.config.get("calendar", {}).get("notify_minutes_before", 2)
+            for reuniao in proximas:
+                if reuniao.all_day or reuniao.uid in self.notified_meeting_uids:
+                    continue
+                inicio = reuniao.start if reuniao.start.tzinfo else reuniao.start.replace(
                     tzinfo=datetime.timezone.utc)
                 time_until = (inicio - now_utc).total_seconds()
-                notify_before_min = self.config.get("calendar", {}).get("notify_minutes_before", 2)
-                if (0 <= time_until <= (notify_before_min * 60)
-                        and proxima.uid not in self.notified_meeting_uids):
-                    self.notified_meeting_uids.add(proxima.uid)
+                if 0 <= time_until <= (notify_before_min * 60):
+                    self.notified_meeting_uids.add(reuniao.uid)
                     threading.Thread(
                         target=self._trigger_meeting_alert,
-                        args=(proxima,), daemon=True,
-                        name=f"alert-{proxima.uid}",
+                        args=(reuniao,), daemon=True,
+                        name=f"alert-{reuniao.uid}",
                     ).start()
         except Exception as error:
             print(t("daemon.calendar_error", error=error))

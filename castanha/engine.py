@@ -6,7 +6,7 @@ import uuid
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,6 +55,34 @@ def notify(title: str, message: str, actions: Optional[list] = None, timeout: in
         except OSError as exc:
             print(t("notify.unavailable", exc=type(exc).__name__), file=sys.stderr)
         return None
+
+# Quanto antes de começar a reunião da agenda já vale como "a de agora" para o
+# `castanha start` sem evento. Depois de começar, vale até acabar.
+ANTECEDENCIA_ANEXO = timedelta(minutes=15)
+
+
+def _reuniao_de_agora(evento: Dict[str, Any], agora: Optional[datetime] = None) -> bool:
+    """Em andamento, ou começando nos próximos 15 minutos. Dia inteiro não conta.
+
+    Antes, QUALQUER `next_meeting` entrava: uma conversa avulsa às 14h virava a
+    reunião das 17h, com título e participantes errados na nota e no Zinom.
+    """
+    if not isinstance(evento, dict) or evento.get("all_day"):
+        return False
+    try:
+        inicio = datetime.fromisoformat(str(evento.get("start") or ""))
+    except ValueError:
+        return False
+    try:
+        fim = datetime.fromisoformat(str(evento.get("end") or ""))
+    except ValueError:
+        fim = inicio + timedelta(hours=1)
+    if (fim.tzinfo is None) != (inicio.tzinfo is None):
+        fim = fim.replace(tzinfo=inicio.tzinfo)
+    fim = max(fim, inicio + ANTECEDENCIA_ANEXO)
+    agora = agora or datetime.now(inicio.tzinfo)
+    return (inicio - ANTECEDENCIA_ANEXO) <= agora < fim
+
 
 class CastanhaEngine:
     def __init__(self):
@@ -169,9 +197,10 @@ class CastanhaEngine:
                     "attendees": [],
                 }
             else:
-                # Tenta pegar da próxima reunião do calendário se estiver no horário
+                # A reunião da agenda só entra sozinha se for a de agora (em
+                # andamento ou prestes a começar); fora disso é "Reunião Avulsa".
                 next_m = state.get("next_meeting")
-                if next_m:
+                if next_m and _reuniao_de_agora(next_m):
                     current_meeting_info = next_m
 
         meeting_title = current_meeting_info.get("title") if current_meeting_info else "Reunião Avulsa"
