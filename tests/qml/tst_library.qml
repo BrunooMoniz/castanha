@@ -14,6 +14,26 @@ TestCase {
     compare(Logic.filtered(items, "missing", "all").length, 0)
     compare(items.length, 2)
   }
+  function test_iso_date_and_event_label_never_invent_values() {
+    compare(Logic.isoDate("2026-09-12T11:29:50.281638"), "2026-09-12")
+    compare(Logic.isoDate(""), "")
+    compare(Logic.isoDate("hoje"), "")
+    compare(Logic.eventLabel({start: "2026-09-12T10:30:00-03:00", title: "Nora Weekly", account: "moniz@nora.finance", attendees: [{}, {}]}), "10:30 · Nora Weekly · moniz · 2 convidados")
+    compare(Logic.eventLabel({start: "2026-09-12T10:30:00-03:00", title: "Solo", attendees: [{}]}), "10:30 · Solo · 1 convidado")
+    compare(Logic.eventLabel({title: ""}), "--:-- · Reunião")
+  }
+  function test_move_targets_put_same_day_first_and_exclude_current() {
+    var items = [{slug: "hoje-b", title: "B", when: "2026-09-12T15:00:00"},
+                 {slug: "ontem", title: "Ontem", when: "2026-09-11T10:00:00"},
+                 {slug: "atual", title: "Atual", when: "2026-09-12T11:00:00"},
+                 {slug: "hoje-a", title: "A", when: "2026-09-12T09:00:00"},
+                 {slug: "sem-data", title: ""}]
+    var targets = Logic.moveTargets(items, "atual", "2026-09-12T11:00:00", 20)
+    compare(targets.map(function(t) { return t.slug }), ["hoje-b", "hoje-a", "ontem", "sem-data"])
+    compare(targets[3].title, "sem-data")
+    compare(Logic.moveTargets(items, "atual", "", 2).length, 2)
+    compare(items.length, 5)
+  }
   function test_time_format_never_invents_missing_timestamps() {
     compare(Logic.clock(0), "0:00")
     compare(Logic.clock(65), "1:05")

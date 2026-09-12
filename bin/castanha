@@ -279,6 +279,69 @@ def cmd_recording_exclusion(args):
     if result["status"] != "ok": sys.exit(1)
 
 
+def _evento_do_dia(uid, data, slug):
+    """O evento da agenda pelo uid, buscado no hub para o dia dado (ou o dia da gravação)."""
+    import datetime as _dt
+    from castanha.agenda import find_event
+    from castanha.relocation import RelocationError
+    if data:
+        try:
+            dia = _dt.date.fromisoformat(data)
+        except ValueError:
+            raise RelocationError("Data inválida; use AAAA-MM-DD")
+    else:
+        meta = MeetingStorage()._read_bronze_metadata(slug) or {}
+        try:
+            dia = _dt.datetime.fromisoformat(str(meta.get("recorded_at") or "")).date()
+        except ValueError:
+            raise RelocationError("Reunião sem data de gravação; informe --date")
+    try:
+        evento = find_event(dia, uid)
+    except Exception as exc:
+        from castanha.zinom_calendar import motivo_curto
+        raise RelocationError(f"Agenda indisponível: {motivo_curto(exc)}")
+    if evento is None:
+        raise RelocationError("Evento não encontrado na agenda desse dia")
+    return evento.to_dict()
+
+
+def _saida_realocacao(args, result):
+    print(json.dumps(result, ensure_ascii=False) if args.json else result.get("message") or result["status"])
+    if result["status"] != "ok":
+        sys.exit(1)
+
+
+def cmd_recordings_move(args):
+    """Move uma gravação para outra reunião (existente ou nova) pela tela dedicada."""
+    from castanha.relocation import RelocationConflict, RelocationError, move_recording
+    try:
+        evento = _evento_do_dia(args.event, args.date, args.slug) if args.event else None
+        result = move_recording(args.slug, args.arquivo, to=args.to, new_title=args.new_title, event=evento,
+                                expected_revision=args.expected_revision)
+    except RelocationConflict as exc:
+        result = {"status": "conflict", "slug": args.slug, "message": str(exc)}
+    except RelocationError as exc:
+        result = {"status": "error", "slug": args.slug, "message": str(exc)}
+    except (OSError, ValueError, TypeError, KeyError):
+        result = {"status": "error", "slug": args.slug,
+                  "message": "Não foi possível mover a gravação com segurança; cópias preservadas"}
+    _saida_realocacao(args, result)
+
+
+def cmd_link_event(args):
+    """Vincula uma reunião gravada ao evento da agenda: título, convidados e link."""
+    from castanha.relocation import RelocationError, link_meeting_to_event
+    try:
+        evento = _evento_do_dia(args.uid, args.date, args.slug)
+        result = link_meeting_to_event(args.slug, evento)
+    except RelocationError as exc:
+        result = {"status": "error", "slug": args.slug, "message": str(exc)}
+    except (OSError, ValueError, TypeError, KeyError):
+        result = {"status": "error", "slug": args.slug,
+                  "message": "Não foi possível vincular a reunião com segurança; arquivos preservados"}
+    _saida_realocacao(args, result)
+
+
 def cmd_delete_recording(args):
     engine = CastanhaEngine()
     slug = args.slug
@@ -515,6 +578,8 @@ def cmd_retry(args):
 
 def cmd_agenda(args):
     from castanha.agenda import collect_upcoming
+    if getattr(args, "dia", None):
+        return cmd_agenda_dia(args)
     proximas = collect_upcoming(window_minutes=args.horas * 60)
 
     if args.json:
@@ -531,6 +596,37 @@ def cmd_agenda(args):
         pessoas = t("cli.agenda.attendees", count=len(m.attendees)) if m.attendees else ""
         chamada = f"\n      {m.conference_url}" if m.conference_url else ""
         print(f"  {hora}  {m.title}{conta}{pessoas}{chamada}")
+
+
+def cmd_agenda_dia(args):
+    """Todas as reuniões com hora de um dia (passado inclusive): é a lista para vincular uma gravação."""
+    import datetime as _dt
+    from castanha.agenda import events_on_day
+    try:
+        dia = _dt.date.fromisoformat(args.dia)
+    except ValueError:
+        erro = {"status": "error", "message": "Data inválida; use AAAA-MM-DD"}
+        print(json.dumps(erro, ensure_ascii=False) if args.json else erro["message"], file=sys.stdout if args.json else sys.stderr)
+        sys.exit(1)
+    try:
+        resultado = events_on_day(dia)
+    except Exception as exc:
+        from castanha.zinom_calendar import motivo_curto
+        erro = {"status": "error", "message": f"Agenda indisponível: {motivo_curto(exc)}"}
+        print(json.dumps(erro, ensure_ascii=False) if args.json else erro["message"], file=sys.stdout if args.json else sys.stderr)
+        sys.exit(1)
+    if args.json:
+        print(json.dumps({"status": "ok", "date": args.dia, "meetings": [m.to_dict() for m in resultado["meetings"]],
+                          "warnings": resultado["warnings"]}, ensure_ascii=False))
+        return
+    if not resultado["meetings"]:
+        print(f"Nenhuma reunião com hora em {dia.strftime('%d/%m/%Y')}.")
+    for m in resultado["meetings"]:
+        conta = f" · {m.account}" if m.account else ""
+        pessoas = t("cli.agenda.attendees", count=len(m.attendees)) if m.attendees else ""
+        print(f"  {m.start.astimezone().strftime('%H:%M')}  {m.title}{conta}{pessoas}  [{m.uid}]")
+    for aviso in resultado["warnings"]:
+        print(f"  ! {aviso}", file=sys.stderr)
 
 
 def cmd_agenda_refresh(args):
@@ -731,6 +827,14 @@ def main():
     p_rename.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_rename.set_defaults(func=cmd_rename)
 
+    p_link = subparsers.add_parser("link-event", aliases=["vincular"],
+                                   help="Vincular a reunião a um evento da agenda (título, convidados e link)")
+    p_link.add_argument("slug", help=t("cli.help.slug"))
+    p_link.add_argument("uid", help="Uid do evento, como em `castanha agenda --dia`")
+    p_link.add_argument("--date", default=None, help="Dia do evento (AAAA-MM-DD); padrão: dia da gravação")
+    p_link.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
+    p_link.set_defaults(func=cmd_link_event)
+
     p_del_meeting = subparsers.add_parser("delete-meeting", aliases=["del-meeting"],
                                           help=t("cli.help.delete_meeting"))
     p_del_meeting.add_argument("slug", help=t("cli.help.slug_last"))
@@ -770,6 +874,16 @@ def main():
     p_exclude.add_argument("--expected-revision", type=int, default=None)
     p_exclude.add_argument("--json", action="store_true")
     p_exclude.set_defaults(func=cmd_recording_exclusion)
+    p_move = recs_sub.add_parser("move", help="Mover gravação (e sua transcrição) para outra reunião, existente ou nova")
+    p_move.add_argument("slug")
+    p_move.add_argument("arquivo")
+    p_move.add_argument("--to", default=None, help="Slug da reunião de destino")
+    p_move.add_argument("--new-title", default=None, help="Cria uma reunião nova com este título como destino")
+    p_move.add_argument("--event", default=None, help="Uid do evento da agenda para a reunião nova")
+    p_move.add_argument("--date", default=None, help="Dia do evento (AAAA-MM-DD); padrão: dia da gravação")
+    p_move.add_argument("--expected-revision", type=int, default=None)
+    p_move.add_argument("--json", action="store_true")
+    p_move.set_defaults(func=cmd_recordings_move)
     p_restore = recs_sub.add_parser("restore", help="Restaurar exclusão local ainda reversível")
     p_restore.add_argument("slug")
     p_restore.add_argument("exclusion_id")
@@ -800,6 +914,7 @@ def main():
     p_agenda = subparsers.add_parser("agenda", help=t("cli.help.agenda"))
     p_agenda.add_argument("--json", action="store_true", help=t("cli.help.json_short"))
     p_agenda.add_argument("--horas", type=int, default=12, help=t("cli.help.horas"))
+    p_agenda.add_argument("--dia", default=None, help="Todas as reuniões com hora de um dia (AAAA-MM-DD), passado inclusive")
     p_agenda.set_defaults(func=cmd_agenda)
 
     ag_sub = p_agenda.add_subparsers(dest="agenda_cmd")

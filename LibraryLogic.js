@@ -75,3 +75,28 @@ function extraFacts(items, document, section) {
   // Different wording, numbers, assignments and deadlines stay visible.
   return (items || []).filter(function(item) { return existing.indexOf(normalized(item)) < 0 })
 }
+
+// "2026-09-12T11:29:50.281638" -> "2026-09-12". Sem data, vazio: nunca inventa um dia.
+function isoDate(value) {
+  var match = String(value || "").match(/^(\d{4}-\d{2}-\d{2})/)
+  return match ? match[1] : ""
+}
+// Rótulo de um evento da agenda para o seletor: hora, título, conta e convidados.
+function eventLabel(event) {
+  var time = String(event && event.start || "").match(/T(\d{2}):(\d{2})/)
+  var guests = event && Array.isArray(event.attendees) ? event.attendees.length : 0
+  return (time ? time[1] + ":" + time[2] : "--:--") + " · " + String(event && event.title || "Reunião")
+    + (event && event.account ? " · " + String(event.account).split("@")[0] : "")
+    + (guests ? " · " + guests + (guests === 1 ? " convidado" : " convidados") : "")
+}
+// Destinos para mover uma gravação: as reuniões do mesmo dia primeiro, depois as
+// mais recentes, nunca a própria. Limite curto: um seletor com 50 itens não serve.
+function moveTargets(meetings, currentSlug, when, limit) {
+  var day = isoDate(when)
+  var others = (meetings || []).filter(function(m) { return m && m.slug && m.slug !== currentSlug })
+  var sameDay = others.filter(function(m) { return day && isoDate(m.when) === day })
+  var rest = others.filter(function(m) { return sameDay.indexOf(m) < 0 })
+  return sameDay.concat(rest).slice(0, limit || 20).map(function(m) {
+    return {slug: m.slug, title: m.title || m.slug, when: m.when || ""}
+  })
+}

@@ -42,6 +42,12 @@ FloatingWindow {
   property string creationError: ""
   property int audioIndex: -1
   property string audioError: ""
+  // Vincular a reunião a um evento da agenda do dia da gravação.
+  property bool linking: false
+  property var dayEvents: []
+  property string linkTarget: ""
+  property string linkNotice: ""
+  property string linkFeedback: ""
   property real pendingSeek: -1
   property bool playWhenReady: false
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
@@ -90,7 +96,22 @@ FloatingWindow {
     currentTab = 0
     showRawTranscript = false
     detailError = ""
+    linking = false; linkTarget = ""; linkNotice = ""; linkFeedback = ""; dayEvents = []
     if (!detailProcess.running) startDetail()
+  }
+  function openLink() {
+    if (!current) return
+    linking = true; linkTarget = ""; linkNotice = ""; linkFeedback = ""; dayEvents = []
+    dayEventsProcess.requestedSlug = selectedSlug
+    dayEventsProcess.command = cliCommand.concat(["agenda", "--json", "--dia", LibraryLogic.isoDate(current.when)])
+    dayEventsProcess.running = true
+  }
+  function cancelLink() { linking = false; linkTarget = ""; linkNotice = "" }
+  function confirmLink() {
+    if (!current || !linkTarget || linkProcess.running) return
+    linkProcess.requestedSlug = selectedSlug
+    linkProcess.command = cliCommand.concat(["link-event", "--json", "--date", LibraryLogic.isoDate(current.when), "--", selectedSlug, linkTarget])
+    linkProcess.running = true
   }
   function startDetail() {
     if (!selectedSlug) return
@@ -179,6 +200,38 @@ FloatingWindow {
           root.detailError = "Não foi possível ler esta reunião. Os arquivos permanecem preservados."
         }
       } else root.startDetail()
+    }
+  }
+  Process {
+    id: dayEventsProcess
+    objectName: "libraryDayEventsProcess"
+    property string requestedSlug: ""
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      if (requestedSlug !== root.selectedSlug || !root.linking) return
+      try {
+        var result = JSON.parse(stdout.text)
+        if (code !== 0 || result.status !== "ok" || !Array.isArray(result.meetings))
+          throw new Error(result && result.message ? result.message : "Não foi possível consultar a agenda desse dia.")
+        root.dayEvents = result.meetings
+        root.linkNotice = Array.isArray(result.warnings) && result.warnings.length ? "Algumas agendas não responderam: " + result.warnings.join("; ") : ""
+      } catch (error) { root.dayEvents = []; root.linkNotice = String(error.message || error) }
+    }
+  }
+  Process {
+    id: linkProcess
+    objectName: "libraryLinkProcess"
+    property string requestedSlug: ""
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      var slug = requestedSlug
+      try {
+        var result = JSON.parse(stdout.text)
+        if (code !== 0 || result.status !== "ok") throw new Error(result && result.message ? result.message : "Não foi possível vincular a reunião.")
+        if (slug === root.selectedSlug) { root.linkFeedback = result.message || "Reunião vinculada."; root.linking = false; root.linkTarget = "" }
+      } catch (error) { if (slug === root.selectedSlug) root.linkNotice = String(error.message || error) }
+      if (slug === root.selectedSlug) root.startDetail()
+      root.refreshHistory()
     }
   }
   Process {
@@ -343,6 +396,36 @@ FloatingWindow {
       }
       Text { objectName: "libraryContentStatus"; Layout.fillWidth: true; visible: !!root.current && !!root.current.content_status && (root.current.content_status !== "current" || root.current.cleanup_status === "pending"); text: root.current ? root.current.status_label : ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
       Text { Layout.fillWidth: true; visible: root.detailError !== ""; text: root.detailError; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.title }
+      // Evento da agenda desta gravação. "Vincular" corrige a reunião gravada na
+      // mão ou anexada ao evento errado, sem pedir a ninguém.
+      RowLayout {
+        visible: root.current !== null && root.current.source !== "manual"
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+        Text { objectName: "libraryEventLine"; Layout.fillWidth: true; text: !root.current ? "" : root.current.event_linked ? "Evento da agenda: " + root.current.event_title + (root.current.event_attendees.length ? " · " + root.current.event_attendees.length + (root.current.event_attendees.length === 1 ? " convidado" : " convidados") : "") : "Sem evento da agenda vinculado"; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+        LibraryButton { objectName: "libraryLinkEvent"; text: root.linking ? "Cancelar" : root.current && root.current.event_linked ? "Trocar evento…" : "Vincular a evento…"; enabled: !linkProcess.running; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; onClicked: root.linking ? root.cancelLink() : root.openLink() }
+      }
+      ColumnLayout {
+        visible: root.linking && root.current !== null
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+        Text { Layout.fillWidth: true; text: dayEventsProcess.running ? "Buscando as reuniões do dia nas suas agendas…" : root.linkNotice ? root.linkNotice : root.dayEvents.length ? "Escolha o evento desta gravação (" + LibraryLogic.isoDate(root.current ? root.current.when : "") + "). Título, convidados e link passam a ser os do evento; o resumo já escrito é mantido." : "Nenhuma reunião com hora nesse dia nas suas agendas."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+        OmarchyUi.Dropdown {
+          objectName: "libraryLinkTarget"
+          Layout.fillWidth: true
+          visible: root.dayEvents.length > 0
+          showLabel: false
+          options: [{value: "", label: "Escolha o evento…"}].concat(root.dayEvents.map(function(e) { return {value: String(e.uid), label: LibraryLogic.eventLabel(e)} }))
+          value: root.linkTarget
+          foreground: root.foreground; background: root.background; accent: root.accent; fontFamily: root.readingFontFamily
+          onChanged: function(value) { root.linkTarget = String(value) }
+        }
+        RowLayout {
+          visible: root.dayEvents.length > 0
+          LibraryButton { objectName: "libraryConfirmLink"; text: linkProcess.running ? "Vinculando…" : "Vincular"; enabled: !!root.linkTarget && !linkProcess.running; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: root.confirmLink() }
+        }
+      }
+      Text { objectName: "libraryLinkFeedback"; Layout.fillWidth: true; visible: !!root.linkFeedback; text: root.linkFeedback; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
       Text { Layout.fillWidth: true; visible: root.current && root.current.warnings.length > 0; text: root.current ? root.current.warnings.join("\n") : ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
       RowLayout {
         visible: root.current !== null
@@ -467,6 +550,7 @@ FloatingWindow {
             remoteCleanupRequired: root.current ? root.current.remote_cleanup_required === true : false
             canReprocess: root.current ? root.current.can_reprocess === undefined ? root.audioRecords.length > 0 : root.current.can_reprocess : false
             cliCommand: root.cliCommand
+            moveTargets: LibraryLogic.moveTargets(root.meetings, root.selectedSlug, root.current ? root.current.when : "", 20)
             foreground: root.foreground; accent: root.accent; fontFamily: root.readingFontFamily
             onListen: function(index) { root.loadAudio(index, 0, true) }
             onBeforeMutation: root.prepareRecordingMutation(root.selectedSlug)

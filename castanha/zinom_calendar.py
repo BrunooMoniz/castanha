@@ -15,7 +15,7 @@ import json
 import re
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from castanha.calendar import Attendee, MeetingEvent, extract_conference_url
 from castanha.config import load_config
@@ -261,6 +261,40 @@ class ZinomCalendar:
         self._cache = eventos
         self._good_at = agora_ts
         return eventos
+
+    def events_between(self, inicio: datetime.datetime, fim: datetime.datetime) -> Tuple[List[MeetingEvent], List[str]]:
+        """Eventos das agendas selecionadas num intervalo qualquer, sem cache.
+
+        É a busca da biblioteca para vincular uma gravação ao evento do dia
+        (passado inclusive). Falha numa agenda vira aviso e as outras voltam;
+        falha na lista de agendas levanta, porque aí não há o que mostrar.
+        """
+        if not self.enabled:
+            return [], []
+        t_min, t_max = inicio.astimezone().isoformat(), fim.astimezone().isoformat()
+        eventos: List[MeetingEvent] = []
+        avisos: List[str] = []
+        vistos = set()
+        for cal in self.selected_calendars():
+            ref = cal.get("calendar_ref")
+            if not ref:
+                continue
+            try:
+                brutos = self._events_for(ref, t_min, t_max)
+            except Exception as e:
+                motivo = motivo_curto(e)
+                avisos.append(f"{cal.get('summary') or ref}: {motivo}")
+                if motivo == MOTIVO_LIMITE:
+                    break
+                continue
+            for raw in brutos:
+                evento = self._to_meeting(raw, cal)
+                if evento is None or evento.uid in vistos:
+                    continue
+                vistos.add(evento.uid)
+                eventos.append(evento)
+        eventos.sort(key=lambda e: e.start)
+        return eventos, avisos
 
     def _quer_detalhe(self) -> bool:
         """A tool rica volta a ser tentada depois de um tempo.

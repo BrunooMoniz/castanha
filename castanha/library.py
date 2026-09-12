@@ -264,7 +264,16 @@ class MeetingLibrary:
         segments = self._segments(slug, timeline, recordings, warnings)
         # Hash/job são usados internamente para vincular tempos; não são UX.
         audio = [{k: v for k, v in recording.items() if k not in ('sha256', 'job_id')} for recording in recordings]
+        # O evento da agenda ao qual a reunião está vinculada, só texto: é o que
+        # a janela mostra e o que "Vincular" troca.
+        event = meta.get('calendar_event') if isinstance(meta.get('calendar_event'), dict) else {}
+        guests = event.get('attendees') if isinstance(event.get('attendees'), list) else []
+        event_attendees = [_text(a.get('name') or a.get('email')) for a in guests
+                           if isinstance(a, dict) and _text(a.get('name') or a.get('email'))]
         return {'status': 'ok', 'meeting': {**entry, 'summary': _notes(silver or ''),
+                'event_title': _text(event.get('title')), 'event_uid': _text(event.get('uid')),
+                'event_start': _text(event.get('start')), 'event_attendees': event_attendees,
+                'event_linked': bool(_text(event.get('uid'))),
                 'decisions': decisions, 'action_items': actions, 'transcript': transcript or '',
                 'segments': segments, 'recordings': audio, 'warnings': warnings}}
 

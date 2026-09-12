@@ -22,6 +22,13 @@ ColumnLayout {
   property color accent: Color.accent
   property string fontFamily: Style.font.family
   property string armedFile: ""
+  // Mover: gravação escolhida, destino ("__new__" = reunião nova) e as reuniões candidatas.
+  property string movingFile: ""
+  property string moveTarget: ""
+  property var moveTargets: []
+  readonly property var moveOptions: [{value: "", label: "Escolha a reunião de destino…"}, {value: "__new__", label: "Nova reunião…"}]
+    .concat(moveTargets.map(function(m) { return {value: m.slug, label: m.title + " · " + LibraryLogic.date(m.when)} }))
+  readonly property bool canMove: !!movingFile && (moveTarget === "__new__" ? !!moveTitleField.text.trim() : !!moveTarget)
   property var messages: ({})
   property var undoIds: ({})
   readonly property bool busy: actionProcess.running
@@ -29,6 +36,7 @@ ColumnLayout {
   signal listen(int index)
   signal beforeMutation()
   signal meetingChanged(string slug)
+  signal movedTo(string slug)
   spacing: Style.space(10)
 
   function message(slug, text) { var next = Object.assign({}, messages); next[slug] = text; messages = next }
@@ -38,9 +46,18 @@ ColumnLayout {
     actionProcess.requestedSlug = meetingSlug
     actionProcess.kind = kind
     actionProcess.command = cliCommand.concat(args)
-    message(meetingSlug, kind === "retry" ? "Reprocessando a reunião com os áudios atuais…" : kind === "restore" ? "Restaurando gravação…" : "Excluindo áudio da reunião…")
+    message(meetingSlug, kind === "retry" ? "Reprocessando a reunião com os áudios atuais…" : kind === "restore" ? "Restaurando gravação…" : kind === "move" ? "Movendo gravação…" : "Excluindo áudio da reunião…")
     armedFile = ""
+    cancelMove()
     actionProcess.running = true
+  }
+  function cancelMove() { movingFile = ""; moveTarget = ""; moveTitleField.text = "" }
+  function move() {
+    if (!canMove || !recordings.some(function(r) { return r.id === movingFile })) return
+    var args = ["recordings", "move", "--json", "--expected-revision", String(revision)]
+    // Valor colado à opção: um título que comece com "-" não vira flag.
+    args.push(moveTarget === "__new__" ? "--new-title=" + moveTitleField.text.trim() : "--to=" + moveTarget)
+    run("move", args.concat(["--", meetingSlug, movingFile]))
   }
   function exclude() {
     if (!armedFile || !recordings.some(function(r) { return r.id === armedFile })) return
@@ -48,7 +65,7 @@ ColumnLayout {
   }
   function retry() { if (canReprocess) run("retry", ["retry", "--json", "--", meetingSlug]) }
   function restore() { if (restoreAllowed && undoId) run("restore", ["recordings", "restore", "--json", "--", meetingSlug, undoId]) }
-  onMeetingSlugChanged: armedFile = ""
+  onMeetingSlugChanged: { armedFile = ""; cancelMove() }
 
   Process {
     id: actionProcess
@@ -70,6 +87,11 @@ ColumnLayout {
             ? "Áudio excluído. Reprocesse a reunião para atualizar a transcrição, o resumo e os insights."
             : "Áudio excluído. A reunião ficou sem gravações válidas; suas anotações foram preservadas.")
           if (result.cleanup_status === "pending") root.message(requestedSlug, root.messages[requestedSlug] + " A limpeza no Zinom ainda está pendente.")
+        } else if (kind === "move") {
+          var destination = result.destination && result.destination.slug ? String(result.destination.slug) : ""
+          root.message(requestedSlug, (result.message || "Gravação movida.")
+            + (result.cleanup_status === "pending" ? " A retirada do conteúdo anterior no Zinom ainda está pendente." : ""))
+          if (destination) root.movedTo(destination)
         } else if (kind === "restore") {
           var restored = Object.assign({}, root.undoIds); restored[requestedSlug] = ""; root.undoIds = restored
           root.message(requestedSlug, result.message || "Gravação restaurada. Consulte o estado da reunião antes de reprocessar.")
@@ -103,8 +125,38 @@ ColumnLayout {
           Text { Layout.fillWidth: true; text: LibraryLogic.clock(modelData.duration_seconds) + " · " + (modelData.size_bytes / (1024 * 1024)).toFixed(1) + " MB"; color: root.foreground; opacity: 0.7; font.family: root.fontFamily; font.pixelSize: Style.font.caption; textFormat: Text.PlainText }
         }
         LibraryButton { objectName: "recordingListen" + index; text: "Ouvir"; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.listen(index) }
-        LibraryButton { objectName: "recordingExclude" + index; text: "Excluir"; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: root.armedFile = modelData.id }
+        LibraryButton { objectName: "recordingMove" + index; text: "Mover…"; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: { root.armedFile = ""; root.moveTarget = ""; root.movingFile = modelData.id } }
+        LibraryButton { objectName: "recordingExclude" + index; text: "Excluir"; enabled: !root.busy; foreground: root.foreground; font.family: root.fontFamily; onClicked: { root.cancelMove(); root.armedFile = modelData.id } }
       }
+    }
+  }
+  ColumnLayout {
+    Layout.fillWidth: true
+    visible: !!root.movingFile
+    spacing: Style.space(6)
+    Text { Layout.fillWidth: true; text: "Mover esta gravação para outra reunião? Ela sai desta reunião (uma cópia fica guardada) e a transcrição, o resumo e a entrega ao Zinom das duas reuniões são refeitos automaticamente." + (root.remoteCleanupRequired ? " O conteúdo que esta reunião já enviou ao Zinom será retirado." : ""); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+    OmarchyUi.Dropdown {
+      objectName: "recordingMoveTarget"
+      Layout.fillWidth: true
+      showLabel: false
+      options: root.moveOptions
+      value: root.moveTarget
+      foreground: root.foreground; accent: root.accent; fontFamily: root.fontFamily
+      onChanged: function(value) { root.moveTarget = String(value) }
+    }
+    TextField {
+      id: moveTitleField
+      objectName: "recordingMoveTitle"
+      Layout.fillWidth: true
+      visible: root.moveTarget === "__new__"
+      placeholderText: "Título da nova reunião"
+      color: root.foreground; font.family: root.fontFamily; selectByMouse: true
+      background: OmarchyUi.BorderSurface { color: Style.controlFill(moveTitleField.activeFocus, moveTitleField.hovered, root.foreground, root.accent); radius: Style.cornerRadius; borderSpec: Border.controlSpec(moveTitleField.activeFocus ? "focus" : "normal", root.foreground, root.accent) }
+    }
+    Flow {
+      Layout.fillWidth: true; Layout.preferredHeight: childrenRect.height; spacing: Style.spacing.controlGap
+      LibraryButton { objectName: "recordingCancelMove"; text: "Manter aqui"; foreground: root.foreground; onClicked: root.cancelMove() }
+      LibraryButton { objectName: "recordingConfirmMove"; text: "Mover gravação"; foreground: root.foreground; enabled: !root.busy && root.canMove; onClicked: root.move() }
     }
   }
   ColumnLayout {

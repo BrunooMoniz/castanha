@@ -25,6 +25,11 @@ if args[0] == 'retry':
     if scenario == 'retry_problems': data = {'problemas': ['synthetic pending stage']}
     if scenario == 'retry_outer_pending': data = {}
     output = {'status': 'ok', 'results': [{'status': 'pending' if scenario == 'retry_outer_pending' else 'success', 'result': data}]}
+elif args[0] == 'recordings' and len(args) > 1 and args[1] == 'move':
+    output = {'status': 'ok', 'destination': {'slug': 'fixture-b', 'title': 'B', 'job_id': 'novo', 'created': False},
+              'remaining_count': 1, 'cleanup_status': 'pending' if scenario == 'move_cleanup' else 'not_needed',
+              'exclusion_id': 'moved-current', 'can_restore': False,
+              'message': 'Gravação movida para “B”. Transcrição, resumo e entrega ao Zinom das duas reuniões serão refeitos automaticamente.'}
 else:
     output = {'status': 'ok', 'remaining_count': 1, 'exclusion_id': 'excluded-current', 'can_restore': scenario == 'restore_allowed'}
 if scenario == 'false_success':
@@ -195,6 +200,46 @@ class TestRecordingActionsUi(unittest.TestCase):
         }
         ''')
         self.assertEqual(len(calls), 1)
+
+    def test_move_needs_a_destination_and_sends_exact_argv(self):
+        calls = self.run_actions('move_cleanup', r'''
+        if (harness.stage === 0) {
+          actions.moveTargets = [{slug: 'fixture-b', title: 'B', when: '2026-09-11T10:00:00'}]
+          harness.control('recordingMove0').clicked()
+          harness.require(actions.movingFile === 'first.ogg' && harness.control('recordingConfirmMove').visible, 'move panel not armed')
+          harness.require(!harness.control('recordingConfirmMove').enabled, 'move allowed without destination')
+          harness.control('recordingMoveTarget').changed('fixture-b')
+          harness.require(actions.moveTarget === 'fixture-b' && harness.control('recordingConfirmMove').enabled, 'destination not taken')
+          harness.control('recordingCancelMove').clicked()
+          harness.require(actions.movingFile === '' && actions.moveTarget === '' && harness.beforeCount === 0, 'cancel kept move armed')
+          harness.control('recordingMove0').clicked(); harness.control('recordingMoveTarget').changed('fixture-b')
+          harness.control('recordingConfirmMove').clicked()
+          harness.require(harness.beforeCount === 1 && actions.movingFile === '', 'confirm did not start the move')
+          harness.stage = 1
+        } else if (!actions.busy && harness.changed.length) {
+          harness.require(actions.feedback.indexOf('Gravação movida') === 0 && actions.feedback.indexOf('Zinom ainda está pendente') > 0, 'move feedback lost: ' + actions.feedback)
+          harness.require(harness.changed[0] === 'fixture-a', 'wrong meeting change signal')
+          harness.require(!harness.control('recordingUndo').visible, 'moved recording offers undo')
+          harness.finish()
+        }
+        ''')
+        self.assertEqual(calls, [['recordings', 'move', '--json', '--expected-revision', '17', '--to=fixture-b', '--', 'fixture-a', 'first.ogg']])
+
+    def test_move_to_new_meeting_requires_title_and_passes_it_glued_to_the_flag(self):
+        calls = self.run_actions('move', r'''
+        if (harness.stage === 0) {
+          harness.control('recordingMove1').clicked()
+          harness.control('recordingMoveTarget').changed('__new__')
+          harness.require(harness.control('recordingMoveTitle').visible && !harness.control('recordingConfirmMove').enabled, 'new meeting allowed without title')
+          harness.control('recordingMoveTitle').text = '  -Conversa avulsa  '
+          harness.require(harness.control('recordingConfirmMove').enabled, 'title did not enable move')
+          harness.control('recordingConfirmMove').clicked(); harness.stage = 1
+        } else if (!actions.busy && harness.changed.length) {
+          harness.require(actions.feedback.indexOf('Gravação movida') === 0 && actions.feedback.indexOf('pendente') < 0, 'unexpected feedback: ' + actions.feedback)
+          harness.finish()
+        }
+        ''')
+        self.assertEqual(calls, [['recordings', 'move', '--json', '--expected-revision', '17', '--new-title=-Conversa avulsa', '--', 'fixture-a', 'second.ogg']])
 
     def test_retry_results_array_with_pending_summary_never_claims_complete(self):
         for scenario in ('retry', 'retry_transcription', 'retry_zinom', 'retry_problems', 'retry_outer_pending'):

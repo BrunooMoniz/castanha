@@ -40,6 +40,34 @@ GROQ_GOLD_COMPLETION_TOKENS = 4096
 _LIMITE_RE = re.compile(r"Limit\s+(\d+).*?Requested\s+(\d+)", re.S)
 
 
+def silver_frontmatter(metadata: Dict[str, Any]) -> str:
+    """O cabeçalho YAML do Silver, a partir do metadata. Também serve para
+    reescrevê-lo quando a reunião é vinculada a outro evento da agenda."""
+    title = metadata.get("title", "Reunião")
+    date_str = metadata.get("recorded_at", "")
+    attendees = (metadata.get("calendar_event") or {}).get("attendees", []) or []
+    frontmatter = f"""---
+title: {json.dumps(title, ensure_ascii=False)}
+date: {json.dumps(date_str, ensure_ascii=False)}
+duration_seconds: {metadata.get('duration_seconds', 0)}
+mode: "{metadata.get('mode', 'dual')}"
+attendees:
+"""
+    for att in attendees:
+        name = att.get("name", "")
+        email = att.get("email", "")
+        frontmatter += f'  - name: {json.dumps(name, ensure_ascii=False)}\n    email: {json.dumps(email, ensure_ascii=False)}\n'
+        # RSVP é resposta ao convite, não comparecimento observado.
+        rsvp = att.get("response") or att.get("response_status") or att.get("responseStatus") or "unknown"
+        frontmatter += (f'    evidence: "calendar_invitation"\n    rsvp: {json.dumps(rsvp, ensure_ascii=False)}\n'
+                        '    presence: "unverified"\n    speech: "unverified"\n')
+    if not attendees:
+        frontmatter += "  []\n"
+    frontmatter += f'audio_status: "{metadata.get("audio_status", "ok")}"\n'
+    frontmatter += "tags:\n  - meeting\n  - castanha\n  - silver\n---\n\n"
+    return frontmatter
+
+
 class LlmUnavailable(Exception):
     """LLM configurada, mas indisponível agora (cota, rede, servidor, provedor não suportado).
 
@@ -829,28 +857,8 @@ _Pendente: depende do resumo automático._
             if not raw_transcript.strip():
                 llm_output = "> Resumo das anotações manuais. Não houve gravação ou transcrição.\n\n" + llm_output
 
-        # Adiciona Frontmatter YAML padrão para Markdown / Obsidian / LLM Wiki
-        frontmatter = f"""---
-title: {json.dumps(title, ensure_ascii=False)}
-date: {json.dumps(date_str, ensure_ascii=False)}
-duration_seconds: {metadata.get('duration_seconds', 0)}
-mode: "{metadata.get('mode', 'dual')}"
-attendees:
-"""
-        for att in attendees:
-            name = att.get("name", "")
-            email = att.get("email", "")
-            frontmatter += f'  - name: {json.dumps(name, ensure_ascii=False)}\n    email: {json.dumps(email, ensure_ascii=False)}\n'
-            # RSVP é resposta ao convite, não comparecimento observado.
-            rsvp = att.get("response") or att.get("response_status") or att.get("responseStatus") or "unknown"
-            frontmatter += (f'    evidence: "calendar_invitation"\n    rsvp: {json.dumps(rsvp, ensure_ascii=False)}\n'
-                            '    presence: "unverified"\n    speech: "unverified"\n')
-        if not attendees:
-            frontmatter += "  []\n"
-        frontmatter += f'audio_status: "{metadata.get("audio_status", "ok")}"\n'
-        frontmatter += "tags:\n  - meeting\n  - castanha\n  - silver\n---\n\n"
-
-        return frontmatter + llm_output
+        # Frontmatter YAML padrão para Markdown / Obsidian / LLM Wiki
+        return silver_frontmatter(metadata) + llm_output
 
     def _gold_response(self, prompt: str) -> Dict[str, Any]:
         system = GOLD_SYSTEM_PROMPT + ("\n" + MANUAL_GUIDANCE if MANUAL_GUIDANCE in prompt else "")

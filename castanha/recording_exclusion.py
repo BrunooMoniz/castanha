@@ -453,6 +453,8 @@ def restore_recording(slug, identity, storage=None):
         _capture_guard(slug)
         op = _load(fd)
         if not op or op['id'] != identity: raise ExclusionConflict('A exclusão atual mudou; restauração recusada')
+        if op.get('moved_to'):
+            raise ExclusionError('Gravação movida para outra reunião; a cópia da quarentena permanece preservada')
         if op.get('attempted') or op.get('reprocess_requested'):
             raise ExclusionError('Retirada remota ou novo processamento iniciado; áudio permanece recuperável na quarentena')
         if op['phase'] == 'restored': raise ExclusionError('Gravação já restaurada')

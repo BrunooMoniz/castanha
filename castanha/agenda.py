@@ -89,6 +89,35 @@ def collect_upcoming(
     return saida[:limit]
 
 
+def events_on_day(dia: datetime.date, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Todas as reuniões com hora de um dia, nas agendas dele, escondidas inclusive.
+
+    É a lista para vincular uma gravação ao evento certo depois do fato; um
+    lembrete de dia inteiro não é reunião e fica fora. O hub filtra pelo fim do
+    evento, então o começo é conferido aqui para não vazar a véspera.
+    """
+    cfg = config or load_config()
+    tz = datetime.datetime.now().astimezone().tzinfo
+    inicio = datetime.datetime(dia.year, dia.month, dia.day, tzinfo=tz)
+    fim = inicio + datetime.timedelta(days=1)
+    eventos, avisos = _zinom_source(cfg).events_between(inicio, fim)
+    do_dia = [e for e in eventos if not e.all_day and inicio <= e.start.astimezone(tz) < fim]
+    return {"meetings": do_dia, "warnings": avisos}
+
+
+def find_event(dia: datetime.date, uid: str, config: Optional[Dict[str, Any]] = None) -> Optional[MeetingEvent]:
+    """O evento do dia pelo uid exato (ou pela chave da série, se só ela veio)."""
+    from castanha.hidden import series_key
+    alvo = str(uid or "").strip()
+    if not alvo:
+        return None
+    eventos = events_on_day(dia, config)["meetings"]
+    exato = next((e for e in eventos if e.uid == alvo), None)
+    if exato is not None:
+        return exato
+    return next((e for e in eventos if series_key(e.uid) == series_key(alvo)), None)
+
+
 def next_timed(eventos: List[MeetingEvent]) -> Optional[MeetingEvent]:
     """A reunião de agora: a que está em andamento, ou a próxima a começar.
 
