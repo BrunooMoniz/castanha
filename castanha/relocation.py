@@ -369,9 +369,13 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
               "transcribed": True, "transcription_error": None, "transcription_provider": job.get("provider"),
               "capture_mode": job.get("capture_mode", state.get("mode", "dual"))}
     recordings = [r for r in (meta.get("recordings") or []) if isinstance(r, dict)] + ([] if ja_listado else [record])
+    # Numa retomada, o daemon pode já ter consolidado este job (`done`): reabrir o
+    # processamento deixaria o destino preso, porque a fila só reprocessa com job
+    # fora de `done` e a entrega recusa metadata pendente.
+    processing = "pending" if new_job.get("stage") != "done" else (meta.get("processing_status") or "complete")
     meta.update(recordings=recordings, recordings_count=len(recordings),
                 recording_revision=int(meta.get("recording_revision") or 0) + 1,
-                processing_status="pending", bronze_audio_file=str(dest_audio),
+                processing_status=processing, bronze_audio_file=str(dest_audio),
                 duration_seconds=sum(float(r.get("duration_seconds") or 0) for r in recordings))
     if meta.get("exclusion_id"):
         meta.update(content_status="rebuilding", can_restore=False,

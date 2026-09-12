@@ -466,11 +466,18 @@ class TestMoveRecording(RelocationFixture):
         self.engine.process_pending(self.b)  # o engine ordena por hora de gravação
         self.assertEqual(sorted(r['job_id'] for r in self.metadata(self.b)['recordings']), sorted(['job3', new_id]))
         self.assertEqual(self.metadata(self.b)['recording_revision'], 0)
+        self.assertEqual(self.jobs(self.b)[new_id]['stage'], 'done')  # o daemon já consolidou o job
         self.assertTrue(resume_move(self.a, self.storage))
         meta_b = self.metadata(self.b)
         self.assertEqual(meta_b['recording_revision'], 1)
         self.assertEqual(sorted(r['job_id'] for r in meta_b['recordings']), sorted(['job3', new_id]))  # sem duplicar
         self.assertTrue(self.jobs(self.b)[new_id]['moved_from']['committed'])
+        # Processamento já concluído não é reaberto: senão a fila não reprocessa
+        # (jobs todos done) e a entrega recusa o metadata pendente, para sempre.
+        from castanha.sync import meeting_needs_sync
+        self.assertEqual(meta_b['processing_status'], 'complete')
+        self.assertFalse(meeting_needs_sync(meta_b))
+        self.assertTrue(all(job['stage'] == 'done' for job in self.jobs(self.b).values()))
 
     def test_content_retired_from_zinom_cannot_be_moved_under_a_new_identity(self):
         import hashlib
