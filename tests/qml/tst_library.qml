@@ -18,8 +18,12 @@ TestCase {
     compare(Logic.isoDate("2026-09-12T11:29:50.281638"), "2026-09-12")
     compare(Logic.isoDate(""), "")
     compare(Logic.isoDate("hoje"), "")
-    compare(Logic.eventLabel({start: "2026-09-12T10:30:00-03:00", title: "Nora Weekly", account: "moniz@nora.finance", attendees: [{}, {}]}), "10:30 · Nora Weekly · moniz · 2 convidados")
-    compare(Logic.eventLabel({start: "2026-09-12T10:30:00-03:00", title: "Solo", attendees: [{}]}), "10:30 · Solo · 1 convidado")
+    // Hora no relógio local, seja qual for o fuso em que o evento veio.
+    var utc = new Date("2026-09-12T13:30:00Z")
+    var local = String(utc.getHours()).padStart(2, "0") + ":" + String(utc.getMinutes()).padStart(2, "0")
+    compare(Logic.eventLabel({start: "2026-09-12T13:30:00Z", title: "Weekly do time", account: "bruno@example.com", attendees: [{}, {}]}), local + " · Weekly do time · bruno · 2 convidados")
+    compare(Logic.eventLabel({start: "2026-09-12T10:30:00", title: "Solo", attendees: [{}]}), "10:30 · Solo · 1 convidado")
+    compare(Logic.eventLabel({start: "ontem", title: "Sem hora"}), "--:-- · Sem hora")
     compare(Logic.eventLabel({title: ""}), "--:-- · Reunião")
   }
   function test_move_targets_put_same_day_first_and_exclude_current() {

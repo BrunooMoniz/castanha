@@ -22,12 +22,12 @@ from castanha.summarizer import silver_frontmatter
 from castanha.sync import pending_candidates
 
 GOLD = {'facts': [], 'decisions': [], 'action_items': [], 'people_notes': []}
-EVENT = {"uid": "a4lavhpu37vb096vnm050ohb3n_20260912T133000Z", "title": "Nora Weekly",
+EVENT = {"uid": "weekly_20260912T133000Z", "title": "Weekly do time",
          "start": "2026-09-12T10:30:00-03:00", "end": "2026-09-12T11:30:00-03:00",
-         "attendees": [{"name": "Luigi", "email": "luigi@nora.finance", "response": "accepted", "organizer": True},
-                       {"name": "Bruno", "email": "moniz@nora.finance", "response": "accepted"}],
-         "organizer": "luigi@nora.finance", "conference_url": "https://meet.google.com/eyy-bjqv-ohm",
-         "calendar_name": "moniz@nora.finance", "account": "moniz@nora.finance"}
+         "attendees": [{"name": "Ana", "email": "ana@example.com", "response": "accepted", "organizer": True},
+                       {"name": "Bruno", "email": "bruno@example.com", "response": "accepted"}],
+         "organizer": "ana@example.com", "conference_url": "https://meet.google.com/abc-defg-hij",
+         "calendar_name": "bruno@example.com", "account": "bruno@example.com"}
 CLI = str(Path(__file__).resolve().parents[1] / 'bin/castanha')
 
 
@@ -216,15 +216,15 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(len(self.metadata(self.b)['recordings']), 2)
 
     def test_move_to_new_meeting_creates_it_with_title_and_agenda_event(self):
-        result = self.move(new_title='Nora Weekly', event=EVENT)
+        result = self.move(new_title='Weekly do time', event=EVENT)
         dest = result['destination']
         self.assertTrue(dest['created'])
         self.assertTrue(dest['slug'].startswith('2026-09-11_'), dest['slug'])  # dia da gravação, não de hoje
-        self.assertIn('nora-weekly', dest['slug'])
+        self.assertIn('weekly-do-time', dest['slug'])
         meta = self.metadata(dest['slug'])
-        self.assertEqual(meta['title'], 'Nora Weekly')
+        self.assertEqual(meta['title'], 'Weekly do time')
         self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
-        self.assertEqual([a['name'] for a in meta['calendar_event']['attendees']], ['Luigi', 'Bruno'])
+        self.assertEqual([a['name'] for a in meta['calendar_event']['attendees']], ['Ana', 'Bruno'])
         self.assertEqual(meta['processing_status'], 'pending')
         self.assertEqual(len(meta['recordings']), 1)
         rebuilt = self.engine.process_pending(dest['slug'])
@@ -282,6 +282,95 @@ class TestMoveRecording(RelocationFixture):
         with self.assertRaisesRegex(RelocationError, 'Aguarde a gravação'):
             self.move(to=self.b)
 
+    def test_legacy_destination_keeps_its_transcript_when_first_job_arrives(self):
+        legado = self.storage.bronze_dir / 'legado'; legado.mkdir()
+        (legado / 'audio.ogg').write_bytes(b'legacy audio')
+        (legado / 'transcript_raw.txt').write_text('TEXTO LEGADO DO DESTINO')
+        write_json(legado / 'metadata.json', {'slug': 'legado', 'title': 'Legado', 'recorded_at': '2026-09-01T10:00:00+00:00',
+            'recordings': [{'id': 'audio.ogg', 'filename': 'audio.ogg', 'transcribed': True, 'transcription_provider': 'fixture',
+                            'audio_status': 'ok', 'duration_seconds': 5}],
+            'recording_revision': 0, 'mode': 'dual', 'audio_status': 'ok', 'processing_status': 'complete',
+            'transcription_provider': 'fixture', 'zinom': {'status': 'ok'}})
+        self.storage.save_silver('legado', 'RESUMO LEGADO'); self.storage.save_gold('legado', {'title': 'Legado', **GOLD})
+        self.move(to='legado')
+        self.assertEqual((legado / '.jobs' / 'base_transcript.txt').read_text(), 'TEXTO LEGADO DO DESTINO')
+        rebuilt = self.engine.process_pending('legado')
+        self.assertEqual(rebuilt['status'], 'success', rebuilt)
+        texto = self.storage.read_transcript('legado')
+        self.assertIn('TEXTO LEGADO DO DESTINO', texto); self.assertIn('CONTEUDO job1', texto)
+        self.assertEqual(texto.count('CONTEUDO job1'), 1)
+
+    def test_new_destination_starts_with_empty_base_transcript(self):
+        dest = self.move(new_title='Conversa avulsa')['destination']['slug']
+        self.assertEqual((self.storage.bronze_dir / dest / '.jobs' / 'base_transcript.txt').read_text(), '')
+        self.engine.process_pending(dest)
+        self.assertEqual(self.storage.read_transcript(dest), 'CONTEUDO job1')
+
+    def test_move_interrupted_before_attach_refuses_restore_and_is_finished_by_the_daemon(self):
+        from castanha.recording_exclusion import needs_resume
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda de energia')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attaching')
+        self.assertEqual(len(self.metadata(self.b)['recordings']), 1)  # destino intocado
+        with self.assertRaisesRegex(ExclusionError, 'movida'):
+            restore_recording(self.a, op['id'], self.storage)
+        self.assertTrue(needs_resume(self.a, self.storage))
+        self.assertIn(self.a, [slug for _, slug in pending_candidates(self.storage)])
+        resumed = self.engine.process_pending(self.a)  # o que o daemon faz na fila
+        self.assertEqual(resumed['status'], 'success', resumed)
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['reprocess_requested'])
+        jobs_b = self.jobs(self.b)
+        self.assertIn(op['moved_to']['job_id'], jobs_b)
+        self.assertEqual(jobs_b[op['moved_to']['job_id']]['transcript'], 'CONTEUDO job1')
+        self.assertEqual([r['job_id'] for r in self.metadata(self.b)['recordings']], ['job3', op['moved_to']['job_id']])
+        self.assertEqual(self.storage.read_transcript(self.a), 'CONTEUDO job2')
+        self.assertFalse(self.metadata(self.a)['can_restore'])
+
+    def test_move_interrupted_after_attach_is_finished_without_duplicating(self):
+        from castanha.relocation import resume_move
+        with patch('castanha.relocation._finish_origin', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.assertEqual(len(self.metadata(self.b)['recordings']), 2)
+        self.assertEqual(self.operation(self.a)['moved_to']['phase'], 'attaching')
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertFalse(resume_move(self.a, self.storage))  # nada mais a concluir
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['reprocess_requested'])
+        self.assertEqual(len(self.metadata(self.b)['recordings']), 2)
+        self.assertEqual(len(list((self.storage.bronze_dir / self.b).glob('capture_*.ogg'))), 2)
+        self.assertFalse(self.metadata(self.a)['can_restore'])
+        self.assertEqual(self.metadata(self.a)['content_status'], 'rebuilding')
+
+    def test_destination_changed_between_check_and_attach_is_refused_under_its_lock(self):
+        from castanha import recording_exclusion
+        # Destino que ordena DEPOIS da origem: a trava dele só é tomada após a exclusão.
+        dest = self.meeting('zdestino', ['job7', 'job8'], title='Z Destino', minute=40)
+        self.receipts(dest)
+        real = recording_exclusion.exclude_recording
+        def racy(slug, filename, storage=None, expected_revision=None):
+            if slug == self.a:  # outra sessão exclui um áudio do destino no intervalo
+                real(dest, 'capture_job7.ogg', self.storage)
+            return real(slug, filename, storage, expected_revision=expected_revision)
+        with patch('castanha.recording_exclusion.exclude_recording', side_effect=racy):
+            with self.assertRaisesRegex(RelocationError, 'reunião de destino ainda tem uma alteração'):
+                self.move(to=dest)
+        op = self.operation(self.a)
+        self.assertNotIn('moved_to', op)  # origem excluída, mas ainda restaurável
+        self.assertEqual(self.metadata(dest)['cleanup_status'], 'pending')
+        self.assertEqual([r['job_id'] for r in self.metadata(dest)['recordings']], ['job8'])  # nada anexado
+        restored = restore_recording(self.a, op['id'], self.storage)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_destination_with_pending_summary_regeneration_is_refused(self):
+        write_json(self.storage.bronze_dir / self.b / '.annotations-regeneration.json', {'status': 'pending'})
+        with self.assertRaisesRegex(RelocationError, 'resumo em regeneração'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
     def test_legacy_base_transcript_stays_in_origin_and_is_not_copied(self):
         (self.storage.bronze_dir / self.a / '.jobs' / 'base_transcript.txt').write_text('TEXTO LEGADO DA ORIGEM')
         self.move(to=self.b)
@@ -301,25 +390,41 @@ class TestLinkMeetingToEvent(RelocationFixture):
         result = link_meeting_to_event(self.a, EVENT, self.storage)
         self.assertEqual(result['status'], 'ok'); self.assertEqual(result['attendees'], 2)
         meta = self.metadata(self.a)
-        self.assertEqual(meta['title'], 'Nora Weekly')
+        self.assertEqual(meta['title'], 'Weekly do time')
         self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
         self.assertEqual(meta['calendar_event']['conference_url'], EVENT['conference_url'])
-        self.assertEqual([a['email'] for a in meta['calendar_event']['attendees']], ['luigi@nora.finance', 'moniz@nora.finance'])
+        self.assertEqual([a['email'] for a in meta['calendar_event']['attendees']], ['ana@example.com', 'bruno@example.com'])
         self.assertEqual(meta['event_link_history'][0]['previous_title'], 'Origem')
         self.assertEqual(meta['recording_revision'], 0)  # gravações não mudaram
         self.assertEqual(meta['recorded_at'], '2026-09-11T10:01:00+00:00')  # a gravação continua datada de quando foi
         silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
-        self.assertTrue(silver.startswith('---\ntitle: "Nora Weekly"\n'))
-        self.assertIn('  - name: "Luigi"\n    email: "luigi@nora.finance"\n', silver)
+        self.assertTrue(silver.startswith('---\ntitle: "Weekly do time"\n'))
+        self.assertIn('  - name: "Ana"\n    email: "ana@example.com"\n', silver)
         self.assertIn('rsvp: "accepted"', silver)
         self.assertEqual(silver.count('\n---\n'), 1)
-        self.assertIn('\n# Nora Weekly\n', silver)
-        self.assertIn('Convidados (presença não confirmada): Luigi, Bruno.', silver)
+        self.assertIn('\n# Weekly do time\n', silver)
+        self.assertIn('Convidados (presença não confirmada): Ana, Bruno.', silver)
         self.assertIn('RESUMO ANTIGO origem', silver)  # o resumo não é refeito aqui
-        self.assertEqual(json.loads((self.storage.gold_dir / f'{self.a}.json').read_text())['title'], 'Nora Weekly')
+        self.assertEqual(json.loads((self.storage.gold_dir / f'{self.a}.json').read_text())['title'], 'Weekly do time')
         self.assertTrue(bronze_needs_sync(self.storage.bronze_dir / self.a, self.a, meta, workspace='personal',
                                           endpoint=self.zcfg['endpoint'], token=self.zcfg['token'],
                                           silver_text=silver, gold=GOLD))
+
+    def test_link_marks_legacy_note_pending_but_keeps_its_id(self):
+        from castanha.sync import meeting_needs_sync
+        meta = self.metadata(self.a); meta['zinom'] = {'status': 'ok', 'remember_id': 'nota-1', 'note_status': 'ok'}
+        write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        link_meeting_to_event(self.a, EVENT, self.storage)
+        depois = self.metadata(self.a)['zinom']
+        self.assertEqual(depois['status'], 'pending'); self.assertEqual(depois['remember_id'], 'nota-1')
+        self.assertTrue(meeting_needs_sync(self.metadata(self.a)))
+
+    def test_link_keeps_backslashes_in_title_literal(self):
+        link_meeting_to_event(self.a, {**EVENT, 'title': 'Suporte C:\\Windows \\1'}, self.storage)
+        self.assertEqual(self.metadata(self.a)['title'], 'Suporte C:\\Windows \\1')
+        silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
+        self.assertIn('\n# Suporte C:\\Windows \\1\n', silver)
+        self.assertIn('title: "Suporte C:\\\\Windows \\\\1"', silver)
 
     def test_relink_silver_without_frontmatter_or_guest_line(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
@@ -352,9 +457,9 @@ class TestLinkMeetingToEvent(RelocationFixture):
         link_meeting_to_event(self.a, EVENT, self.storage)
         after = MeetingLibrary(self.storage).detail(self.a)['meeting']
         self.assertTrue(after['event_linked'])
-        self.assertEqual(after['event_title'], 'Nora Weekly'); self.assertEqual(after['event_uid'], EVENT['uid'])
-        self.assertEqual(after['event_attendees'], ['Luigi', 'Bruno'])
-        self.assertEqual(after['title'], 'Nora Weekly')
+        self.assertEqual(after['event_title'], 'Weekly do time'); self.assertEqual(after['event_uid'], EVENT['uid'])
+        self.assertEqual(after['event_attendees'], ['Ana', 'Bruno'])
+        self.assertEqual(after['title'], 'Weekly do time')
 
 
 class TestAgendaDoDia(unittest.TestCase):
@@ -412,10 +517,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(sys.argv[1]).resolve().parents[1]))
 from castanha.calendar import Attendee, MeetingEvent
 import datetime
-ev = MeetingEvent(uid="a4lavhpu37vb096vnm050ohb3n_20260912T133000Z", title="Nora Weekly",
+ev = MeetingEvent(uid="weekly_20260912T133000Z", title="Weekly do time",
                   start=datetime.datetime.fromisoformat("2026-09-12T10:30:00-03:00"), end=datetime.datetime.fromisoformat("2026-09-12T11:30:00-03:00"),
-                  attendees=[Attendee(name="Luigi", email="luigi@nora.finance", response="accepted", organizer=True)],
-                  conference_url="https://meet.google.com/eyy-bjqv-ohm", account="moniz@nora.finance", source="zinom")
+                  attendees=[Attendee(name="Ana", email="ana@example.com", response="accepted", organizer=True)],
+                  conference_url="https://meet.google.com/abc-defg-hij", account="bruno@example.com", source="zinom")
 calls = []
 def fake_day(dia, config=None):
     calls.append(str(dia)); return {"meetings": [ev], "warnings": []}
@@ -458,12 +563,12 @@ with patch("castanha.agenda.events_on_day", side_effect=fake_day):
         self.assertTrue(payload['destination']['created']); self.assertIn('conversa-avulsa', payload['destination']['slug'])
 
     def test_link_event_cli_resolves_the_day_of_the_recording(self):
-        result = self.cli('link-event', '--json', '--', self.a, 'a4lavhpu37vb096vnm050ohb3n_20260912T133000Z', agenda=True)
+        result = self.cli('link-event', '--json', '--', self.a, 'weekly_20260912T133000Z', agenda=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload['status'], 'ok'); self.assertEqual(payload['title'], 'Nora Weekly')
+        self.assertEqual(payload['status'], 'ok'); self.assertEqual(payload['title'], 'Weekly do time')
         self.assertIn('DAYS=["2026-09-11"]', result.stderr)  # dia da gravação, sem --date
-        self.assertEqual(self.metadata(self.a)['title'], 'Nora Weekly')
+        self.assertEqual(self.metadata(self.a)['title'], 'Weekly do time')
         missing = self.cli('link-event', '--json', '--date', '2026-09-12', '--', self.a, 'nao-existe', agenda=True)
         self.assertEqual(missing.returncode, 1)
         self.assertIn('não encontrado', json.loads(missing.stdout)['message'])
@@ -473,8 +578,8 @@ with patch("castanha.agenda.events_on_day", side_effect=fake_day):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload['status'], 'ok'); self.assertEqual(payload['date'], '2026-09-12')
-        self.assertEqual([m['title'] for m in payload['meetings']], ['Nora Weekly'])
-        self.assertEqual(payload['meetings'][0]['attendees'][0]['name'], 'Luigi')
+        self.assertEqual([m['title'] for m in payload['meetings']], ['Weekly do time'])
+        self.assertEqual(payload['meetings'][0]['attendees'][0]['name'], 'Ana')
         bad = self.cli('agenda', '--json', '--dia', '12/09/2026', agenda=True)
         self.assertEqual(bad.returncode, 1)
         self.assertEqual(json.loads(bad.stdout)['status'], 'error')

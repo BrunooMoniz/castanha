@@ -104,6 +104,13 @@ the Zinom hub) and the panel lists what's next, with a button to join the call
 and a button to record it. Two minutes before a meeting you get a popup. Fully
 optional — Castanha works fine as a manual recorder.
 
+**Fix the bookkeeping yourself.** In the library (**Open Castanha** from the
+bar icon) each recording has *Move…*, which sends it to another meeting, or to
+a new one, when it was captured under the wrong title; and *Link to calendar
+event…* attaches a meeting recorded by hand to the real event of that day,
+with its title, guests and call link. Transcript, notes and the Zinom delivery
+of the affected meetings are rebuilt automatically.
+
 ---
 
 ## Requirements
@@ -268,6 +275,14 @@ castanha recordings delete <slug> [file]
 
 # Append another recording to an existing meeting
 castanha start --meeting <slug>
+
+# Move a recording to another meeting (or to a new one); both get rebuilt
+castanha recordings move <slug> <file> --to=<other-slug>
+castanha recordings move <slug> <file> --new-title="Ad-hoc call"
+
+# Link a meeting recorded by hand to its calendar event of that day
+castanha agenda --dia 2026-09-12
+castanha link-event <slug> <event-uid>
 ```
 
 </details>

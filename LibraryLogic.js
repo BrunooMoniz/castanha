@@ -83,9 +83,12 @@ function isoDate(value) {
 }
 // Rótulo de um evento da agenda para o seletor: hora, título, conta e convidados.
 function eventLabel(event) {
-  var time = String(event && event.start || "").match(/T(\d{2}):(\d{2})/)
+  // O evento vem com o fuso do calendário; a hora mostrada é a do relógio da máquina.
+  var parsed = new Date(String(event && event.start || ""))
+  var time = isNaN(parsed.getTime()) ? "--:--"
+    : String(parsed.getHours()).padStart(2, "0") + ":" + String(parsed.getMinutes()).padStart(2, "0")
   var guests = event && Array.isArray(event.attendees) ? event.attendees.length : 0
-  return (time ? time[1] + ":" + time[2] : "--:--") + " · " + String(event && event.title || "Reunião")
+  return time + " · " + String(event && event.title || "Reunião")
     + (event && event.account ? " · " + String(event.account).split("@")[0] : "")
     + (guests ? " · " + guests + (guests === 1 ? " convidado" : " convidados") : "")
 }

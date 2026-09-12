@@ -332,7 +332,8 @@ def needs_resume(slug, storage):
         if not op or op['phase'] == 'restored': return False
         meta = _metadata(fd, slug)
         return (op['phase'] == 'applying' or meta.get('cleanup_status') == 'pending'
-                or (op.get('reprocess_requested') and meta.get('content_status') != 'current'))
+                or (op.get('reprocess_requested') and meta.get('content_status') != 'current')
+                or (isinstance(op.get('moved_to'), dict) and op['moved_to'].get('phase') == 'attaching'))
 
 
 def _remote_cleanup(fd, op, metadata, adapter):
@@ -399,6 +400,9 @@ def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapte
     from castanha.zinom_adapter import ZinomAdapter
     storage = storage or MeetingStorage()
     _capture_guard(slug)
+    # Movimento interrompido depois do journal: anexar no destino antes de tocar na origem.
+    from castanha.relocation import resume_move
+    resume_move(slug, storage)
     with _directory(storage, slug, lock=True) as fd:
         _capture_guard(slug)
         op = _load(fd)

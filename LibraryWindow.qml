@@ -48,6 +48,7 @@ FloatingWindow {
   property string linkTarget: ""
   property string linkNotice: ""
   property string linkFeedback: ""
+  property bool dayEventsQueued: false
   property real pendingSeek: -1
   property bool playWhenReady: false
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
@@ -102,6 +103,12 @@ FloatingWindow {
   function openLink() {
     if (!current) return
     linking = true; linkTarget = ""; linkNotice = ""; linkFeedback = ""; dayEvents = []
+    // Uma consulta em andamento pertence à reunião que a pediu: a nova espera.
+    if (dayEventsProcess.running) { dayEventsQueued = true; return }
+    startDayEvents()
+  }
+  function startDayEvents() {
+    dayEventsQueued = false
     dayEventsProcess.requestedSlug = selectedSlug
     dayEventsProcess.command = cliCommand.concat(["agenda", "--json", "--dia", LibraryLogic.isoDate(current.when)])
     dayEventsProcess.running = true
@@ -208,6 +215,7 @@ FloatingWindow {
     property string requestedSlug: ""
     stdout: StdioCollector {}
     onExited: function(code) {
+      if (root.dayEventsQueued) { if (root.linking && root.current) root.startDayEvents(); else root.dayEventsQueued = false; return }
       if (requestedSlug !== root.selectedSlug || !root.linking) return
       try {
         var result = JSON.parse(stdout.text)
