@@ -350,12 +350,17 @@ class TestMoveRecording(RelocationFixture):
         # Destino que ordena DEPOIS da origem: a trava dele só é tomada após a exclusão.
         dest = self.meeting('zdestino', ['job7', 'job8'], title='Z Destino', minute=40)
         self.receipts(dest)
-        real = recording_exclusion.exclude_recording
-        def racy(slug, filename, storage=None, expected_revision=None):
-            if slug == self.a:  # outra sessão exclui um áudio do destino no intervalo
-                real(dest, 'capture_job7.ogg', self.storage)
-            return real(slug, filename, storage, expected_revision=expected_revision)
-        with patch('castanha.recording_exclusion.exclude_recording', side_effect=racy):
+        real = recording_exclusion._exclude_locked
+        def racy(fd, storage, slug, filename, expected_revision=None):
+            if slug == self.a:
+                # A trava global de mutação já impede outra sessão de excluir no destino
+                # durante o movimento (ela receberia "outra captura em andamento"); o
+                # cenário aqui usa o núcleo interno para provar a revalidação sob a trava.
+                from castanha.annotations import _directory
+                with _directory(self.storage, dest, lock=True) as dfd:
+                    real(dfd, self.storage, dest, 'capture_job7.ogg', None)
+            return real(fd, storage, slug, filename, expected_revision)
+        with patch('castanha.recording_exclusion._exclude_locked', side_effect=racy):
             with self.assertRaisesRegex(RelocationError, 'reunião de destino ainda tem uma alteração'):
                 self.move(to=dest)
         op = self.operation(self.a)
@@ -363,6 +368,47 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(self.metadata(dest)['cleanup_status'], 'pending')
         self.assertEqual([r['job_id'] for r in self.metadata(dest)['recordings']], ['job8'])  # nada anexado
         restored = restore_recording(self.a, op['id'], self.storage)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_resume_refuses_destination_that_changed_meanwhile(self):
+        from castanha.recording_exclusion import applicable
+        from castanha.relocation import resume_move
+        self.receipts(self.b)
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        exclude_recording(self.b, 'capture_job3.ogg', self.storage)  # limpeza remota pendente no destino
+        revisao = self.metadata(self.b)['recording_revision']
+        with self.assertRaisesRegex(RelocationError, 'reunião de destino ainda tem uma alteração'):
+            resume_move(self.a, self.storage)
+        self.assertEqual(self.metadata(self.b)['recording_revision'], revisao)  # destino intocado
+        self.assertTrue(applicable(self.b, self.storage))  # a exclusão do destino continua retomável
+        self.assertEqual(self.operation(self.a)['moved_to']['phase'], 'attaching')  # e o movimento, pendente
+
+    def test_pending_move_blocks_new_capture_and_survives_a_revision_bump(self):
+        from castanha.recording_exclusion import applicable, capture_blocked
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.assertTrue(capture_blocked(self.a, self.storage))
+        meta = self.metadata(self.a); meta['recording_revision'] += 1  # como uma captura nova faria
+        write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        self.assertTrue(applicable(self.a, self.storage))
+        self.assertIn(self.a, [slug for _, slug in pending_candidates(self.storage)])
+        self.engine.process_pending(self.a)
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached')
+        self.assertIn(op['moved_to']['job_id'], self.jobs(self.b))
+
+    def test_move_waits_for_the_global_mutation_gate(self):
+        import fcntl
+        from castanha.capture_gate import open_lock
+        from castanha.config import get_state_dir
+        get_state_dir().mkdir(parents=True, exist_ok=True)
+        with open_lock(get_state_dir()) as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.move(to=self.b)
+        self.assertEqual(result['status'], 'error'); self.assertIn('outra captura', result['message'])
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
 
     def test_destination_with_pending_summary_regeneration_is_refused(self):
@@ -426,11 +472,35 @@ class TestLinkMeetingToEvent(RelocationFixture):
         self.assertIn('\n# Suporte C:\\Windows \\1\n', silver)
         self.assertIn('title: "Suporte C:\\\\Windows \\\\1"', silver)
 
+    def test_link_revalidates_under_the_lock(self):
+        from castanha import relocation
+        real_lock = relocation.meeting_lock
+        from contextlib import contextmanager
+        @contextmanager
+        def lock_then_regeneration(bronze):
+            with real_lock(bronze):
+                write_json(bronze / '.annotations-regeneration.json', {'status': 'pending'})  # outra sessão, antes da trava
+                yield
+        with patch('castanha.relocation.meeting_lock', lock_then_regeneration):
+            with self.assertRaisesRegex(RelocationError, 'resumo em regeneração'):
+                link_meeting_to_event(self.a, EVENT, self.storage)
+        self.assertEqual(self.metadata(self.a)['title'], 'Origem')
+
+    def test_link_puts_guests_in_the_note_body_so_zinom_sees_the_change(self):
+        from castanha.bronze_ingest import synthesis_text
+        meta = self.metadata(self.a)
+        self.storage.save_silver(self.a, silver_frontmatter(meta) + '# Origem\n\nData: 11/09/2026\n\n## Resumo\nTexto do resumo.\n')
+        antes = synthesis_text((self.storage.silver_dir / f'{self.a}.md').read_text())
+        link_meeting_to_event(self.a, {**EVENT, 'title': 'Origem'}, self.storage)  # mesmo título: só convidados mudam
+        silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
+        self.assertIn('# Origem\n\nConvidados (presença não confirmada): Ana, Bruno.\n\nData: 11/09/2026', silver)
+        self.assertNotEqual(synthesis_text(silver), antes)
+
     def test_relink_silver_without_frontmatter_or_guest_line(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
         out = relink_silver('# Velho\n\nTexto.\n', meta, silver_frontmatter(meta))
         self.assertTrue(out.startswith('---\ntitle: "Novo"'))
-        self.assertIn('\n# Novo\n\nTexto.\n', out)
+        self.assertIn('\n# Novo\n\nConvidados (presença não confirmada): Ana.\n\nTexto.\n', out)
 
     def test_link_refused_during_pending_cleanup_or_capture(self):
         from castanha.state import StateManager

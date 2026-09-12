@@ -180,73 +180,82 @@ def _projection(metadata, op):
 def exclude_recording(slug, filename, storage=None, expected_revision=None):
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
+    _capture_guard(slug)
+    with _directory(storage, slug, lock=True) as fd:
+        return _exclude_locked(fd, storage, slug, filename, expected_revision)
+
+
+def _exclude_locked(fd, storage, slug, filename, expected_revision=None):
+    """O corpo da exclusão, com a pasta da reunião já travada pelo chamador.
+
+    Mover uma gravação exclui e registra a intenção do movimento sob a MESMA
+    trava: entre as duas etapas ninguém retira conteúdo remoto nem restaura.
+    """
     if not isinstance(filename, str) or Path(filename).name != filename or '\\' in filename or filename in ('', '.', '..'):
         raise ExclusionError('Nome da gravação inválido')
     _capture_guard(slug)
-    with _directory(storage, slug, lock=True) as fd:
-        _capture_guard(slug)
-        metadata = _metadata(fd, slug)
-        revision = metadata.get('recording_revision', 0)
-        if type(revision) is not int or revision < 0: raise ExclusionError('Revisão da reunião inválida')
-        if expected_revision is not None and expected_revision != revision:
-            raise ExclusionConflict('A reunião mudou; recarregue antes de excluir')
-        old = _load(fd)
-        if old and old.get('phase') not in ('done', 'restored'):
-            raise ExclusionError('Conclua ou restaure a exclusão anterior antes de excluir outra gravação')
-        if '.legacy-recovery' in os.listdir(fd):
-            raise ExclusionError('Origem legada congelada exige recuperação específica; nada alterado')
-        records = storage.list_meeting_recordings(slug)
-        selected = [r for r in records if r['filename'] == filename]
-        if len(selected) != 1: raise ExclusionError('Gravação não encontrada nesta reunião')
-        info = os.stat(filename, dir_fd=fd, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode): raise ExclusionError('Áudio deve ser arquivo regular')
-        jobs = []
-        try:
-            with _child(fd, '.jobs') as child:
-                for name in os.listdir(child):
-                    if name.endswith('.json'):
-                        job = _json(child, name)
-                        if Path(job.get('audio_path', '')).parent != storage.bronze_dir / slug:
-                            raise ExclusionError('Job fora da reunião; exclusão interrompida')
-                        jobs.append((name, job))
-        except FileNotFoundError: pass
-        matching = [(name, job) for name, job in jobs if Path(job['audio_path']).name == filename]
-        if jobs and len(matching) != 1: raise ExclusionError('Origem nativa ausente ou ambígua')
-        removed_job = matching[0][1]['id'] if matching else None
-        identity = uuid.uuid4().hex
-        with _archive(fd, identity, create=True) as archive:
-            files = _snapshots(fd, storage, slug, archive)
-            targets, retained, destination, unscoped = _targets(files, archive, removed_job, metadata)
-            remaining = [r for r in records if r['filename'] != filename]
-            digest = _audio_hash(fd, filename)
-            updated = {**metadata, 'recording_revision': revision + 1, 'excluded_recording': filename,
-                'exclusion_id': identity, 'remaining_count': len(remaining), 'can_reprocess': bool(remaining),
-                'content_status': 'invalidated' if remaining else 'empty',
-                'processing_status': 'invalidated' if remaining else 'empty', 'summary_status': 'invalidated' if remaining else 'unavailable',
-                'transcription_status': 'pending' if remaining else 'unavailable', 'transcription_pending': False,
-                'summary_error': '', 'transcription_error': None, 'transcription_pending_reason': None,
-                'recordings': [r for r in metadata.get('recordings', []) if r.get('filename') != filename],
-                'recordings_count': len(remaining), 'bronze_audio_file': remaining[0]['path'] if remaining else None,
-                'duration_seconds': sum(r.get('duration_seconds', 0) for r in remaining),
-                'audio_status': metadata.get('audio_status', 'desconhecido') if remaining else 'audio_apagado',
-                'cleanup_status': 'pending' if targets or unscoped else 'not_needed',
-                'cleanup_reason': 'Retirada do conteúdo anterior do Zinom pendente' if targets or unscoped else '',
-                'remote_cleanup_required': bool(targets or unscoped), 'can_restore': True, 'restore_reason': '',
-                'removed_job_ids': sorted(set(metadata.get('removed_job_ids', []) + ([removed_job] if removed_job else []))),
-                'zinom': {'status': 'pending_cleanup' if targets or unscoped else 'invalidated' if remaining else 'not_needed',
-                          'reason': 'Conteúdo anterior invalidado pela exclusão da gravação'}}
-            updated.pop('memory_recording_ids', None)
-            if not jobs:
-                for record in updated['recordings']: record['transcribed'] = False
-            op = {'version': 1, 'id': identity, 'slug': slug, 'filename': filename, 'audio_sha256': digest,
-                'phase': 'applying', 'files': files, 'retained_receipts': retained, 'targets': targets,
-                'destination': destination, 'unscoped_remote': unscoped, 'attempted': False, 'acked': [],
-                'removed_job': removed_job, 'removed_job_file': matching[0][0] if matching else None,
-                'remaining': [r['filename'] for r in remaining], 'reprocess_requested': False, 'new_metadata': updated}
-            _write_json(archive, 'operation.json', op)
-        _write_json(fd, POINTER, {'id': identity})
-        _apply(fd, storage, op)
-        return _projection(_metadata(fd, slug), op)
+    metadata = _metadata(fd, slug)
+    revision = metadata.get('recording_revision', 0)
+    if type(revision) is not int or revision < 0: raise ExclusionError('Revisão da reunião inválida')
+    if expected_revision is not None and expected_revision != revision:
+        raise ExclusionConflict('A reunião mudou; recarregue antes de excluir')
+    old = _load(fd)
+    if old and old.get('phase') not in ('done', 'restored'):
+        raise ExclusionError('Conclua ou restaure a exclusão anterior antes de excluir outra gravação')
+    if '.legacy-recovery' in os.listdir(fd):
+        raise ExclusionError('Origem legada congelada exige recuperação específica; nada alterado')
+    records = storage.list_meeting_recordings(slug)
+    selected = [r for r in records if r['filename'] == filename]
+    if len(selected) != 1: raise ExclusionError('Gravação não encontrada nesta reunião')
+    info = os.stat(filename, dir_fd=fd, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode): raise ExclusionError('Áudio deve ser arquivo regular')
+    jobs = []
+    try:
+        with _child(fd, '.jobs') as child:
+            for name in os.listdir(child):
+                if name.endswith('.json'):
+                    job = _json(child, name)
+                    if Path(job.get('audio_path', '')).parent != storage.bronze_dir / slug:
+                        raise ExclusionError('Job fora da reunião; exclusão interrompida')
+                    jobs.append((name, job))
+    except FileNotFoundError: pass
+    matching = [(name, job) for name, job in jobs if Path(job['audio_path']).name == filename]
+    if jobs and len(matching) != 1: raise ExclusionError('Origem nativa ausente ou ambígua')
+    removed_job = matching[0][1]['id'] if matching else None
+    identity = uuid.uuid4().hex
+    with _archive(fd, identity, create=True) as archive:
+        files = _snapshots(fd, storage, slug, archive)
+        targets, retained, destination, unscoped = _targets(files, archive, removed_job, metadata)
+        remaining = [r for r in records if r['filename'] != filename]
+        digest = _audio_hash(fd, filename)
+        updated = {**metadata, 'recording_revision': revision + 1, 'excluded_recording': filename,
+            'exclusion_id': identity, 'remaining_count': len(remaining), 'can_reprocess': bool(remaining),
+            'content_status': 'invalidated' if remaining else 'empty',
+            'processing_status': 'invalidated' if remaining else 'empty', 'summary_status': 'invalidated' if remaining else 'unavailable',
+            'transcription_status': 'pending' if remaining else 'unavailable', 'transcription_pending': False,
+            'summary_error': '', 'transcription_error': None, 'transcription_pending_reason': None,
+            'recordings': [r for r in metadata.get('recordings', []) if r.get('filename') != filename],
+            'recordings_count': len(remaining), 'bronze_audio_file': remaining[0]['path'] if remaining else None,
+            'duration_seconds': sum(r.get('duration_seconds', 0) for r in remaining),
+            'audio_status': metadata.get('audio_status', 'desconhecido') if remaining else 'audio_apagado',
+            'cleanup_status': 'pending' if targets or unscoped else 'not_needed',
+            'cleanup_reason': 'Retirada do conteúdo anterior do Zinom pendente' if targets or unscoped else '',
+            'remote_cleanup_required': bool(targets or unscoped), 'can_restore': True, 'restore_reason': '',
+            'removed_job_ids': sorted(set(metadata.get('removed_job_ids', []) + ([removed_job] if removed_job else []))),
+            'zinom': {'status': 'pending_cleanup' if targets or unscoped else 'invalidated' if remaining else 'not_needed',
+                      'reason': 'Conteúdo anterior invalidado pela exclusão da gravação'}}
+        updated.pop('memory_recording_ids', None)
+        if not jobs:
+            for record in updated['recordings']: record['transcribed'] = False
+        op = {'version': 1, 'id': identity, 'slug': slug, 'filename': filename, 'audio_sha256': digest,
+            'phase': 'applying', 'files': files, 'retained_receipts': retained, 'targets': targets,
+            'destination': destination, 'unscoped_remote': unscoped, 'attempted': False, 'acked': [],
+            'removed_job': removed_job, 'removed_job_file': matching[0][0] if matching else None,
+            'remaining': [r['filename'] for r in remaining], 'reprocess_requested': False, 'new_metadata': updated}
+        _write_json(archive, 'operation.json', op)
+    _write_json(fd, POINTER, {'id': identity})
+    _apply(fd, storage, op)
+    return _projection(_metadata(fd, slug), op)
 
 
 def _apply(fd, storage, op):
@@ -292,6 +301,11 @@ def _apply(fd, storage, op):
     _save(fd, op)
 
 
+def _move_pending(op):
+    """Movimento registrado no journal e ainda não anexado no destino."""
+    return bool(op) and isinstance(op.get('moved_to'), dict) and op['moved_to'].get('phase') == 'attaching'
+
+
 def pending_exclusion(bronze):
     path = bronze / POINTER
     return path.exists() or path.is_symlink()
@@ -302,6 +316,7 @@ def applicable(slug, storage):
         op = _load(fd)
         metadata = _metadata(fd, slug)
         return bool(op and (op['phase'] in ('applying', 'restoring') or
+                    (op['phase'] != 'restored' and _move_pending(op)) or
                     (op['phase'] != 'restored' and
                      metadata.get('recording_revision') == op['new_metadata']['recording_revision'] and
                      (metadata.get('content_status') in ('invalidated', 'empty', 'rebuilding') or
@@ -313,8 +328,10 @@ def capture_blocked(slug, storage):
     with _directory(storage, slug) as fd:
         op = _load(fd)
         metadata = _metadata(fd, slug)
+        # Movimento por concluir também trava captura nova: ela mudaria a revisão
+        # e esconderia o movimento da retomada.
         return bool(op and (op['phase'] in ('applying', 'restoring') or
-                            metadata.get('cleanup_status') == 'pending'))
+                            metadata.get('cleanup_status') == 'pending' or _move_pending(op)))
 
 
 def engine_result(result, storage):
@@ -333,7 +350,7 @@ def needs_resume(slug, storage):
         meta = _metadata(fd, slug)
         return (op['phase'] == 'applying' or meta.get('cleanup_status') == 'pending'
                 or (op.get('reprocess_requested') and meta.get('content_status') != 'current')
-                or (isinstance(op.get('moved_to'), dict) and op['moved_to'].get('phase') == 'attaching'))
+                or _move_pending(op))
 
 
 def _remote_cleanup(fd, op, metadata, adapter):

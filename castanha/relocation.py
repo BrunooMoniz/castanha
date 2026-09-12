@@ -25,6 +25,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from castanha.capture_gate import capture_start
 from castanha.durability import atomic_write, file_sha256, meeting_lock, write_json
 
 ARCHIVE_DIR = ".recording-exclusions"
@@ -126,7 +127,13 @@ def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str) -> str:
     body = re.sub(r"^#\s+.*$", lambda _m: f"# {title}", body, count=1, flags=re.MULTILINE)
     attendees = (metadata.get("calendar_event") or {}).get("attendees") or []
     nomes = ", ".join(a.get("name") or a.get("email", "") for a in attendees if isinstance(a, dict)) or "Não identificados"
-    body = _CONVIDADOS.sub(lambda m: m.group(1) + nomes + m.group(3), body, count=1)
+    if _CONVIDADOS.search(body):
+        body = _CONVIDADOS.sub(lambda m: m.group(1) + nomes + m.group(3), body, count=1)
+    else:
+        # Sem a linha, só o frontmatter mudaria, e o frontmatter não vai ao Zinom:
+        # a lista de convidados entra logo abaixo do título, no corpo da nota.
+        body = re.sub(r"^(#\s+.*)$", lambda m: f"{m.group(1)}\n\nConvidados (presença não confirmada): {nomes}.",
+                      body, count=1, flags=re.MULTILINE)
     return frontmatter + body
 
 
@@ -145,6 +152,7 @@ def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]
     _guards(slug, storage, papel="gravação")
     bronze = storage.bronze_dir / slug
     with meeting_lock(bronze):
+        _guards(slug, storage, papel="gravação")  # de novo, sob a trava: nada começou nesse meio tempo
         meta = storage._read_bronze_metadata(slug)
         if not isinstance(meta, dict) or not meta or meta.get("slug", slug) != slug:
             raise RelocationError("Metadados da reunião inválidos; nada alterado")
@@ -294,19 +302,21 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
     return dest_audio
 
 
+@capture_start
 def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_title: Optional[str] = None,
                    event: Any = None, expected_revision: Optional[int] = None, storage=None) -> Dict[str, Any]:
     """Move uma gravação (e sua transcrição) para outra reunião, existente ou nova.
 
-    Passos: exclusão da origem (durável; reversível até aqui), cópia da quarentena
-    para o destino sob o lock da origem, marcação `moved_to` no journal. Uma
-    falha entre a exclusão e a cópia deixa a origem restaurável e o destino
-    intocado. Depois de copiado, a origem não oferece mais "desfazer": a cópia
-    da quarentena continua guardada.
+    Sob a trava da origem, sem soltar: exclusão (quarentena, invalidação, retirada
+    remota pendente), journal `moved_to`, anexo no destino, fecho da origem. Uma
+    falha antes do journal deixa a origem restaurável e o destino intocado; depois
+    dele a origem recusa "desfazer" e o daemon conclui o que faltou. A cópia da
+    quarentena continua guardada em qualquer caso. Como a captura, corre sob a
+    trava global de mutação (`capture_start`).
     """
     from castanha.annotations import _directory
-    from castanha.recording_exclusion import (ExclusionConflict, ExclusionError, _archive, _audio_hash, _load, _save,
-                                              exclude_recording)
+    from castanha.recording_exclusion import (ExclusionConflict, ExclusionError, _archive, _audio_hash,
+                                              _exclude_locked, _load, _save)
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
     _slug_ok(slug)
@@ -345,19 +355,19 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         elif to is not None:
             _guards(to, storage, papel="destino")  # pré-checagem; repetida sob a trava adiante
 
-        # 1) Origem: exclusão durável e reversível (quarentena, invalidação, retirada remota pendente).
+        # 1) Trava da origem, da exclusão ao fim: entre uma etapa e outra ninguém
+        #    retira conteúdo remoto, restaura nem captura nesta reunião.
+        fd = travas.enter_context(_directory(storage, slug, lock=True))
+        _guards(slug, storage, papel="origem")  # de novo, sob a trava
         try:
-            excluded = exclude_recording(slug, filename, storage, expected_revision=expected_revision)
+            excluded = _exclude_locked(fd, storage, slug, filename, expected_revision)
         except ExclusionConflict as exc:
             raise RelocationConflict(str(exc)) from exc
         except ExclusionError as exc:
             raise RelocationError(str(exc)) from exc
         if not isinstance(excluded, dict) or excluded.get("status") != "ok":
-            # `capture_start` devolve erro em vez de levantar quando a trava está ocupada.
             raise RelocationError((excluded or {}).get("message") or "Exclusão da origem recusada; nada foi movido")
-
-        # 2) Trava da origem, do journal até o fim: o daemon não retoma a exclusão no meio.
-        fd = travas.enter_context(_directory(storage, slug, lock=True))
+        # 2) O journal recém-criado.
         op = _load(fd)
         if not op or op.get("filename") != filename or op.get("phase") in ("restored", "restoring"):
             raise RelocationError("Exclusão da origem não encontrada; a gravação segue na quarentena")
@@ -454,6 +464,8 @@ def resume_move(slug: str, storage=None) -> bool:
         op = _load(fd)
         if not move_pending(op):
             return False
+        # O destino pode ter mudado desde a interrupção: mesma validação do movimento.
+        _guards(dest_slug, storage, papel="destino")
         with _archive(fd, op["id"]) as archive:
             if _audio_hash(archive, "audio") != op["audio_sha256"]:
                 raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
