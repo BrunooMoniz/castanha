@@ -119,6 +119,33 @@ def _guards(slug: str, storage, *, papel: str) -> None:
                                   "(retirada no Zinom ou reprocessamento). Aguarde ela concluir e tente de novo")
 
 
+def _destination_guards(dest: str, origin: str, storage) -> None:
+    """Além das guardas comuns: destino real (não link), diferente da origem, vivo no Zinom e nativo.
+
+    Link simbólico para a origem passaria pela comparação de nomes e travaria
+    o próprio `.processing.lock` por outro descritor (deadlock). Reunião com
+    entrega terminal no Zinom (`tombstoned`/`superseded`) sai da fila de
+    processamento e o job movido nunca seria consolidado. Reunião legada, com
+    gravação sem job nativo, não passa pela ponte Bronze e a entrega ficaria
+    bloqueada: para ela, o caminho é uma reunião nova.
+    """
+    bronze_b = storage.bronze_dir / dest
+    if bronze_b.is_symlink() or not bronze_b.is_dir():
+        raise RelocationError("Reunião de destino não encontrada")
+    if bronze_b.resolve() == (storage.bronze_dir / origin).resolve():
+        raise RelocationError("Origem e destino são a mesma reunião")
+    _guards(dest, storage, papel="destino")
+    meta = storage._read_bronze_metadata(dest)
+    if not isinstance(meta, dict) or not meta or meta.get("slug", dest) != dest:
+        raise RelocationError("Metadados da reunião de destino inválidos; nada foi movido")
+    delivery = meta.get("zinom") if isinstance(meta.get("zinom"), dict) else {}
+    if delivery.get("status") in ("tombstoned", "superseded"):
+        raise RelocationError("A reunião de destino foi retirada do Zinom e não recebe gravações; escolha outra ou crie uma nova")
+    if any(isinstance(r, dict) and not r.get("job_id") for r in meta.get("recordings") or []):
+        raise RelocationError("A reunião de destino é legada (gravação sem job nativo) e não passa pela ponte Bronze; "
+                              "mova para uma reunião nova")
+
+
 # ------------------------------------------------------------------ vincular
 def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str) -> str:
     """Troca frontmatter, primeiro título e a linha de convidados; o resumo fica como está."""
@@ -191,6 +218,19 @@ def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]
 
 
 # --------------------------------------------------------------------- mover
+def _refuse_unscoped_remote(metadata: Any) -> None:
+    """Reunião com nota legada no Zinom (`remember_id`) não move.
+
+    A exclusão dessa reunião marca a retirada remota como "sem escopo
+    verificável" e a deixa pendente de revisão humana, mas ainda restaurável.
+    Mover tiraria o "desfazer" e deixaria a origem sem derivados e sem retomada.
+    """
+    delivery = metadata.get("zinom") if isinstance(metadata, dict) and isinstance(metadata.get("zinom"), dict) else {}
+    if delivery.get("remember_id"):
+        raise RelocationError("A reunião de origem tem uma nota legada no Zinom sem escopo verificável; "
+                              "use Excluir e Reprocessar em vez de mover")
+
+
 def _job_for(bronze: Path, filename: str) -> Dict[str, Any]:
     jobs_dir = bronze / ".jobs"
     jobs: List[Dict[str, Any]] = []
@@ -280,17 +320,21 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
         atual = json.loads(job_file.read_text(encoding="utf-8"))
         if atual.get("id") != new_job_id or atual.get("sha256") != sha:
             raise RelocationError("Já existe outro job com essa identidade no destino; nada anexado")
+        if (atual.get("moved_from") or {}).get("committed") is True:
+            return dest_audio  # metadata do destino já atualizado numa tentativa anterior
+        new_job = atual
     else:
         write_json(job_file, new_job)
+    # O metadata do destino pode já listar o job (o daemon reconstrói `recordings`
+    # a partir dos jobs), sem ter recebido a revisão nova: o marcador é o job.
     meta = storage._read_bronze_metadata(dest_slug)
-    if any(isinstance(r, dict) and r.get("job_id") == new_job_id for r in meta.get("recordings") or []):
-        return dest_audio
+    ja_listado = any(isinstance(r, dict) and r.get("job_id") == new_job_id for r in meta.get("recordings") or [])
     record = {"id": dest_audio.name, "filename": dest_audio.name, "path": str(dest_audio), "job_id": new_job_id,
               "sha256": sha, "recorded_at": job.get("recorded_at"), "size_bytes": dest_audio.stat().st_size,
               "duration_seconds": job.get("duration_seconds", 0), "audio_status": job.get("audio_status", "desconhecido"),
               "transcribed": True, "transcription_error": None, "transcription_provider": job.get("provider"),
               "capture_mode": job.get("capture_mode", state.get("mode", "dual"))}
-    recordings = [r for r in (meta.get("recordings") or []) if isinstance(r, dict)] + [record]
+    recordings = [r for r in (meta.get("recordings") or []) if isinstance(r, dict)] + ([] if ja_listado else [record])
     meta.update(recordings=recordings, recordings_count=len(recordings),
                 recording_revision=int(meta.get("recording_revision") or 0) + 1,
                 processing_status="pending", bronze_audio_file=str(dest_audio),
@@ -299,6 +343,9 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
         meta.update(content_status="rebuilding", can_restore=False,
                     restore_reason="Nova gravação adicionada; cópia anterior preservada")
     storage.write_bronze_metadata(dest_slug, meta)
+    moved_from = dict(new_job.get("moved_from") or {})
+    moved_from["committed"] = True
+    write_json(job_file, {**new_job, "moved_from": moved_from})
     return dest_audio
 
 
@@ -327,14 +374,14 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         raise RelocationError("Informe a reunião de destino ou o título da nova reunião")
     bronze_a = storage.bronze_dir / slug
     _guards(slug, storage, papel="origem")
+    _refuse_unscoped_remote(storage._read_bronze_metadata(slug))
     job = _job_for(bronze_a, filename)
     record_event = event_record(event) if event is not None else None
     if to is not None:
         _slug_ok(to)
         if to == slug:
             raise RelocationError("Origem e destino são a mesma reunião")
-        if not (storage.bronze_dir / to).is_dir():
-            raise RelocationError("Reunião de destino não encontrada")
+        _destination_guards(to, slug, storage)  # pré-checagem; repetida sob a trava adiante
         dest_title = (storage._read_bronze_metadata(to) or {}).get("title") or to
     else:
         dest_title = (new_title or "").strip()
@@ -351,9 +398,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         destino_travado = to is not None and to < slug
         if destino_travado:
             travas.enter_context(meeting_lock(storage.bronze_dir / to))
-            _guards(to, storage, papel="destino")
-        elif to is not None:
-            _guards(to, storage, papel="destino")  # pré-checagem; repetida sob a trava adiante
+            _destination_guards(to, slug, storage)
 
         # 1) Trava da origem, da exclusão ao fim: entre uma etapa e outra ninguém
         #    retira conteúdo remoto, restaura nem captura nesta reunião.
@@ -373,6 +418,10 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
             raise RelocationError("Exclusão da origem não encontrada; a gravação segue na quarentena")
         if op.get("moved_to"):
             raise RelocationError("Esta gravação já foi movida")
+        if op.get("unscoped_remote"):
+            # Ainda sem `moved_to`: a exclusão fica restaurável pelo "Desfazer".
+            raise RelocationError("A retirada remota desta reunião não tem escopo verificável; a gravação foi "
+                                  "excluída e continua restaurável, mas não foi movida")
         with _archive(fd, op["id"]) as archive:
             if _audio_hash(archive, "audio") != op["audio_sha256"]:
                 raise RelocationError("Áudio da quarentena diverge do original; nada foi movido")
@@ -382,7 +431,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         if to is not None:
             if not destino_travado:
                 travas.enter_context(meeting_lock(storage.bronze_dir / to))
-                _guards(to, storage, papel="destino")
+                _destination_guards(to, slug, storage)
             dest_slug = to
         else:
             dest_slug = _create_destination(storage, dest_title, job, record_event)
@@ -452,7 +501,7 @@ def resume_move(slug: str, storage=None) -> bool:
     dest_slug = str(op["moved_to"].get("slug") or "")
     _slug_ok(dest_slug)
     bronze_b = storage.bronze_dir / dest_slug
-    if not bronze_b.is_dir():
+    if bronze_b.is_symlink() or not bronze_b.is_dir():
         raise RelocationError("Reunião de destino do movimento não existe mais; o áudio segue na quarentena da origem")
     with ExitStack() as travas:
         primeiro, segundo = sorted((slug, dest_slug))
@@ -465,14 +514,21 @@ def resume_move(slug: str, storage=None) -> bool:
         if not move_pending(op):
             return False
         # O destino pode ter mudado desde a interrupção: mesma validação do movimento.
-        _guards(dest_slug, storage, papel="destino")
+        _destination_guards(dest_slug, slug, storage)
         with _archive(fd, op["id"]) as archive:
             if _audio_hash(archive, "audio") != op["audio_sha256"]:
                 raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
-        job = _job_from_quarantine(fd, op)
-        _attach(storage, dest_slug, str(op["moved_to"].get("title") or dest_slug), bronze_b,
-                bronze_a / ARCHIVE_DIR / op["id"] / "audio", op["audio_sha256"], job,
-                str(op["moved_to"]["job_id"]), bronze_a, slug, _agora())
+        new_job_id = str(op["moved_to"]["job_id"])
+        dest_meta = storage._read_bronze_metadata(dest_slug) or {}
+        if new_job_id in (dest_meta.get("removed_job_ids") or []):
+            # Ele excluiu a gravação movida do destino antes desta retomada: o
+            # movimento aconteceu e foi desfeito lá; não recriar o áudio.
+            op["moved_to"]["removed_at_destination"] = True
+        else:
+            job = _job_from_quarantine(fd, op)
+            _attach(storage, dest_slug, str(op["moved_to"].get("title") or dest_slug), bronze_b,
+                    bronze_a / ARCHIVE_DIR / op["id"] / "audio", op["audio_sha256"], job,
+                    new_job_id, bronze_a, slug, _agora())
         _finish_origin(fd, slug, op, str(op["moved_to"].get("title") or dest_slug))
     return True
 

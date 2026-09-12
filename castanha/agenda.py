@@ -97,11 +97,12 @@ def events_on_day(dia: datetime.date, config: Optional[Dict[str, Any]] = None) -
     evento, então o começo é conferido aqui para não vazar a véspera.
     """
     cfg = config or load_config()
-    tz = datetime.datetime.now().astimezone().tzinfo
-    inicio = datetime.datetime(dia.year, dia.month, dia.day, tzinfo=tz)
-    fim = inicio + datetime.timedelta(days=1)
+    # Meia-noite local DAQUELE dia, pelas regras do fuso da máquina (horário de
+    # verão inclusive): o offset de agora serviria só para hoje.
+    inicio = datetime.datetime(dia.year, dia.month, dia.day).astimezone()
+    fim = (datetime.datetime(dia.year, dia.month, dia.day) + datetime.timedelta(days=1)).astimezone()
     eventos, avisos = _zinom_source(cfg).events_between(inicio, fim)
-    do_dia = [e for e in eventos if not e.all_day and inicio <= e.start.astimezone(tz) < fim]
+    do_dia = [e for e in eventos if not e.all_day and inicio <= e.start < fim]
     return {"meetings": do_dia, "warnings": avisos}
 
 

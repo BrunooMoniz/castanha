@@ -282,7 +282,7 @@ class TestMoveRecording(RelocationFixture):
         with self.assertRaisesRegex(RelocationError, 'Aguarde a gravação'):
             self.move(to=self.b)
 
-    def test_legacy_destination_keeps_its_transcript_when_first_job_arrives(self):
+    def test_legacy_destination_is_refused_because_bronze_delivery_would_block(self):
         legado = self.storage.bronze_dir / 'legado'; legado.mkdir()
         (legado / 'audio.ogg').write_bytes(b'legacy audio')
         (legado / 'transcript_raw.txt').write_text('TEXTO LEGADO DO DESTINO')
@@ -292,13 +292,28 @@ class TestMoveRecording(RelocationFixture):
             'recording_revision': 0, 'mode': 'dual', 'audio_status': 'ok', 'processing_status': 'complete',
             'transcription_provider': 'fixture', 'zinom': {'status': 'ok'}})
         self.storage.save_silver('legado', 'RESUMO LEGADO'); self.storage.save_gold('legado', {'title': 'Legado', **GOLD})
-        self.move(to='legado')
-        self.assertEqual((legado / '.jobs' / 'base_transcript.txt').read_text(), 'TEXTO LEGADO DO DESTINO')
-        rebuilt = self.engine.process_pending('legado')
-        self.assertEqual(rebuilt['status'], 'success', rebuilt)
-        texto = self.storage.read_transcript('legado')
-        self.assertIn('TEXTO LEGADO DO DESTINO', texto); self.assertIn('CONTEUDO job1', texto)
-        self.assertEqual(texto.count('CONTEUDO job1'), 1)
+        with self.assertRaisesRegex(RelocationError, 'legada'):
+            self.move(to='legado')
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        self.assertEqual((legado / 'transcript_raw.txt').read_text(), 'TEXTO LEGADO DO DESTINO')
+
+    def test_destination_symlinked_to_origin_is_refused_before_any_lock(self):
+        (self.storage.bronze_dir / 'zalias').symlink_to(self.storage.bronze_dir / self.a)
+        with self.assertRaisesRegex(RelocationError, 'destino não encontrada'):
+            self.move(to='zalias')
+        (self.storage.bronze_dir / 'zalias').unlink()
+        (self.storage.bronze_dir / 'zalias').mkdir()
+        (self.storage.bronze_dir / 'zalias' / 'x').symlink_to(self.storage.bronze_dir / self.a)  # pasta real, sem metadata
+        with self.assertRaisesRegex(RelocationError, 'Metadados da reunião de destino'):
+            self.move(to='zalias')
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_destination_retired_from_zinom_is_refused(self):
+        meta = self.metadata(self.b); meta['zinom'] = {'status': 'tombstoned'}
+        write_json(self.storage.bronze_dir / self.b / 'metadata.json', meta)
+        with self.assertRaisesRegex(RelocationError, 'retirada do Zinom'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
 
     def test_new_destination_starts_with_empty_base_transcript(self):
         dest = self.move(new_title='Conversa avulsa')['destination']['slug']
@@ -410,6 +425,52 @@ class TestMoveRecording(RelocationFixture):
             result = self.move(to=self.b)
         self.assertEqual(result['status'], 'error'); self.assertIn('outra captura', result['message'])
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_resume_does_not_resurrect_audio_the_user_excluded_from_the_destination(self):
+        from castanha.relocation import resume_move
+        with patch('castanha.relocation._finish_origin', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        exclude_recording(self.b, f'capture_{new_id}.ogg', self.storage)  # ele tirou o áudio movido do destino
+        self.assertIn(new_id, self.metadata(self.b)['removed_job_ids'])
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertFalse((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
+        self.assertNotIn(new_id, self.jobs(self.b))
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['moved_to']['removed_at_destination'])
+        self.assertFalse(self.metadata(self.a)['can_restore'])
+
+    def test_origin_with_legacy_zinom_note_cannot_be_moved(self):
+        meta = self.metadata(self.a); meta['zinom'] = {'status': 'ok', 'remember_id': 'nota-1'}
+        write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        with self.assertRaisesRegex(RelocationError, 'nota legada'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        self.assertFalse((self.storage.bronze_dir / self.a / POINTER).exists())
+
+    def test_crash_between_job_and_destination_metadata_still_bumps_revision_on_resume(self):
+        from castanha.relocation import resume_move
+        real = self.storage.write_bronze_metadata
+        def falha_no_destino(slug, meta):
+            if slug == self.b:
+                raise RuntimeError('queda depois do job')
+            return real(slug, meta)
+        with patch.object(self.storage, 'write_bronze_metadata', side_effect=falha_no_destino):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        self.assertIn(new_id, self.jobs(self.b)); self.assertFalse(self.jobs(self.b)[new_id]['moved_from'].get('committed'))
+        self.assertEqual(self.metadata(self.b)['recording_revision'], 0)
+        # O daemon processa o destino antes da retomada: `recordings` ganha o job, a revisão não.
+        self.engine.process_pending(self.b)  # o engine ordena por hora de gravação
+        self.assertEqual(sorted(r['job_id'] for r in self.metadata(self.b)['recordings']), sorted(['job3', new_id]))
+        self.assertEqual(self.metadata(self.b)['recording_revision'], 0)
+        self.assertTrue(resume_move(self.a, self.storage))
+        meta_b = self.metadata(self.b)
+        self.assertEqual(meta_b['recording_revision'], 1)
+        self.assertEqual(sorted(r['job_id'] for r in meta_b['recordings']), sorted(['job3', new_id]))  # sem duplicar
+        self.assertTrue(self.jobs(self.b)[new_id]['moved_from']['committed'])
 
     def test_destination_with_pending_summary_regeneration_is_refused(self):
         write_json(self.storage.bronze_dir / self.b / '.annotations-regeneration.json', {'status': 'pending'})
@@ -563,6 +624,23 @@ class TestAgendaDoDia(unittest.TestCase):
         self.assertEqual(find_event(dia, 'weekly_20260912T133000Z').title, 'weekly_20260912T133000Z')
         self.assertEqual(find_event(dia, 'weekly').uid, 'weekly_20260912T133000Z')  # pela chave da série
         self.assertIsNone(find_event(dia, 'outra'))
+
+    def test_day_bounds_follow_the_local_rules_of_that_date_not_today(self):
+        import os, time
+        from castanha.agenda import events_on_day
+        tz_antes = os.environ.get('TZ')
+        os.environ['TZ'] = 'America/New_York'; time.tzset()
+        try:
+            def ev(uid, start):
+                return {'id': uid, 'summary': uid, 'start': {'dateTime': start}, 'end': {'dateTime': start}}
+            # Janeiro em Nova York é -05:00; o offset "de agora" (setembro, -04:00) deslocaria o dia.
+            self._fonte([ev('vespera', '2026-01-11T23:30:00-05:00'), ev('do_dia', '2026-01-12T23:30:00-05:00')])
+            resultado = events_on_day(datetime.date(2026, 1, 12))
+            self.assertEqual([e.uid for e in resultado['meetings']], ['do_dia'])
+        finally:
+            if tz_antes is None: os.environ.pop('TZ', None)
+            else: os.environ['TZ'] = tz_antes
+            time.tzset()
 
     def test_failed_calendar_becomes_warning_not_silence(self):
         from castanha.agenda import events_on_day
