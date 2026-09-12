@@ -27,7 +27,7 @@ entra na chamada — o áudio é capturado na sua própria máquina.
 - Durante a gravação, ciano mostra seu microfone e âmbar mostra o áudio da chamada, com níveis independentes e o nome dos dispositivos capturados. Silêncio, pausa e medição indisponível ficam explícitos.
 - Os controles de pausar, retomar e finalizar ficam fixos no painel. O clique no ícone da barra abre o painel.
 - A biblioteca oferece busca, filtros, resumo completo, decisões, próximos passos e transcrição copiável. O player permite avançar, voltar e ajustar a velocidade.
-- Na aba Áudio, **Mover…** leva uma gravação para outra reunião (ou para uma nova) quando ela caiu no título errado; no cabeçalho, **Vincular a evento…** liga uma reunião gravada na mão ao evento real daquele dia, com título, convidados e link. Transcrição, resumo e entrega ao Zinom das reuniões afetadas são refeitos sozinhos.
+- No cabeçalho, **Vincular a evento…** liga uma reunião gravada na mão ao evento real daquele dia, com título, convidados e link. Na aba Áudio, **Mover…** leva uma gravação para outra reunião (ou para uma nova) quando ela caiu no título errado; vem desligado até a revisão independente fechar (`relocation.move_enabled: true` liga). Transcrição, resumo e entrega ao Zinom das reuniões afetadas são refeitos.
 - Trechos com timestamps verificados abrem o ponto correspondente do áudio. Reuniões antigas sem essa informação continuam legíveis, sem tempos ou participantes inventados.
 - Áudio, transcrição, resumo e entrega ao Zinom têm estados separados. Apagar áudios exige confirmação e preserva as notas.
 

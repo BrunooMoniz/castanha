@@ -693,7 +693,7 @@ def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str, storage=N
 
 
 def move_enabled() -> bool:
-    return bool((load_config().get("relocation") or {}).get("move_enabled", True))
+    return bool((load_config().get("relocation") or {}).get("move_enabled", False))
 
 
 def attach_in_progress(storage, job: Any) -> bool:

@@ -26,7 +26,7 @@ ColumnLayout {
   property string movingFile: ""
   property string moveTarget: ""
   property var moveTargets: []
-  property bool moveEnabled: true
+  property bool moveEnabled: false
   readonly property var moveOptions: [{value: "", label: "Escolha a reunião de destino…"}, {value: "__new__", label: "Nova reunião…"}]
     .concat(moveTargets.map(function(m) { return {value: m.slug, label: m.title + " · " + LibraryLogic.date(m.when)} }))
   readonly property bool canMove: !!movingFile && (moveTarget === "__new__" ? !!moveTitleField.text.trim() : !!moveTarget)

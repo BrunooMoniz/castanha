@@ -91,8 +91,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "openai/gpt-oss-120b",  # llama-3.3-70b-versatile foi descontinuado na Groq
     },
     "relocation": {
-        # Mover gravação entre reuniões. Desligue para manter só o "Vincular a evento".
-        "move_enabled": True,
+        # Mover gravação entre reuniões. Desligado por padrão até a revisão
+        # cruzada fechar sem achado: ligue aqui para usar; "Vincular" não depende disto.
+        "move_enabled": False,
     },
     "zinom": {
         "enabled": False,

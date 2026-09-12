@@ -105,11 +105,12 @@ and a button to record it. Two minutes before a meeting you get a popup. Fully
 optional — Castanha works fine as a manual recorder.
 
 **Fix the bookkeeping yourself.** In the library (**Open Castanha** from the
-bar icon) each recording has *Move…*, which sends it to another meeting, or to
-a new one, when it was captured under the wrong title; and *Link to calendar
-event…* attaches a meeting recorded by hand to the real event of that day,
-with its title, guests and call link. Transcript, notes and the Zinom delivery
-of the affected meetings are rebuilt automatically.
+bar icon) *Link to calendar event…* attaches a meeting recorded by hand to the
+real event of that day, with its title, guests and call link. Each recording
+also has *Move…*, which sends it to another meeting, or to a new one, when it
+was captured under the wrong title; moving is off by default until its
+independent review closes (`relocation.move_enabled: true` turns it on).
+Transcript, notes and the Zinom delivery of the affected meetings are rebuilt.
 
 ---
 

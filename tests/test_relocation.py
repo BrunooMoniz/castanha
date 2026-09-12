@@ -41,7 +41,7 @@ class RelocationFixture(unittest.TestCase):
         (config / 'config.json').write_text(json.dumps({
             'storage': {'base_dir': str(self.base), 'bronze_dir': str(self.base / 'bronze'),
                         'silver_dir': str(self.base / 'silver'), 'gold_dir': str(self.base / 'gold')},
-            'llm': {'provider': 'groq', 'api_key': ''}, 'zinom': self.zcfg}))
+            'llm': {'provider': 'groq', 'api_key': ''}, 'zinom': self.zcfg, 'relocation': {'move_enabled': True}}))
         for guard in (patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.root / 'config'),
                                               'XDG_STATE_HOME': str(self.root / 'state')}),
                       patch('urllib.request.urlopen', side_effect=AssertionError('No live network')),
@@ -682,9 +682,9 @@ class TestMoveRecording(RelocationFixture):
         restore_recording(self.a, self.operation(self.a)['id'], self.storage)  # o desfazer prometido funciona
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
 
-    def test_move_can_be_switched_off_by_config(self):
+    def test_move_is_off_by_default_and_can_be_switched_by_config(self):
         cfg_path = self.root / 'config/castanha/config.json'
-        cfg = json.loads(cfg_path.read_text()); cfg['relocation'] = {'move_enabled': False}; cfg_path.write_text(json.dumps(cfg))
+        cfg = json.loads(cfg_path.read_text()); cfg.pop('relocation', None); cfg_path.write_text(json.dumps(cfg))  # sem a chave: OFF
         with self.assertRaisesRegex(RelocationError, 'desligado'):
             self.move(to=self.b)
         self.assertFalse(MeetingLibrary(self.storage).detail(self.a)['meeting']['move_enabled'])
