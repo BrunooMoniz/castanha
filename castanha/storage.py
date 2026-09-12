@@ -314,7 +314,13 @@ class MeetingStorage:
         target_dir = self.bronze_dir / slug
         if not target_dir.exists():
             return {"status": "error", "message": f"Reunião '{slug}' não encontrada."}
+        # Mesma trava do movimento e da exclusão: ler e reescrever o metadata sem
+        # ela sobrescreveria a revisão e o journal de uma operação concorrente.
+        from castanha.durability import meeting_lock
+        with meeting_lock(target_dir):
+            return self._delete_recording_locked(slug, target_dir, recording_name)
 
+    def _delete_recording_locked(self, slug: str, target_dir: Path, recording_name: Optional[str]) -> Dict[str, Any]:
         recordings = self.list_meeting_recordings(slug)
         if not recordings:
             return {"status": "error", "message": f"Nenhuma gravação de áudio encontrada na reunião '{slug}'."}

@@ -202,7 +202,7 @@ def _exclude_locked(fd, storage, slug, filename, expected_revision=None):
     old = _load(fd)
     if old and old.get('phase') not in ('done', 'restored'):
         raise ExclusionError('Conclua ou restaure a exclusão anterior antes de excluir outra gravação')
-    if _move_pending(old):
+    if _move_pending_locked(fd, old):
         # Um journal novo substituiria o ponteiro e a gravação movida ficaria só na quarentena.
         raise ExclusionError('Conclua o movimento pendente desta reunião antes de excluir outra gravação')
     if old and old.get('reprocess_requested') and metadata.get('content_status') != 'current':
@@ -307,9 +307,30 @@ def _apply(fd, storage, op):
     _save(fd, op)
 
 
+MOVE_INTENT = '.recording-move-intent.json'
+
+
 def _move_pending(op):
     """Movimento registrado no journal e ainda não anexado no destino."""
     return bool(op) and isinstance(op.get('moved_to'), dict) and op['moved_to'].get('phase') == 'attaching'
+
+
+def _move_intent(fd):
+    """A intenção gravada ANTES da exclusão que o movimento faz; some quando o journal a assume."""
+    try:
+        intent = _json(fd, MOVE_INTENT)
+    except (ValueError, AnnotationError):
+        raise ExclusionError('Intenção de movimento ilegível; arquivos preservados')
+    return intent if isinstance(intent, dict) and intent.get('version') == 1 else None
+
+
+def _move_pending_locked(fd, op):
+    """Movimento por concluir, pelo journal ou pela intenção ainda não assumida por ele."""
+    if _move_pending(op):
+        return True
+    intent = _move_intent(fd)
+    return bool(intent and op and op.get('phase') != 'restored' and not op.get('moved_to')
+                and op.get('filename') == intent.get('filename'))
 
 
 def pending_exclusion(bronze):
@@ -322,7 +343,7 @@ def applicable(slug, storage):
         op = _load(fd)
         metadata = _metadata(fd, slug)
         return bool(op and (op['phase'] in ('applying', 'restoring') or
-                    (op['phase'] != 'restored' and _move_pending(op)) or
+                    (op['phase'] != 'restored' and _move_pending_locked(fd, op)) or
                     (op['phase'] != 'restored' and
                      metadata.get('recording_revision') == op['new_metadata']['recording_revision'] and
                      (metadata.get('content_status') in ('invalidated', 'empty', 'rebuilding') or
@@ -337,7 +358,7 @@ def capture_blocked(slug, storage):
         # Movimento por concluir também trava captura nova: ela mudaria a revisão
         # e esconderia o movimento da retomada.
         return bool(op and (op['phase'] in ('applying', 'restoring') or
-                            metadata.get('cleanup_status') == 'pending' or _move_pending(op)))
+                            metadata.get('cleanup_status') == 'pending' or _move_pending_locked(fd, op)))
 
 
 def engine_result(result, storage):
@@ -356,7 +377,7 @@ def needs_resume(slug, storage):
         meta = _metadata(fd, slug)
         return (op['phase'] == 'applying' or meta.get('cleanup_status') == 'pending'
                 or (op.get('reprocess_requested') and meta.get('content_status') != 'current')
-                or _move_pending(op))
+                or _move_pending_locked(fd, op))
 
 
 def _remote_cleanup(fd, op, metadata, adapter):
@@ -499,7 +520,7 @@ def restore_recording(slug, identity, storage=None):
         _capture_guard(slug)
         op = _load(fd)
         if not op or op['id'] != identity: raise ExclusionConflict('A exclusão atual mudou; restauração recusada')
-        if op.get('moved_to'):
+        if op.get('moved_to') or _move_pending_locked(fd, op):
             raise ExclusionError('Gravação movida para outra reunião; a cópia da quarentena permanece preservada')
         if op.get('attempted') or op.get('reprocess_requested'):
             raise ExclusionError('Retirada remota ou novo processamento iniciado; áudio permanece recuperável na quarentena')

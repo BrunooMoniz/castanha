@@ -376,14 +376,19 @@ class TestMoveRecording(RelocationFixture):
                     real(dfd, self.storage, dest, 'capture_job7.ogg', None)
             return real(fd, storage, slug, filename, expected_revision)
         with patch('castanha.recording_exclusion._exclude_locked', side_effect=racy):
-            with self.assertRaisesRegex(RelocationError, 'reunião de destino ainda tem uma alteração'):
-                self.move(to=dest)
+            result = self.move(to=dest)
+        self.assertEqual(result['status'], 'pending'); self.assertIn('não está disponível agora', result['message'])
         op = self.operation(self.a)
-        self.assertNotIn('moved_to', op)  # origem excluída, mas ainda restaurável
+        self.assertNotIn('moved_to', op)  # o journal ainda não assumiu; a intenção está no disco
         self.assertEqual(self.metadata(dest)['cleanup_status'], 'pending')
         self.assertEqual([r['job_id'] for r in self.metadata(dest)['recordings']], ['job8'])  # nada anexado
-        restored = restore_recording(self.a, op['id'], self.storage)
-        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        with self.assertRaisesRegex(ExclusionError, 'movida'):
+            restore_recording(self.a, op['id'], self.storage)
+        # O destino libera (aqui, desfazendo a exclusão dele) e o daemon conclui o movimento.
+        restore_recording(dest, self.operation(dest)['id'], self.storage)
+        self.assertEqual(self.engine.process_pending(self.a)['status'], 'success')
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertIn(op['moved_to']['job_id'], self.jobs(dest))
 
     def test_resume_refuses_destination_that_changed_meanwhile(self):
         from castanha.recording_exclusion import applicable
@@ -514,6 +519,72 @@ class TestMoveRecording(RelocationFixture):
         with self.assertRaisesRegex(RelocationError, 'inconsistentes'):
             self.move(to=self.b)
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_crash_between_exclusion_and_journal_is_still_a_move(self):
+        from castanha import recording_exclusion
+        from castanha.recording_exclusion import MOVE_INTENT, capture_blocked, needs_resume
+        real_save = recording_exclusion._save
+        def falha_no_moved_to(fd, op):
+            if op.get('moved_to') and not op['moved_to'].get('adopted_from_intent'):
+                raise RuntimeError('queda antes do journal')
+            return real_save(fd, op)
+        with patch('castanha.recording_exclusion._save', side_effect=falha_no_moved_to):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        op = self.operation(self.a)
+        self.assertNotIn('moved_to', op)  # exclusão comum aos olhos do journal...
+        self.assertTrue((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())  # ...mas a intenção está no disco
+        with self.assertRaisesRegex(ExclusionError, 'movida'):
+            restore_recording(self.a, op['id'], self.storage)
+        self.assertTrue(capture_blocked(self.a, self.storage)); self.assertTrue(needs_resume(self.a, self.storage))
+        with self.assertRaisesRegex(ExclusionError, 'movimento pendente'):
+            exclude_recording(self.a, 'capture_job2.ogg', self.storage)
+        resumed = self.engine.process_pending(self.a)
+        self.assertEqual(resumed['status'], 'success', resumed)
+        op = self.operation(self.a)
+        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['moved_to']['adopted_from_intent'])
+        self.assertIn(op['moved_to']['job_id'], self.jobs(self.b))
+        self.assertFalse((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())
+        self.assertEqual(self.storage.read_transcript(self.a), 'CONTEUDO job2')
+
+    def test_crash_before_journal_with_new_destination_creates_it_on_resume(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        def falha_no_moved_to(fd, op):
+            if op.get('moved_to') and not op['moved_to'].get('adopted_from_intent'):
+                raise RuntimeError('queda antes do journal')
+            return real_save(fd, op)
+        with patch('castanha.recording_exclusion._save', side_effect=falha_no_moved_to):
+            with self.assertRaises(RuntimeError):
+                self.move(new_title='Conversa avulsa', event=EVENT)
+        self.assertTrue(resume_move(self.a, self.storage))
+        dest = self.operation(self.a)['moved_to']['slug']
+        self.assertIn('conversa-avulsa', dest)
+        meta = self.metadata(dest)
+        self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
+        self.assertEqual(len(meta['recordings']), 1)
+
+    def test_refused_exclusion_leaves_no_intent_behind(self):
+        from castanha.recording_exclusion import MOVE_INTENT
+        with self.assertRaises(RelocationConflict):
+            self.move(to=self.b, expected_revision=9)
+        self.assertFalse((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())
+        self.move(to=self.b)  # e o movimento seguinte funciona
+
+    def test_legacy_audio_does_not_count_as_a_rebuild_source(self):
+        legado = self.meeting('legado3', ['job9'], title='Legado 3', minute=57)
+        (self.storage.bronze_dir / legado / '.jobs' / 'base_transcript.txt').write_text('TEXTO LEGADO')
+        (self.storage.bronze_dir / legado / 'audio.ogg').write_bytes(b'legacy audio')  # transcrito no legado, sem job
+        with self.assertRaisesRegex(RelocationError, 'último job'):
+            move_recording(legado, 'capture_job9.ogg', to=self.b, storage=self.storage)
+        self.assertTrue((self.storage.bronze_dir / legado / 'capture_job9.ogg').exists())
+        # Com outro job (mesmo sem áudio, só transcrição), a base tem quem a reconstrua.
+        (self.storage.bronze_dir / self.a / '.jobs' / 'base_transcript.txt').write_text('TEXTO LEGADO')
+        self.assertEqual(self.storage.delete_recording(self.a, 'capture_job2.ogg')['status'], 'ok')
+        self.move(to=self.b)
+        self.assertEqual(self.engine.process_pending(self.a)['status'], 'success')
+        self.assertIn('TEXTO LEGADO', self.storage.read_transcript(self.a))
 
     def test_pending_move_blocks_another_exclusion_in_the_origin(self):
         with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
@@ -785,6 +856,20 @@ class TestLinkMeetingToEvent(RelocationFixture):
         out = relink_silver(corpo, meta, silver_frontmatter(meta))
         self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\nLink da chamada: https://meet.google.com/abc-defg-hij\n', out)
         self.assertTrue(out.endswith('## 📝 Transcrição Bruta\nAlguém disse: Convidados (presença não confirmada): Zé.\nLink da chamada: https://antigo.example/x\nfim\n'))
+
+    def test_relink_silver_leaves_inline_guest_phrases_in_the_summary_alone(self):
+        meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
+        corpo = '# Velho\n\n## Resumo\nConvidados (presença não confirmada): Zé. O time decidiu publicar na sexta-feira.\n'
+        out = relink_silver(corpo, meta, silver_frontmatter(meta), previous_attendees=[{'name': 'Zé'}])
+        self.assertIn('Convidados (presença não confirmada): Zé. O time decidiu publicar na sexta-feira.', out)
+        self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\n\n## Resumo', out)
+
+    def test_relink_silver_replaces_only_the_previous_controlled_line(self):
+        meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
+        corpo = '# Velho\n\nConvidados (presença não confirmada): Zé.\n\n## Resumo\nConvidados (presença não confirmada): Zé.\n'
+        out = relink_silver(corpo, meta, silver_frontmatter(meta), previous_attendees=[{'name': 'Zé'}])
+        self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\n\n## Resumo\nConvidados (presença não confirmada): Zé.\n', out)
+        self.assertEqual(out.count('Convidados (presença não confirmada): Ana.'), 1)
 
     def test_relink_silver_never_touches_manual_annotations(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}

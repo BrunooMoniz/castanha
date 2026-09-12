@@ -45,7 +45,6 @@ _EVENT_FIELDS = ("uid", "title", "start", "end", "organizer", "conference_url", 
                  "html_link", "calendar_name", "account", "location")
 _ATTENDEE_FIELDS = ("name", "email", "response", "organizer", "optional")
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n\n?", re.DOTALL)
-_CONVIDADOS = re.compile(r"(Convidados \(presença não confirmada\): )([^\n]*?)(\.?)(?=\n|$)")
 _LINK = re.compile(r"^Link da chamada: [^\n]*$", re.MULTILINE)
 # Transcrição e anotações manuais são conteúdo histórico ou autoral: nada a
 # partir da primeira dessas seções é reescrito.
@@ -162,27 +161,41 @@ def _destination_guards(dest: str, origin: str, storage) -> None:
 
 
 # ------------------------------------------------------------------ vincular
-def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str) -> str:
-    """Troca frontmatter, primeiro título e a linha de convidados; o resumo fica como está."""
+def _nomes(attendees: Any) -> str:
+    return ", ".join(a.get("name") or a.get("email", "") for a in (attendees or []) if isinstance(a, dict)) or "Não identificados"
+
+
+def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str, previous_attendees: Any = None) -> str:
+    """Troca frontmatter, primeiro título e a linha controlada de convidados; o resumo fica como está.
+
+    Só a linha inteira igual à lista anterior é campo controlado: a mesma frase
+    dentro de um parágrafo do resumo (ou com texto depois) é texto do resumo.
+    Sem a linha anterior, a lista nova entra logo abaixo do título.
+    """
     title = metadata.get("title") or "Reunião"
     body = _FRONTMATTER.sub("", text, count=1) if text.startswith("---\n") else text
     corte = _TRANSCRICAO.search(body)
     body, transcricao = (body[:corte.start()], body[corte.start():]) if corte else (body, "")
     body = re.sub(r"^#\s+.*$", lambda _m: f"# {title}", body, count=1, flags=re.MULTILINE)
-    attendees = (metadata.get("calendar_event") or {}).get("attendees") or []
-    nomes = ", ".join(a.get("name") or a.get("email", "") for a in attendees if isinstance(a, dict)) or "Não identificados"
-    if _CONVIDADOS.search(body):
-        body = _CONVIDADOS.sub(lambda m: m.group(1) + nomes + m.group(3), body, count=1)
+    nomes = _nomes((metadata.get("calendar_event") or {}).get("attendees"))
+    atual = re.compile(r"^Convidados \(presença não confirmada\): " + re.escape(nomes) + r"\.$", re.MULTILINE)
+    anterior = re.compile(r"^Convidados \(presença não confirmada\): " + re.escape(_nomes(previous_attendees)) + r"\.?$",
+                          re.MULTILINE)
+    if atual.search(body):
+        pass  # reaplicação (por exemplo, depois de uma falha): a linha certa já está lá
+    elif anterior.search(body):
+        body = anterior.sub(lambda _m: f"Convidados (presença não confirmada): {nomes}.", body, count=1)
     else:
-        # Sem a linha, só o frontmatter mudaria, e o frontmatter não vai ao Zinom:
-        # a lista de convidados entra logo abaixo do título, no corpo da nota.
+        # Sem a linha controlada, só o frontmatter mudaria, e o frontmatter não vai ao
+        # Zinom: a lista de convidados entra logo abaixo do título, no corpo da nota.
         body = re.sub(r"^(#\s+.*)$", lambda m: f"{m.group(1)}\n\nConvidados (presença não confirmada): {nomes}.",
                       body, count=1, flags=re.MULTILINE)
     # O link da chamada também é conteúdo da nota (e do envelope), não só metadata.
     link = str((metadata.get("calendar_event") or {}).get("conference_url") or "").strip()
     body = _LINK.sub("", body)
     if link:
-        body = _CONVIDADOS.sub(lambda m: m.group(0) + f"\nLink da chamada: {link}", body, count=1)
+        controlada = re.compile(r"^Convidados \(presença não confirmada\): " + re.escape(nomes) + r"\.$", re.MULTILINE)
+        body = controlada.sub(lambda m: m.group(0) + f"\nLink da chamada: {link}", body, count=1)
     return frontmatter + body + transcricao
 
 
@@ -221,7 +234,8 @@ def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]
         # não consta no metadata e a operação é reaplicável do zero (cada escrita é atômica).
         silver = storage.silver_dir / f"{slug}.md"
         if silver.exists():
-            atomic_write(silver, relink_silver(silver.read_text(encoding="utf-8"), meta, silver_frontmatter(meta)))
+            atomic_write(silver, relink_silver(silver.read_text(encoding="utf-8"), meta, silver_frontmatter(meta),
+                                               previous_attendees=(previous_event or {}).get("attendees")))
         gold = storage.gold_dir / f"{slug}.json"
         if gold.exists():
             try:
@@ -301,10 +315,10 @@ def _refuse_orphan_legacy_base(bronze: Path, metadata: Any, job: Dict[str, Any])
         return
     removed = set((metadata or {}).get("removed_job_ids") or []) if isinstance(metadata, dict) else set()
     outros_jobs = [p for p in (bronze / ".jobs").glob("*.json") if p.stem != job.get("id") and p.stem not in removed]
-    outros_audios = [p for p in bronze.iterdir() if p.is_file() and p.suffix.lower() in {".ogg", ".opus", ".wav", ".flac", ".mp3", ".m4a"}
-                     and p.name != Path(str(job.get("audio_path"))).name]
-    if not outros_jobs and not outros_audios:
-        raise RelocationError("Esta é a última gravação de uma reunião com transcrição legada; movê-la deixaria a "
+    # Só outro job nativo reconstrói a base: um áudio legado já transcrito é pulado
+    # pela retomada legada e a base ficaria fora da transcrição consolidada.
+    if not outros_jobs:
+        raise RelocationError("Este é o último job de uma reunião com transcrição legada; movê-lo deixaria a "
                               "reunião sem como ser reconstruída. Use uma reunião nova para a gravação ou mantenha-a aqui")
 
 
@@ -453,8 +467,9 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
     quarentena continua guardada em qualquer caso. Como a captura, corre sob a
     trava global de mutação (`capture_start`).
     """
-    from castanha.annotations import _directory
-    from castanha.recording_exclusion import (ExclusionConflict, ExclusionError, _archive, _audio_hash,
+    import os
+    from castanha.annotations import _directory, _write_json
+    from castanha.recording_exclusion import (MOVE_INTENT, ExclusionConflict, ExclusionError, _archive, _audio_hash,
                                               _exclude_locked, _load, _save)
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
@@ -503,13 +518,22 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         job = _job_for(bronze_a, filename)  # relido sob a trava: um retry concorrente pode tê-lo mudado
         _refuse_retired_source(bronze_a, metadata_a, job)
         _refuse_orphan_legacy_base(bronze_a, metadata_a, job)
+        # Intenção ANTES da exclusão: se o processo cair entre as duas, a retomada
+        # sabe que aquela exclusão era um movimento e o conclui, em vez de tratá-la
+        # como exclusão comum (retirada remota e sem destino).
+        _write_json(fd, MOVE_INTENT, {"version": 1, "filename": filename, "job_id": job.get("id"),
+                                      "dest_slug": to, "new_title": None if to is not None else dest_title,
+                                      "dest_title": dest_title, "event": record_event, "at": now})
         try:
             excluded = _exclude_locked(fd, storage, slug, filename, expected_revision)
         except ExclusionConflict as exc:
+            _remove_intent(fd)
             raise RelocationConflict(str(exc)) from exc
         except ExclusionError as exc:
+            _remove_intent(fd)
             raise RelocationError(str(exc)) from exc
         if not isinstance(excluded, dict) or excluded.get("status") != "ok":
+            _remove_intent(fd)
             raise RelocationError((excluded or {}).get("message") or "Exclusão da origem recusada; nada foi movido")
         # 2) O journal recém-criado.
         op = _load(fd)
@@ -527,14 +551,23 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
 
         # 3) Destino sob trava (ordem: origem < destino aqui) e revalidado; ou reunião nova.
         created = to is None
-        if to is not None:
-            if not destino_travado:
-                travas.enter_context(meeting_lock(storage.bronze_dir / to))
-                _destination_guards(to, slug, storage)
-            dest_slug = to
-        else:
-            dest_slug = _create_destination(storage, dest_title, job, record_event)
-            travas.enter_context(meeting_lock(storage.bronze_dir / dest_slug))
+        try:
+            if to is not None:
+                if not destino_travado:
+                    travas.enter_context(meeting_lock(storage.bronze_dir / to))
+                    _destination_guards(to, slug, storage)
+                dest_slug = to
+            else:
+                dest_slug = _create_destination(storage, dest_title, job, record_event)
+                travas.enter_context(meeting_lock(storage.bronze_dir / dest_slug))
+        except RelocationError as exc:
+            # A origem já foi excluída com a intenção gravada: o daemon conclui o
+            # movimento quando o destino liberar. Nada fica restaurável pela metade.
+            return {"status": "pending", "slug": slug, "filename": filename, "exclusion_id": op["id"],
+                    "remaining_count": len(op.get("remaining") or []), "can_restore": False,
+                    "destination": {"slug": to, "title": dest_title, "created": False},
+                    "message": f"Gravação retirada da origem, mas o destino não está disponível agora ({exc}). "
+                               "O movimento será concluído automaticamente assim que ele liberar."}
 
         # 4) Journal ANTES de anexar: intenção e identidade do movimento. Daqui em
         #    diante a origem recusa "desfazer", e uma interrupção é retomada pelo daemon.
@@ -542,6 +575,7 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         op["moved_to"] = {"slug": dest_slug, "job_id": new_job_id, "title": dest_title, "at": now,
                           "phase": "attaching"}
         _save(fd, op)
+        _remove_intent(fd)  # o journal assumiu a intenção
         # 5) Anexar (idempotente, a partir do snapshot que a exclusão guardou) e 6) concluir a origem.
         _attach(storage, dest_slug, dest_title, storage.bronze_dir / dest_slug,
                 bronze_a / ARCHIVE_DIR / op["id"] / "audio", op["audio_sha256"], _job_from_quarantine(fd, op),
@@ -556,6 +590,43 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
             "message": f"Gravação movida para “{dest_title}”. Transcrição, resumo e entrega ao Zinom das duas reuniões "
                        + ("serão refeitos automaticamente pelo daemon." if automatico else
                           "ficam pendentes: rode `castanha sync --all` ou Reprocessar em cada reunião.")}
+
+
+def _remove_intent(fd) -> None:
+    import os
+    from castanha.recording_exclusion import MOVE_INTENT
+    try:
+        os.unlink(MOVE_INTENT, dir_fd=fd)
+    except FileNotFoundError:
+        pass
+
+
+def _adopt_intent(fd, storage, slug: str) -> bool:
+    """Exclusão feita, journal sem `moved_to`, intenção no disco: assume o movimento.
+
+    Cria o destino novo se a intenção o pedia. Devolve True se assumiu algo.
+    """
+    from castanha.recording_exclusion import _load, _move_intent, _save
+    intent = _move_intent(fd)
+    op = _load(fd)
+    if not intent:
+        return False
+    if not op or op.get("phase") == "restored" or op.get("filename") != intent.get("filename"):
+        _remove_intent(fd)  # a exclusão não chegou a acontecer: nada a mover
+        return False
+    if op.get("moved_to"):
+        _remove_intent(fd)  # o journal já tinha assumido; sobrou só o arquivo
+        return False
+    dest_slug = intent.get("dest_slug")
+    if not dest_slug:
+        job = _job_from_quarantine(fd, op)
+        dest_slug = _create_destination(storage, str(intent.get("dest_title") or intent.get("new_title") or "Reunião"),
+                                        job, intent.get("event") if isinstance(intent.get("event"), dict) else None)
+    op["moved_to"] = {"slug": dest_slug, "job_id": uuid.uuid4().hex, "title": str(intent.get("dest_title") or dest_slug),
+                      "at": _agora(), "phase": "attaching", "adopted_from_intent": True}
+    _save(fd, op)
+    _remove_intent(fd)
+    return True
 
 
 def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str, storage=None) -> Dict[str, Any]:
@@ -601,10 +672,20 @@ def resume_move(slug: str, storage=None) -> bool:
     destino e das travas recomeça. Sem nada a concluir, não faz nada.
     """
     from castanha.annotations import _directory
-    from castanha.recording_exclusion import _archive, _audio_hash, _load
+    from castanha.recording_exclusion import _archive, _audio_hash, _load, _move_intent
     from castanha.storage import MeetingStorage
     storage = storage or MeetingStorage()
     bronze_a = storage.bronze_dir / slug
+    # Intenção gravada antes da exclusão e ainda não assumida pelo journal (queda
+    # entre as duas etapas): assumir sob a trava da origem, e só então seguir.
+    try:
+        with _directory(storage, slug) as fd:
+            tem_intencao = bool(_move_intent(fd))
+    except (OSError, ValueError, KeyError, TypeError):
+        tem_intencao = False
+    if tem_intencao:
+        with _directory(storage, slug, lock=True) as fd:
+            _adopt_intent(fd, storage, slug)
     for _tentativa in range(3):
         try:
             with _directory(storage, slug) as fd:

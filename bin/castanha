@@ -309,7 +309,7 @@ def _evento_do_dia(uid, data, slug):
 
 def _saida_realocacao(args, result):
     print(json.dumps(result, ensure_ascii=False) if args.json else result.get("message") or result["status"])
-    if result["status"] != "ok":
+    if result["status"] not in ("ok", "pending"):
         sys.exit(1)
 
 
