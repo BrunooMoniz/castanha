@@ -551,6 +551,63 @@ class TestMoveRecording(RelocationFixture):
         self.assertNotIn(new_id, self.jobs(outro))        # e não no destino da leitura antiga
         self.assertEqual(len(self.metadata(outro)['recordings']), 1)
 
+    def test_resume_after_daemon_consolidation_keeps_destination_content_current(self):
+        from castanha.relocation import resume_move
+        # Destino com uma exclusão anterior já concluída e conteúdo atual.
+        self.b = self.meeting('destino3', ['job5', 'job6'], title='Destino 3', minute=45)
+        exclude_recording(self.b, 'capture_job5.ogg', self.storage)
+        self.assertEqual(self.engine.reprocess_meeting(self.b)['status'], 'success')
+        self.assertEqual(self.metadata(self.b)['content_status'], 'current')
+        real = self.storage.write_bronze_metadata
+        def falha_no_destino(slug, meta):
+            if slug == self.b: raise RuntimeError('queda depois do job')
+            return real(slug, meta)
+        with patch.object(self.storage, 'write_bronze_metadata', side_effect=falha_no_destino):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.engine.process_pending(self.b)  # o daemon consolida antes da retomada
+        self.assertTrue(resume_move(self.a, self.storage))
+        meta_b = self.metadata(self.b)
+        self.assertEqual(meta_b['content_status'], 'current'); self.assertEqual(meta_b['processing_status'], 'complete')
+        self.assertTrue(MeetingLibrary(self.storage).detail(self.b)['meeting']['has_summary'])
+
+    def test_excluding_another_recording_waits_for_the_pending_rebuild(self):
+        self.move(to=self.b)  # origem fica 'rebuilding' até o daemon reprocessar
+        with self.assertRaisesRegex(ExclusionError, 'reprocessamento pendente'):
+            exclude_recording(self.a, 'capture_job2.ogg', self.storage)
+        self.engine.process_pending(self.a)
+        self.assertEqual(self.metadata(self.a)['content_status'], 'current')
+        exclude_recording(self.a, 'capture_job2.ogg', self.storage)  # agora pode
+
+    def test_restorable_exclusion_blocks_move_and_link_until_decided(self):
+        exclude_recording(self.a, 'capture_job2.ogg', self.storage)  # sem recibos: restaurável
+        self.assertTrue(self.metadata(self.a)['can_restore'])
+        with self.assertRaisesRegex(RelocationError, 'ainda restaurável'):
+            self.move(to=self.b)
+        with self.assertRaisesRegex(RelocationError, 'ainda restaurável'):
+            link_meeting_to_event(self.a, EVENT, self.storage)
+        restore_recording(self.a, self.operation(self.a)['id'], self.storage)  # o desfazer continua válido
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job2.ogg').exists())
+        self.move(to=self.b)
+
+    def test_finish_origin_persists_metadata_before_closing_the_journal(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        estado = {'attached': 0}
+        def falha_ao_fechar(fd, op):
+            if (op.get('moved_to') or {}).get('phase') == 'attached':
+                estado['attached'] += 1
+                if estado['attached'] == 1: raise RuntimeError('queda antes do journal')
+            return real_save(fd, op)
+        with patch('castanha.recording_exclusion._save', side_effect=falha_ao_fechar):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.assertFalse(self.metadata(self.a)['can_restore'])          # metadata já sem "desfazer"
+        self.assertEqual(self.operation(self.a)['moved_to']['phase'], 'attaching')  # journal ainda por concluir
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertEqual(self.operation(self.a)['moved_to']['phase'], 'attached')
+
     def test_destination_with_pending_summary_regeneration_is_refused(self):
         write_json(self.storage.bronze_dir / self.b / '.annotations-regeneration.json', {'status': 'pending'})
         with self.assertRaisesRegex(RelocationError, 'resumo em regeneração'):
@@ -647,6 +704,14 @@ class TestLinkMeetingToEvent(RelocationFixture):
         self.assertEqual(depois.count('Link da chamada:'), 1)
         self.assertIn('Link da chamada: https://meet.google.com/xyz-uvwx-rst', depois)
         self.assertNotEqual(synthesis_text(depois), antes)
+
+    def test_relink_silver_never_touches_the_transcript_section(self):
+        meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}], 'conference_url': 'https://meet.google.com/abc-defg-hij'}}
+        corpo = ('# Velho\n\n## Resumo\nTexto.\n\n## 📝 Transcrição Bruta\n'
+                 'Alguém disse: Convidados (presença não confirmada): Zé.\nLink da chamada: https://antigo.example/x\nfim\n')
+        out = relink_silver(corpo, meta, silver_frontmatter(meta))
+        self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\nLink da chamada: https://meet.google.com/abc-defg-hij\n', out)
+        self.assertTrue(out.endswith('## 📝 Transcrição Bruta\nAlguém disse: Convidados (presença não confirmada): Zé.\nLink da chamada: https://antigo.example/x\nfim\n'))
 
     def test_relink_silver_without_frontmatter_or_guest_line(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}

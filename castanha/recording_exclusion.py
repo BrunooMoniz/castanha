@@ -205,6 +205,9 @@ def _exclude_locked(fd, storage, slug, filename, expected_revision=None):
     if _move_pending(old):
         # Um journal novo substituiria o ponteiro e a gravação movida ficaria só na quarentena.
         raise ExclusionError('Conclua o movimento pendente desta reunião antes de excluir outra gravação')
+    if old and old.get('reprocess_requested') and metadata.get('content_status') != 'current':
+        # Excluir e desfazer agora restauraria um metadata "reconstruindo" sem ninguém para reconstruir.
+        raise ExclusionError('Aguarde o reprocessamento pendente desta reunião antes de excluir outra gravação')
     if '.legacy-recovery' in os.listdir(fd):
         raise ExclusionError('Origem legada congelada exige recuperação específica; nada alterado')
     records = storage.list_meeting_recordings(slug)

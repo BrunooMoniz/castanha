@@ -46,6 +46,8 @@ _ATTENDEE_FIELDS = ("name", "email", "response", "organizer", "optional")
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n\n?", re.DOTALL)
 _CONVIDADOS = re.compile(r"(Convidados \(presença não confirmada\): )([^\n]*?)(\.?)(?=\n|$)")
 _LINK = re.compile(r"^Link da chamada: [^\n]*$", re.MULTILINE)
+# A seção de transcrição é conteúdo histórico: nada abaixo dela é reescrito.
+_TRANSCRICAO = re.compile(r"^##\s+.{0,3}\s*Transcri", re.MULTILINE)
 
 
 def _slug_ok(slug: Any) -> str:
@@ -111,13 +113,23 @@ def _guards(slug: str, storage, *, papel: str) -> None:
     if regeneration_pending(bronze):
         raise RelocationError(f"A reunião de {papel} tem um resumo em regeneração; aguarde ele concluir")
     if pending_exclusion(bronze):
+        from castanha.annotations import _directory
+        from castanha.recording_exclusion import _load
         try:
             bloqueada = capture_blocked(slug, storage) or needs_resume(slug, storage)
+            with _directory(storage, slug) as fd:
+                op = _load(fd)
+            restauravel = bool(op and op.get("phase") not in ("restored",)
+                               and (storage._read_bronze_metadata(slug) or {}).get("can_restore") is True)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise RelocationError(f"Controle de exclusão da reunião de {papel} inválido; nada alterado") from exc
         if bloqueada:
             raise RelocationError(f"A reunião {'da ' + papel if papel == 'gravação' else 'de ' + papel} ainda tem uma alteração de áudios em andamento "
                                   "(retirada no Zinom ou reprocessamento). Aguarde ela concluir e tente de novo")
+        if restauravel:
+            # Mexer no metadata agora deixaria o "Desfazer" oferecido e sempre recusado.
+            raise RelocationError(f"A reunião de {papel} tem uma exclusão ainda restaurável; "
+                                  "desfaça-a ou reprocesse antes de continuar")
 
 
 def _destination_guards(dest: str, origin: str, storage) -> None:
@@ -152,6 +164,8 @@ def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str) -> str:
     """Troca frontmatter, primeiro título e a linha de convidados; o resumo fica como está."""
     title = metadata.get("title") or "Reunião"
     body = _FRONTMATTER.sub("", text, count=1) if text.startswith("---\n") else text
+    corte = _TRANSCRICAO.search(body)
+    body, transcricao = (body[:corte.start()], body[corte.start():]) if corte else (body, "")
     body = re.sub(r"^#\s+.*$", lambda _m: f"# {title}", body, count=1, flags=re.MULTILINE)
     attendees = (metadata.get("calendar_event") or {}).get("attendees") or []
     nomes = ", ".join(a.get("name") or a.get("email", "") for a in attendees if isinstance(a, dict)) or "Não identificados"
@@ -167,7 +181,7 @@ def relink_silver(text: str, metadata: Dict[str, Any], frontmatter: str) -> str:
     body = _LINK.sub("", body)
     if link:
         body = _CONVIDADOS.sub(lambda m: m.group(0) + f"\nLink da chamada: {link}", body, count=1)
-    return frontmatter + body
+    return frontmatter + body + transcricao
 
 
 def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]:
@@ -377,7 +391,9 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
                 recording_revision=int(meta.get("recording_revision") or 0) + 1,
                 processing_status=processing, bronze_audio_file=str(dest_audio),
                 duration_seconds=sum(float(r.get("duration_seconds") or 0) for r in recordings))
-    if meta.get("exclusion_id"):
+    if meta.get("exclusion_id") and processing == "pending":
+        # Como uma captura nova numa reunião com exclusão anterior. Com o job já
+        # consolidado, o conteúdo atual continua atual.
         meta.update(content_status="rebuilding", can_restore=False,
                     restore_reason="Nova gravação adicionada; cópia anterior preservada")
     storage.write_bronze_metadata(dest_slug, meta)
@@ -504,16 +520,18 @@ def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str) -> Dict[s
     """Journal concluído e metadata da origem: sem desfazer, e reprocessamento pedido se sobrou áudio."""
     from castanha.annotations import _metadata, _read, _write_json
     from castanha.recording_exclusion import _save, _sha
-    op["moved_to"]["phase"] = "attached"
-    if op.get("remaining"):
-        # Mesmo pedido que o botão "Reprocessar" faria: o daemon refaz a origem sem o áudio movido.
-        op["reprocess_requested"] = True
-    _save(fd, op)
+    # Metadata primeiro, journal depois: uma queda no meio deixa o movimento
+    # ainda "attaching" (a retomada repete esta etapa), nunca um journal
+    # concluído com um metadata que ainda oferece "desfazer".
     metadata = _metadata(fd, slug)
     metadata.update(can_restore=False, restore_reason=f"Gravação movida para {dest_title}")
     if op.get("remaining"):
         metadata.update(content_status="rebuilding", processing_status="pending")
     _write_json(fd, "metadata.json", metadata)
+    op["moved_to"]["phase"] = "attached"
+    if op.get("remaining"):
+        # Mesmo pedido que o botão "Reprocessar" faria: o daemon refaz a origem sem o áudio movido.
+        op["reprocess_requested"] = True
     op["after_metadata_sha256"] = _sha(_read(fd, "metadata.json"))
     _save(fd, op)
     return metadata
@@ -564,17 +582,18 @@ def resume_move(slug: str, storage=None) -> bool:
                 continue  # o journal mudou enquanto esperávamos: recomeça com o destino certo
             new_job_id = str(op["moved_to"]["job_id"])
             title = str(op["moved_to"].get("title") or dest_slug)
-            # O destino pode ter mudado desde a interrupção: mesma validação do movimento.
-            _destination_guards(dest_slug, slug, storage)
-            with _archive(fd, op["id"]) as archive:
-                if _audio_hash(archive, "audio") != op["audio_sha256"]:
-                    raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
             dest_meta = storage._read_bronze_metadata(dest_slug) or {}
             if new_job_id in (dest_meta.get("removed_job_ids") or []):
                 # Ele excluiu a gravação movida do destino antes desta retomada: o
-                # movimento aconteceu e foi desfeito lá; não recriar o áudio.
+                # movimento aconteceu e foi desfeito lá; não recriar o áudio nem
+                # exigir nada do destino.
                 op["moved_to"]["removed_at_destination"] = True
             else:
+                # O destino pode ter mudado desde a interrupção: mesma validação do movimento.
+                _destination_guards(dest_slug, slug, storage)
+                with _archive(fd, op["id"]) as archive:
+                    if _audio_hash(archive, "audio") != op["audio_sha256"]:
+                        raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
                 _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
                         op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
             _finish_origin(fd, slug, op, title)
