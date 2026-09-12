@@ -418,6 +418,24 @@ def _remote_cleanup(fd, op, metadata, adapter):
     return True
 
 
+def surviving_jobs(storage, slug, metadata):
+    """Jobs nativos que sobraram (transcrição preservada), mesmo sem o arquivo de áudio.
+
+    `castanha delete-recording` apaga o áudio e guarda a transcrição; a reunião
+    não fica vazia por isso, e o reprocessamento tem de reconstruí-la.
+    """
+    removed = set(metadata.get('removed_job_ids') or [])
+    jobs = []
+    for path in (storage.bronze_dir / slug / '.jobs').glob('*.json'):
+        try:
+            job = json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            continue
+        if isinstance(job, dict) and job.get('id') and job['id'] not in removed:
+            jobs.append(job['id'])
+    return sorted(jobs)
+
+
 def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapter=None):
     from castanha.storage import MeetingStorage
     from castanha.zinom_adapter import ZinomAdapter
@@ -434,7 +452,8 @@ def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapte
         if op['phase'] == 'restoring': raise ExclusionError('Restauração interrompida; retome a restauração antes de sincronizar')
         if op['phase'] == 'applying': _apply(fd, storage, op)
         metadata = _metadata(fd, slug)
-        if reprocess and op['remaining']:
+        sobras = op['remaining'] or surviving_jobs(storage, slug, metadata)
+        if reprocess and sobras:
             op['reprocess_requested'] = True
             _save(fd, op)
             metadata.update(can_restore=False, restore_reason='Novo processamento iniciado; cópia anterior preservada',
@@ -444,11 +463,11 @@ def resume_exclusion(slug, storage=None, *, engine=None, reprocess=False, adapte
             return {**_projection(_metadata(fd, slug), op), 'status': 'pending',
                     'message': 'Retirada do conteúdo anterior do Zinom pendente'}
         metadata = _metadata(fd, slug)
-        if not op['remaining'] or not op.get('reprocess_requested'):
+        if not sobras or not op.get('reprocess_requested'):
             op['phase'] = 'done'
             _save(fd, op)
             return {**_projection(metadata, op), 'message': ('Reunião sem gravações; anotações manuais preservadas'
-                    if not op['remaining'] else 'Gravação excluída; reprocesse os áudios restantes')}
+                    if not sobras else 'Gravação excluída; reprocesse os áudios restantes')}
         if engine is None:
             from castanha.engine import CastanhaEngine
             engine = CastanhaEngine(); engine.storage = storage

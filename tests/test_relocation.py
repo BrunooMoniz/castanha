@@ -608,6 +608,28 @@ class TestMoveRecording(RelocationFixture):
         self.assertTrue(resume_move(self.a, self.storage))
         self.assertEqual(self.operation(self.a)['moved_to']['phase'], 'attached')
 
+    def test_moving_the_last_audio_file_still_rebuilds_origin_from_preserved_transcripts(self):
+        # `delete-recording` apaga o áudio e guarda a transcrição: a origem não fica vazia.
+        self.assertEqual(self.storage.delete_recording(self.a, 'capture_job1.ogg')['status'], 'ok')
+        self.assertIn('job1', self.jobs(self.a))
+        result = move_recording(self.a, 'capture_job2.ogg', to=self.b, storage=self.storage)
+        self.assertEqual(result['remaining_count'], 0)
+        op = self.operation(self.a)
+        self.assertTrue(op['reprocess_requested']); self.assertEqual(self.metadata(self.a)['content_status'], 'rebuilding')
+        rebuilt = self.engine.process_pending(self.a)
+        self.assertEqual(rebuilt['status'], 'success', rebuilt)
+        self.assertEqual(self.storage.read_transcript(self.a), 'CONTEUDO job1')
+        self.assertEqual(self.metadata(self.a)['content_status'], 'current')
+        self.assertIn('RESUMO NOVO CONTEUDO job1', (self.storage.silver_dir / f'{self.a}.md').read_text())
+
+    def test_move_message_tells_the_truth_about_automatic_resume(self):
+        self.assertIn('castanha sync', self.move(to=self.b)['message'])  # fixture sem retry automático
+        cfg_path = self.root / 'config/castanha/config.json'
+        cfg = json.loads(cfg_path.read_text()); cfg['sync'] = {'auto_retry_enabled': True}; cfg_path.write_text(json.dumps(cfg))
+        outro = self.meeting('zorigem2', ['job8'], title='Origem 2', minute=55)
+        result = move_recording(outro, 'capture_job8.ogg', to=self.b, storage=self.storage)
+        self.assertTrue(result['auto_resume']); self.assertIn('automaticamente', result['message'])
+
     def test_destination_with_pending_summary_regeneration_is_refused(self):
         write_json(self.storage.bronze_dir / self.b / '.annotations-regeneration.json', {'status': 'pending'})
         with self.assertRaisesRegex(RelocationError, 'resumo em regeneração'):
@@ -712,6 +734,25 @@ class TestLinkMeetingToEvent(RelocationFixture):
         out = relink_silver(corpo, meta, silver_frontmatter(meta))
         self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\nLink da chamada: https://meet.google.com/abc-defg-hij\n', out)
         self.assertTrue(out.endswith('## 📝 Transcrição Bruta\nAlguém disse: Convidados (presença não confirmada): Zé.\nLink da chamada: https://antigo.example/x\nfim\n'))
+
+    def test_relink_silver_never_touches_manual_annotations(self):
+        meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
+        corpo = ('# Velho\n\n## Resumo\nTexto.\n\n## Anotações manuais do usuário\n'
+                 '> Convidados (presença não confirmada): Carlos. Confirmar o orçamento antes de sexta.\n')
+        out = relink_silver(corpo, meta, silver_frontmatter(meta))
+        self.assertIn('# Novo\n\nConvidados (presença não confirmada): Ana.\n\n## Resumo', out)
+        self.assertTrue(out.endswith('## Anotações manuais do usuário\n> Convidados (presença não confirmada): Carlos. Confirmar o orçamento antes de sexta.\n'))
+
+    def test_link_is_reapplicable_when_the_metadata_write_fails(self):
+        with patch.object(self.storage, 'write_bronze_metadata', side_effect=RuntimeError('disco cheio')):
+            with self.assertRaises(RuntimeError):
+                link_meeting_to_event(self.a, EVENT, self.storage)
+        self.assertEqual(self.metadata(self.a)['title'], 'Origem')  # metadata intacto: o vínculo não consta
+        link_meeting_to_event(self.a, EVENT, self.storage)
+        self.assertEqual(self.metadata(self.a)['title'], 'Weekly do time')
+        silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
+        self.assertEqual(silver.count('Convidados (presença não confirmada): Ana, Bruno.'), 1)
+        self.assertEqual(silver.count('Link da chamada:'), 1)
 
     def test_relink_silver_without_frontmatter_or_guest_line(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}

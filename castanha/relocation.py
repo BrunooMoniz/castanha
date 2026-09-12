@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from castanha.capture_gate import capture_start
+from castanha.config import load_config
 from castanha.durability import atomic_write, file_sha256, meeting_lock, write_json
 
 ARCHIVE_DIR = ".recording-exclusions"
@@ -46,8 +47,9 @@ _ATTENDEE_FIELDS = ("name", "email", "response", "organizer", "optional")
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n\n?", re.DOTALL)
 _CONVIDADOS = re.compile(r"(Convidados \(presença não confirmada\): )([^\n]*?)(\.?)(?=\n|$)")
 _LINK = re.compile(r"^Link da chamada: [^\n]*$", re.MULTILINE)
-# A seção de transcrição é conteúdo histórico: nada abaixo dela é reescrito.
-_TRANSCRICAO = re.compile(r"^##\s+.{0,3}\s*Transcri", re.MULTILINE)
+# Transcrição e anotações manuais são conteúdo histórico ou autoral: nada a
+# partir da primeira dessas seções é reescrito.
+_TRANSCRICAO = re.compile(r"^##\s+(?:.{0,3}\s*Transcri|Anotações manuais)", re.MULTILINE)
 
 
 def _slug_ok(slug: Any) -> str:
@@ -215,12 +217,11 @@ def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]
             # Nota legada (remember): a fila só a reedita se o recibo disser pendente.
             # O transporte Bronze não precisa disso: o título muda a revisão do envelope.
             meta["zinom"] = {**delivery, "status": "pending", "reason": "Evento da agenda vinculado; nota a atualizar"}
+        # Derivados primeiro, metadata por último: se algo falhar no meio, o vínculo
+        # não consta no metadata e a operação é reaplicável do zero (cada escrita é atômica).
         silver = storage.silver_dir / f"{slug}.md"
-        novo_silver = (relink_silver(silver.read_text(encoding="utf-8"), meta, silver_frontmatter(meta))
-                       if silver.exists() else None)
-        storage.write_bronze_metadata(slug, meta)
-        if novo_silver is not None:
-            atomic_write(silver, novo_silver)
+        if silver.exists():
+            atomic_write(silver, relink_silver(silver.read_text(encoding="utf-8"), meta, silver_frontmatter(meta)))
         gold = storage.gold_dir / f"{slug}.json"
         if gold.exists():
             try:
@@ -230,6 +231,7 @@ def link_meeting_to_event(slug: str, event: Any, storage=None) -> Dict[str, Any]
             if isinstance(dados, dict) and "title" in dados:
                 dados["title"] = record["title"]
                 write_json(gold, dados)
+        storage.write_bronze_metadata(slug, meta)
     quantos = len(record["attendees"])
     return {"status": "ok", "slug": slug, "title": record["title"], "previous_title": previous_title,
             "event_uid": record["uid"], "attendees": quantos,
@@ -506,30 +508,38 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
         _attach(storage, dest_slug, dest_title, storage.bronze_dir / dest_slug,
                 bronze_a / ARCHIVE_DIR / op["id"] / "audio", op["audio_sha256"], _job_from_quarantine(fd, op),
                 new_job_id, bronze_a, slug, now)
-        metadata = _finish_origin(fd, slug, op, dest_title)
-    return {"status": "ok", "slug": slug, "filename": filename,
+        metadata = _finish_origin(fd, slug, op, dest_title, storage)
+    automatico = bool((load_config().get("sync") or {}).get("auto_retry_enabled", False))
+    return {"status": "ok", "slug": slug, "filename": filename, "auto_resume": automatico,
             "destination": {"slug": dest_slug, "title": dest_title, "job_id": new_job_id, "created": created},
             "exclusion_id": op["id"], "remaining_count": len(op.get("remaining") or []),
             "content_status": metadata.get("content_status"), "cleanup_status": metadata.get("cleanup_status"),
             "can_restore": False, "recording_revision": metadata.get("recording_revision"),
-            "message": f"Gravação movida para “{dest_title}”. Transcrição, resumo e entrega ao Zinom "
-                       "das duas reuniões serão refeitos automaticamente."}
+            "message": f"Gravação movida para “{dest_title}”. Transcrição, resumo e entrega ao Zinom das duas reuniões "
+                       + ("serão refeitos automaticamente pelo daemon." if automatico else
+                          "ficam pendentes: rode `castanha sync --all` ou Reprocessar em cada reunião.")}
 
 
-def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str) -> Dict[str, Any]:
-    """Journal concluído e metadata da origem: sem desfazer, e reprocessamento pedido se sobrou áudio."""
+def _finish_origin(fd, slug: str, op: Dict[str, Any], dest_title: str, storage=None) -> Dict[str, Any]:
+    """Journal concluído e metadata da origem: sem desfazer, e reprocessamento pedido se sobrou conteúdo."""
     from castanha.annotations import _metadata, _read, _write_json
     from castanha.recording_exclusion import _save, _sha
+    from castanha.storage import MeetingStorage
+    storage = storage or MeetingStorage()
     # Metadata primeiro, journal depois: uma queda no meio deixa o movimento
     # ainda "attaching" (a retomada repete esta etapa), nunca um journal
     # concluído com um metadata que ainda oferece "desfazer".
+    from castanha.recording_exclusion import surviving_jobs
     metadata = _metadata(fd, slug)
+    # Sobrou conteúdo na origem? Áudio restante ou transcrição preservada de
+    # um áudio já apagado (`delete-recording`): nos dois casos ela é refeita.
+    sobras = bool(op.get("remaining")) or bool(surviving_jobs(storage, slug, metadata))
     metadata.update(can_restore=False, restore_reason=f"Gravação movida para {dest_title}")
-    if op.get("remaining"):
+    if sobras:
         metadata.update(content_status="rebuilding", processing_status="pending")
     _write_json(fd, "metadata.json", metadata)
     op["moved_to"]["phase"] = "attached"
-    if op.get("remaining"):
+    if sobras:
         # Mesmo pedido que o botão "Reprocessar" faria: o daemon refaz a origem sem o áudio movido.
         op["reprocess_requested"] = True
     op["after_metadata_sha256"] = _sha(_read(fd, "metadata.json"))
@@ -596,7 +606,7 @@ def resume_move(slug: str, storage=None) -> bool:
                         raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
                 _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
                         op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
-            _finish_origin(fd, slug, op, title)
+            _finish_origin(fd, slug, op, title, storage)
             return True
     raise RelocationError("O journal do movimento mudou repetidamente; tente de novo")
 
