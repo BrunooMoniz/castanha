@@ -101,12 +101,24 @@ def events_on_day(dia: datetime.date, config: Optional[Dict[str, Any]] = None) -
     # verão inclusive): o offset de agora serviria só para hoje.
     inicio = datetime.datetime(dia.year, dia.month, dia.day).astimezone()
     fim = (datetime.datetime(dia.year, dia.month, dia.day) + datetime.timedelta(days=1)).astimezone()
-    eventos, avisos = _zinom_source(cfg).events_between(inicio, fim)
+    try:
+        eventos, avisos = _zinom_source(cfg).events_between(inicio, fim)
+    except Exception as e:  # a lista de agendas do hub falhou: os feeds ainda valem
+        eventos, avisos = [], [f"Zinom: {motivo_curto(e)}"]
     # Feeds iCal configurados entram como na agenda normal: sem Zinom, são a única fonte.
+    # O leitor de feed imprime o erro em stdout; aqui isso vira aviso, porque a
+    # saída JSON destes comandos precisa ficar só com JSON.
+    import contextlib
+    import io
     for feed in (cfg.get("calendar") or {}).get("feeds") or []:
         url = feed.get("url") if isinstance(feed, dict) else None
-        if url:
+        if not url:
+            continue
+        saida = io.StringIO()
+        with contextlib.redirect_stdout(saida):
             eventos.extend(fetch_feed_events(url))
+        if saida.getvalue().strip():
+            avisos.append(f"Feed iCal {feed.get('name') or url}: indisponível")
     do_dia, vistos = [], set()
     for e in sorted(eventos, key=lambda e: e.start):
         if e.all_day or e.uid in vistos or not (inicio <= e.start < fim):

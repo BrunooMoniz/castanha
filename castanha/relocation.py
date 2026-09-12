@@ -266,15 +266,22 @@ def _refuse_retired_source(bronze: Path, metadata: Any, job: Dict[str, Any]) -> 
     source = "castanha:" + hashlib.sha256(str(job.get("id") or "").encode("utf-8")).hexdigest()
     receipts = bronze / ".brain-ingest"
     if receipts.is_dir():
-        for path in receipts.glob("*.json"):
-            if path.name == "destination.json":
-                continue
-            try:
-                saved = json.loads(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                raise RelocationError("Recibo do Zinom ilegível na origem; nada foi movido")
+        from castanha.bronze_ingest import TERMINAL_EVIDENCE, BronzeIngestError, _verify_terminal_receipts
+        try:
+            # O mesmo verificador da entrega: checkpoints e a evidência terminal
+            # independente têm de concordar; um estado inconsistente (tombstone
+            # anotado antes de o checkpoint ser atualizado) recusa em vez de liberar.
+            checkpoints = _verify_terminal_receipts(receipts, metadata if isinstance(metadata, dict) else {})
+            evidence_path = receipts / TERMINAL_EVIDENCE
+            evidence = json.loads(evidence_path.read_bytes()) if evidence_path.exists() else {}
+        except (BronzeIngestError, ValueError, OSError, KeyError, TypeError) as exc:
+            raise RelocationError("Recibos do Zinom na origem inconsistentes ou ilegíveis; nada foi movido") from exc
+        for saved in checkpoints.values():
             envelope = ((saved.get("request") or {}).get("envelope") or {}) if isinstance(saved, dict) else {}
             if envelope.get("source_id") == source and saved.get("status") in TERMINAL_STATES:
+                raise RelocationError("Esta gravação foi retirada do Zinom e não pode ser movida para outra identidade")
+        for entry in (evidence.values() if isinstance(evidence, dict) else []):
+            if isinstance(entry, dict) and entry.get("source_id") == source:
                 raise RelocationError("Esta gravação foi retirada do Zinom e não pode ser movida para outra identidade")
 
 
@@ -386,11 +393,10 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
     if dest_audio.exists():
         if file_sha256(dest_audio) != sha:
             raise RelocationError("Já existe outro áudio com essa identidade no destino; nada anexado")
-    elif (new_job.get("moved_from") or {}).get("phase") in ("audio", "metadata"):
-        # O áudio já tinha sido copiado numa tentativa anterior e não está mais aqui:
-        # alguém o apagou de propósito (`delete-recording`). Não ressuscitar.
-        return None
     else:
+        # Áudio ausente com anexo não concluído só pode ser cópia interrompida:
+        # `delete-recording` recusa apagar um áudio cujo anexo ainda não foi
+        # concluído, e a exclusão registra o id em `removed_job_ids`.
         atomic_write(dest_audio, quarantine)
         if file_sha256(dest_audio) != sha:
             dest_audio.unlink(missing_ok=True)
@@ -638,10 +644,8 @@ def resume_move(slug: str, storage=None) -> bool:
                 with _archive(fd, op["id"]) as archive:
                     if _audio_hash(archive, "audio") != op["audio_sha256"]:
                         raise RelocationError("Áudio da quarentena diverge do original; movimento não concluído")
-                anexado = _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
-                                  op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
-                if anexado is None:
-                    op["moved_to"]["removed_at_destination"] = True
+                _attach(storage, dest_slug, title, bronze_b, bronze_a / ARCHIVE_DIR / op["id"] / "audio",
+                        op["audio_sha256"], _job_from_quarantine(fd, op), new_job_id, bronze_a, slug, _agora())
             _finish_origin(fd, slug, op, title, storage)
             return True
     raise RelocationError("O journal do movimento mudou repetidamente; tente de novo")

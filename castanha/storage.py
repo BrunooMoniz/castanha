@@ -335,6 +335,20 @@ class MeetingStorage:
                     "message": f"A reunião possui múltiplas gravações ({nomes}). Especifique qual deseja apagar.",
                 }
 
+        # Gravação movida para cá com anexo ainda por concluir: apagar agora deixaria a
+        # retomada sem saber se a cópia falhou ou se alguém apagou de propósito.
+        jobs_dir = target_dir / ".jobs"
+        if jobs_dir.is_dir():
+            for job_file in jobs_dir.glob("*.json"):
+                try:
+                    job = json.loads(job_file.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                if (isinstance(job, dict) and Path(str(job.get("audio_path") or "")).name == target_rec["filename"]
+                        and isinstance(job.get("moved_from"), dict) and job["moved_from"].get("committed") is False):
+                    return {"status": "error", "message": "Esta gravação está sendo anexada a partir de outra reunião; "
+                                                          "aguarde a retomada concluir antes de apagá-la."}
+
         target_path = Path(target_rec["path"])
         if target_path.exists():
             target_path.unlink()

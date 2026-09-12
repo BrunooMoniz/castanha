@@ -492,11 +492,28 @@ class TestMoveRecording(RelocationFixture):
             if path.name == 'destination.json': continue
             saved = json.loads(path.read_text())
             if saved['request']['envelope']['source_id'] == source:
-                saved['status'] = 'tombstoned'; write_json(path, saved)
+                saved['status'] = 'tombstoned'; saved['result'] = {'status': 'tombstoned', 'error_type': 'ZinomError'}; write_json(path, saved)
         with self.assertRaisesRegex(RelocationError, 'retirada do Zinom'):
             self.move(to=self.b)
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
         move_recording(self.a, 'capture_job2.ogg', to=self.b, storage=self.storage)  # a outra gravação, viva, move
+
+    def test_terminal_evidence_recorded_before_checkpoint_update_still_blocks_the_move(self):
+        import hashlib
+        from castanha.bronze_ingest import TERMINAL_EVIDENCE
+        self.receipts(self.a)
+        source = 'castanha:' + hashlib.sha256(b'job1').hexdigest()
+        directory = self.storage.bronze_dir / self.a / '.brain-ingest'
+        for path in directory.glob('*.json'):
+            if path.name == 'destination.json': continue
+            saved = json.loads(path.read_text())
+            if saved['request']['envelope']['source_id'] == source:
+                # Tombstone já na evidência independente, checkpoint ainda "ok": estado inconsistente.
+                write_json(directory / TERMINAL_EVIDENCE, {path.name: {'source_id': source,
+                           'idempotency_key': saved['request']['idempotency_key'], 'result': {'status': 'tombstoned'}}})
+        with self.assertRaisesRegex(RelocationError, 'inconsistentes'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
 
     def test_pending_move_blocks_another_exclusion_in_the_origin(self):
         with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
@@ -632,7 +649,7 @@ class TestMoveRecording(RelocationFixture):
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job2.ogg').exists())
         self.assertIn('TEXTO LEGADO DA ORIGEM', self.storage.read_transcript(self.a))
 
-    def test_resume_does_not_resurrect_audio_deleted_with_the_legacy_command(self):
+    def test_legacy_delete_refuses_an_audio_whose_attach_is_not_committed(self):
         from castanha import relocation
         from castanha.relocation import resume_move
         real = relocation.write_json
@@ -645,13 +662,16 @@ class TestMoveRecording(RelocationFixture):
                 self.move(to=self.b)
         new_id = self.operation(self.a)['moved_to']['job_id']
         self.assertEqual(self.jobs(self.b)[new_id]['moved_from']['phase'], 'audio')
-        self.assertEqual(self.storage.delete_recording(self.b, f'capture_{new_id}.ogg')['status'], 'ok')  # apagou de propósito
-        antes = self.metadata(self.b)
+        # Apagar agora seria ambíguo para a retomada: recusado, arquivo preservado.
+        recusa = self.storage.delete_recording(self.b, f'capture_{new_id}.ogg')
+        self.assertEqual(recusa['status'], 'error'); self.assertIn('anexada', recusa['message'])
+        self.assertTrue((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
         self.assertTrue(resume_move(self.a, self.storage))
+        self.assertTrue(self.jobs(self.b)[new_id]['moved_from']['committed'])
+        # Concluído, o apagamento legado vale, e nada o ressuscita.
+        self.assertEqual(self.storage.delete_recording(self.b, f'capture_{new_id}.ogg')['status'], 'ok')
+        self.assertFalse(resume_move(self.a, self.storage))
         self.assertFalse((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
-        self.assertEqual(self.metadata(self.b)['recordings'], antes['recordings'])
-        op = self.operation(self.a)
-        self.assertEqual(op['moved_to']['phase'], 'attached'); self.assertTrue(op['moved_to']['removed_at_destination'])
 
     def test_move_message_tells_the_truth_about_automatic_resume(self):
         self.assertIn('castanha sync', self.move(to=self.b)['message'])  # fixture sem retry automático
@@ -885,6 +905,23 @@ class TestAgendaDoDia(unittest.TestCase):
         resultado = events_on_day(datetime.date(2026, 9, 12), cfg)
         self.assertEqual([e.uid for e in resultado['meetings']], ['ical-1'])
         self.assertEqual(resultado['warnings'], [])
+
+    def test_day_query_keeps_json_clean_and_survives_zinom_failure(self):
+        import contextlib, io
+        from castanha import agenda
+        from castanha.agenda import events_on_day
+        from castanha.zinom_adapter import ZinomError
+        fonte = self._fonte([])
+        fonte._calendars_at = 0.0  # a lista de agendas expirou e vai falhar
+        def _call(name, args): raise ZinomError('<urlopen error [Errno -3] Temporary failure in name resolution>')
+        fonte._call = _call
+        cfg = {'calendar': {'feeds': [{'name': 'Feed quebrado', 'url': 'https://127.0.0.1:9/nada.ics'}], 'zinom': {}}, 'zinom': {'token': 't'}}
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            resultado = events_on_day(datetime.date(2026, 9, 12), cfg)
+        self.assertEqual(stdout.getvalue(), '')  # nada em stdout: o JSON do CLI fica íntegro
+        self.assertEqual(resultado['meetings'], [])
+        self.assertEqual(resultado['warnings'], ['Zinom: sem conexão com o Zinom', 'Feed iCal Feed quebrado: indisponível'])
 
     def test_failed_calendar_becomes_warning_not_silence(self):
         from castanha.agenda import events_on_day
