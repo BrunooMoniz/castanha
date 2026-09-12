@@ -292,9 +292,11 @@ def _evento_do_dia(uid, data, slug):
     else:
         meta = MeetingStorage()._read_bronze_metadata(slug) or {}
         try:
-            dia = _dt.datetime.fromisoformat(str(meta.get("recorded_at") or "")).date()
+            quando = _dt.datetime.fromisoformat(str(meta.get("recorded_at") or ""))
         except ValueError:
             raise RelocationError("Reunião sem data de gravação; informe --date")
+        # Com fuso, o dia é o do relógio local naquele instante; sem fuso, já é local.
+        dia = (quando.astimezone() if quando.tzinfo else quando).date()
     try:
         evento = find_event(dia, uid)
     except Exception as exc:

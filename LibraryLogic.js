@@ -78,8 +78,14 @@ function extraFacts(items, document, section) {
 
 // "2026-09-12T11:29:50.281638" -> "2026-09-12". Sem data, vazio: nunca inventa um dia.
 function isoDate(value) {
-  var match = String(value || "").match(/^(\d{4}-\d{2}-\d{2})/)
-  return match ? match[1] : ""
+  var text = String(value || "")
+  var match = text.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (!match) return ""
+  // Com fuso explícito, o dia é o do relógio local naquele instante; sem fuso, já é local.
+  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(text)) return match[1]
+  var parsed = new Date(text)
+  if (isNaN(parsed.getTime())) return match[1]
+  return parsed.getFullYear() + "-" + String(parsed.getMonth() + 1).padStart(2, "0") + "-" + String(parsed.getDate()).padStart(2, "0")
 }
 // Rótulo de um evento da agenda para o seletor: hora, título, conta e convidados.
 function eventLabel(event) {

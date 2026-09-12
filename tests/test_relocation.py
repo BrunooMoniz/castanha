@@ -472,6 +472,78 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(sorted(r['job_id'] for r in meta_b['recordings']), sorted(['job3', new_id]))  # sem duplicar
         self.assertTrue(self.jobs(self.b)[new_id]['moved_from']['committed'])
 
+    def test_content_retired_from_zinom_cannot_be_moved_under_a_new_identity(self):
+        import hashlib
+        meta = self.metadata(self.a); meta['zinom'] = {'status': 'tombstoned'}
+        write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        with self.assertRaisesRegex(RelocationError, 'retirado do Zinom'):
+            self.move(to=self.b)
+        meta['zinom'] = {'status': 'ok'}; write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        self.receipts(self.a)
+        source = 'castanha:' + hashlib.sha256(b'job1').hexdigest()
+        for path in (self.storage.bronze_dir / self.a / '.brain-ingest').glob('*.json'):
+            if path.name == 'destination.json': continue
+            saved = json.loads(path.read_text())
+            if saved['request']['envelope']['source_id'] == source:
+                saved['status'] = 'tombstoned'; write_json(path, saved)
+        with self.assertRaisesRegex(RelocationError, 'retirada do Zinom'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        move_recording(self.a, 'capture_job2.ogg', to=self.b, storage=self.storage)  # a outra gravação, viva, move
+
+    def test_pending_move_blocks_another_exclusion_in_the_origin(self):
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        antes = self.operation(self.a)['id']
+        with self.assertRaisesRegex(ExclusionError, 'movimento pendente'):
+            exclude_recording(self.a, 'capture_job2.ogg', self.storage)
+        self.assertEqual(self.operation(self.a)['id'], antes)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job2.ogg').exists())
+
+    def test_crash_after_job_before_audio_leaves_nothing_excludable_and_resume_completes(self):
+        from castanha import relocation
+        from castanha.relocation import resume_move
+        real = relocation.atomic_write
+        def sem_audio(path, content):
+            if Path(path).name.startswith('capture_') and Path(path).parent.name == self.b:
+                raise RuntimeError('queda antes do áudio')
+            return real(path, content)
+        with patch('castanha.relocation.atomic_write', side_effect=sem_audio):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        self.assertIn(new_id, self.jobs(self.b))
+        self.assertFalse((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
+        with self.assertRaises((ExclusionError, FileNotFoundError, OSError)):
+            exclude_recording(self.b, f'capture_{new_id}.ogg', self.storage)  # nada a excluir sem o arquivo
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertTrue((self.storage.bronze_dir / self.b / f'capture_{new_id}.ogg').exists())
+        self.assertTrue(self.jobs(self.b)[new_id]['moved_from']['committed'])
+        self.assertEqual([r['job_id'] for r in self.metadata(self.b)['recordings']].count(new_id), 1)
+
+    def test_resume_restarts_when_the_journal_changed_while_waiting_for_locks(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        outro = self.meeting('zoutro', ['job9'], title='Outro', minute=50)
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda')):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        real_load = recording_exclusion._load
+        chamadas = {'n': 0}
+        def stale_then_fresh(fd):
+            op = real_load(fd)
+            chamadas['n'] += 1
+            if chamadas['n'] == 1 and op:  # a leitura sem trava viu um journal antigo, apontando para outro destino
+                return {**op, 'moved_to': {**op['moved_to'], 'slug': outro}}
+            return op
+        with patch('castanha.recording_exclusion._load', side_effect=stale_then_fresh):
+            self.assertTrue(resume_move(self.a, self.storage))
+        new_id = self.operation(self.a)['moved_to']['job_id']
+        self.assertIn(new_id, self.jobs(self.b))          # anexou no destino do journal real
+        self.assertNotIn(new_id, self.jobs(outro))        # e não no destino da leitura antiga
+        self.assertEqual(len(self.metadata(outro)['recordings']), 1)
+
     def test_destination_with_pending_summary_regeneration_is_refused(self):
         write_json(self.storage.bronze_dir / self.b / '.annotations-regeneration.json', {'status': 'pending'})
         with self.assertRaisesRegex(RelocationError, 'resumo em regeneração'):
@@ -554,8 +626,20 @@ class TestLinkMeetingToEvent(RelocationFixture):
         antes = synthesis_text((self.storage.silver_dir / f'{self.a}.md').read_text())
         link_meeting_to_event(self.a, {**EVENT, 'title': 'Origem'}, self.storage)  # mesmo título: só convidados mudam
         silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
-        self.assertIn('# Origem\n\nConvidados (presença não confirmada): Ana, Bruno.\n\nData: 11/09/2026', silver)
+        self.assertIn('# Origem\n\nConvidados (presença não confirmada): Ana, Bruno.\nLink da chamada: https://meet.google.com/abc-defg-hij\n\nData: 11/09/2026', silver)
         self.assertNotEqual(synthesis_text(silver), antes)
+
+    def test_link_puts_call_link_in_the_note_body_and_changes_projection(self):
+        from castanha.bronze_ingest import synthesis_text
+        link_meeting_to_event(self.a, EVENT, self.storage)
+        silver = (self.storage.silver_dir / f'{self.a}.md').read_text()
+        self.assertIn('Convidados (presença não confirmada): Ana, Bruno.\nLink da chamada: https://meet.google.com/abc-defg-hij\n', silver)
+        antes = synthesis_text(silver)
+        link_meeting_to_event(self.a, {**EVENT, 'conference_url': 'https://meet.google.com/xyz-uvwx-rst'}, self.storage)
+        depois = (self.storage.silver_dir / f'{self.a}.md').read_text()
+        self.assertEqual(depois.count('Link da chamada:'), 1)
+        self.assertIn('Link da chamada: https://meet.google.com/xyz-uvwx-rst', depois)
+        self.assertNotEqual(synthesis_text(depois), antes)
 
     def test_relink_silver_without_frontmatter_or_guest_line(self):
         meta = {'title': 'Novo', 'recorded_at': 'x', 'calendar_event': {'attendees': [{'name': 'Ana'}]}}
@@ -709,6 +793,14 @@ with patch("castanha.agenda.events_on_day", side_effect=fake_day):
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertTrue(payload['destination']['created']); self.assertIn('conversa-avulsa', payload['destination']['slug'])
+
+    def test_link_event_cli_uses_local_day_for_timezone_aware_recorded_at(self):
+        meta = self.metadata(self.a); meta['recorded_at'] = '2026-09-12T01:00:00+00:00'
+        write_json(self.storage.bronze_dir / self.a / 'metadata.json', meta)
+        esperado = datetime.datetime.fromisoformat('2026-09-12T01:00:00+00:00').astimezone().date().isoformat()
+        result = self.cli('link-event', '--json', '--', self.a, 'weekly_20260912T133000Z', agenda=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'DAYS=["{esperado}"]', result.stderr)
 
     def test_link_event_cli_resolves_the_day_of_the_recording(self):
         result = self.cli('link-event', '--json', '--', self.a, 'weekly_20260912T133000Z', agenda=True)

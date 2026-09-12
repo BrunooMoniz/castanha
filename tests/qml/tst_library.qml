@@ -18,6 +18,10 @@ TestCase {
     compare(Logic.isoDate("2026-09-12T11:29:50.281638"), "2026-09-12")
     compare(Logic.isoDate(""), "")
     compare(Logic.isoDate("hoje"), "")
+    var instante = new Date("2026-09-12T01:00:00+00:00")
+    var localDia = instante.getFullYear() + "-" + String(instante.getMonth() + 1).padStart(2, "0") + "-" + String(instante.getDate()).padStart(2, "0")
+    compare(Logic.isoDate("2026-09-12T01:00:00+00:00"), localDia)
+    compare(Logic.isoDate("2026-09-12T01:00:00Z"), localDia)
     // Hora no relógio local, seja qual for o fuso em que o evento veio.
     var utc = new Date("2026-09-12T13:30:00Z")
     var local = String(utc.getHours()).padStart(2, "0") + ":" + String(utc.getMinutes()).padStart(2, "0")
