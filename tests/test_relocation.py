@@ -631,6 +631,63 @@ class TestMoveRecording(RelocationFixture):
         self.assertEqual(len(self.metadata(dest)['recordings']), 1)
         self.assertEqual(len(self.metadata(ocupado)['recordings']), 1)  # o do outro ficou intacto
 
+    def test_empty_destination_created_by_another_move_is_never_adopted(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        def falha_no_moved_to(fd, op):
+            if op.get('moved_to') and not op['moved_to'].get('adopted_from_intent'):
+                raise RuntimeError('queda antes de criar o destino')
+            return real_save(fd, op)
+        # A cai depois da exclusão, antes de criar o destino planejado N.
+        with patch('castanha.recording_exclusion._save', side_effect=falha_no_moved_to):
+            with self.assertRaises(RuntimeError):
+                self.move(new_title='Mesmo título', event=EVENT)
+        # B (mesmo título e minuto) cria N e grava moved_to, mas cai antes do anexo.
+        outra = self.meeting('zorigem4', ['job12'], title='Origem 4', minute=1)
+        with patch('castanha.relocation._attach', side_effect=RuntimeError('queda antes do anexo')):
+            with self.assertRaises(RuntimeError):
+                move_recording(outra, 'capture_job12.ogg', new_title='Mesmo título', storage=self.storage)
+        n = self.operation(outra)['moved_to']['slug']
+        self.assertEqual(self.metadata(n)['recordings'], [])  # N existe, vazio, mas é de B
+        # A retoma primeiro: não pode adotar N.
+        self.assertTrue(resume_move(self.a, self.storage))
+        dest_a = self.operation(self.a)['moved_to']['slug']
+        self.assertNotEqual(dest_a, n)
+        self.assertEqual(self.metadata(dest_a)['calendar_event']['uid'], EVENT['uid'])  # evento pedido por A preservado
+        # B retoma e anexa em N.
+        self.assertTrue(resume_move(outra, self.storage))
+        self.assertEqual(self.operation(outra)['moved_to']['slug'], n)
+        self.assertEqual(len(self.metadata(n)['recordings']), 1); self.assertEqual(len(self.metadata(dest_a)['recordings']), 1)
+
+    def test_replanned_destination_is_persisted_before_creation(self):
+        from castanha import recording_exclusion
+        from castanha.recording_exclusion import MOVE_INTENT
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        estado = {'moved': 0}
+        def falha_nas_duas_primeiras(fd, op):
+            if op.get('moved_to'):
+                estado['moved'] += 1
+                if estado['moved'] <= 2: raise RuntimeError('queda depois de criar o destino')
+            return real_save(fd, op)
+        # Ocupa o nome planejado com uma reunião alheia (mesmo título, mesmo minuto).
+        outra = self.meeting('zorigem5', ['job13'], title='Origem 5', minute=1)
+        ocupado = move_recording(outra, 'capture_job13.ogg', new_title='Título repetido', storage=self.storage)['destination']['slug']
+        antes = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()}
+        with patch('castanha.recording_exclusion._save', side_effect=falha_nas_duas_primeiras):
+            with self.assertRaises(RuntimeError):
+                self.move(new_title='Título repetido', event=EVENT)      # cria o alternativo, cai antes do journal
+            with self.assertRaises(RuntimeError):
+                resume_move(self.a, self.storage)                          # adota, replaneja (mesmo nome), cai de novo
+        intent = json.loads((self.storage.bronze_dir / self.a / MOVE_INTENT).read_text()) if (self.storage.bronze_dir / self.a / MOVE_INTENT).exists() else None
+        criadas = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes
+        self.assertEqual(len(criadas), 1)  # só o alternativo, nenhuma "-3"
+        self.assertTrue(resume_move(self.a, self.storage))
+        self.assertEqual({p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes, criadas)
+        self.assertIn(self.operation(self.a)['moved_to']['slug'], criadas)
+        self.assertNotEqual(self.operation(self.a)['moved_to']['slug'], ocupado)
+
     def test_refused_exclusion_leaves_no_intent_behind(self):
         from castanha.recording_exclusion import MOVE_INTENT
         with self.assertRaises(RelocationConflict):

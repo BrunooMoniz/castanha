@@ -394,18 +394,20 @@ def _planned_slug(storage, title: str, job: Dict[str, Any]) -> str:
 
 
 def _create_destination(storage, title: str, job: Dict[str, Any], record_event: Optional[Dict[str, Any]],
-                        slug: Optional[str] = None) -> str:
+                        slug: Optional[str] = None, created_for: Optional[Dict[str, Any]] = None) -> str:
     recorded_at = str(job.get("recorded_at") or _agora())
     dest_slug = slug or _planned_slug(storage, title, job)
     bronze_b = storage.bronze_dir / dest_slug
     if bronze_b.is_symlink():
         raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
     if bronze_b.exists():
-        # Uma tentativa anterior já criou esta reunião (e caiu antes do journal): reutilizar,
-        # desde que seja a nossa e ainda vazia; nunca criar uma segunda com sufixo.
+        # Uma tentativa anterior DESTA operação já criou esta reunião (e caiu antes do
+        # journal): reutilizar, desde que ainda vazia. Uma reunião vazia criada por
+        # OUTRO movimento (mesmo título, mesmo minuto) não é nossa: nome livre adiante.
         existente = storage._read_bronze_metadata(dest_slug) or {}
         if existente:
-            if existente.get("created_by") != "move_recording" or existente.get("recordings"):
+            if (existente.get("created_by") != "move_recording" or existente.get("recordings")
+                    or not created_for or existente.get("created_for") != created_for):
                 raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
             return dest_slug
         # Pasta criada e metadata não gravado (queda ou disco cheio no meio): concluir
@@ -419,7 +421,7 @@ def _create_destination(storage, title: str, job: Dict[str, Any], record_event: 
         "slug": dest_slug, "title": title, "recorded_at": recorded_at, "mode": state.get("mode", "dual"),
         "calendar_event": record_event or {"title": title, "start": recorded_at, "attendees": []},
         "recordings": [], "recording_revision": 0, "processing_status": "pending",
-        "created_by": "move_recording"})
+        "created_by": "move_recording", "created_for": created_for})
     return dest_slug
 
 
@@ -621,11 +623,17 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
                     _destination_guards(to, slug, storage)
                 dest_slug = to
             else:
+                dono = {"origin": slug, "exclusion_id": op["id"]}
                 try:
-                    dest_slug = _create_destination(storage, dest_title, job, record_event, slug=planned)
+                    dest_slug = _create_destination(storage, dest_title, job, record_event, slug=planned, created_for=dono)
                 except RelocationError:
-                    # Nome planejado ocupado por outra operação neste meio tempo: um nome livre.
-                    dest_slug = _create_destination(storage, dest_title, job, record_event)
+                    # Nome planejado ocupado por outra operação neste meio tempo: um nome
+                    # livre, gravado na intenção ANTES de criar a pasta (retomada idempotente).
+                    dest_slug = _planned_slug(storage, dest_title, job)
+                    intent = _move_intent_dict(fd)
+                    if intent:
+                        _write_json(fd, MOVE_INTENT, {**intent, "dest_slug": dest_slug})
+                    dest_slug = _create_destination(storage, dest_title, job, record_event, slug=dest_slug, created_for=dono)
                 travas.enter_context(meeting_lock(storage.bronze_dir / dest_slug))
         except RelocationError as exc:
             # A origem já foi excluída com a intenção gravada: o daemon conclui o
@@ -657,6 +665,14 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
             "message": f"Gravação movida para “{dest_title}”. Transcrição, resumo e entrega ao Zinom das duas reuniões "
                        + ("serão refeitos automaticamente pelo daemon." if automatico else
                           "ficam pendentes: rode `castanha sync --all` ou Reprocessar em cada reunião.")}
+
+
+def _move_intent_dict(fd) -> Optional[Dict[str, Any]]:
+    from castanha.recording_exclusion import _move_intent
+    try:
+        return _move_intent(fd)
+    except Exception:
+        return None
 
 
 def _remove_intent(fd) -> None:
@@ -696,13 +712,19 @@ def _adopt_intent(fd, storage, slug: str) -> bool:
     if intent.get("create_new"):
         # Idempotente: cria, conclui uma criação interrompida ou reutiliza a já pronta. Se
         # outra operação ocupou o nome planejado nesse meio tempo, planeja um nome livre.
+        from castanha.annotations import _write_json
+        from castanha.recording_exclusion import MOVE_INTENT
         job = _job_from_quarantine(fd, op)
         title = str(intent.get("dest_title") or "Reunião")
         event = intent.get("event") if isinstance(intent.get("event"), dict) else None
+        dono = {"origin": slug, "exclusion_id": op["id"]}
         try:
-            _create_destination(storage, title, job, event, slug=dest_slug)
+            _create_destination(storage, title, job, event, slug=dest_slug, created_for=dono)
         except RelocationError:
-            dest_slug = _create_destination(storage, title, job, event)
+            # Nome ocupado por outro: novo nome gravado na intenção antes da pasta existir.
+            dest_slug = _planned_slug(storage, title, job)
+            _write_json(fd, MOVE_INTENT, {**intent, "dest_slug": dest_slug})
+            _create_destination(storage, title, job, event, slug=dest_slug, created_for=dono)
     op["moved_to"] = {"slug": dest_slug, "job_id": uuid.uuid4().hex, "title": str(intent.get("dest_title") or dest_slug),
                       "at": _agora(), "phase": "attaching", "adopted_from_intent": True}
     _save(fd, op)
