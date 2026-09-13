@@ -308,6 +308,28 @@ class TestMoveRecording(RelocationFixture):
             self.move(to='zalias')
         self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
 
+    def test_destination_with_legacy_text_and_no_native_job_is_refused(self):
+        legado = self.storage.bronze_dir / 'legado5'; legado.mkdir()
+        (legado / 'transcript_raw.txt').write_text('TEXTO LEGADO SEM ORIGEM')
+        write_json(legado / 'metadata.json', {'slug': 'legado5', 'title': 'Legado 5', 'recorded_at': '2026-09-01T10:00:00+00:00',
+                                              'recordings': [], 'recording_revision': 0, 'processing_status': 'complete', 'zinom': {'status': 'ok'}})
+        with self.assertRaisesRegex(RelocationError, 'transcrição legada sem gravação nativa'):
+            self.move(to='legado5')
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
+    def test_destination_with_terminal_receipt_is_refused_even_if_status_says_ok(self):
+        self.receipts(self.b)
+        directory = self.storage.bronze_dir / self.b / '.brain-ingest'
+        for path in directory.glob('*.json'):
+            if path.name == 'destination.json': continue
+            saved = json.loads(path.read_text())
+            saved['status'] = 'tombstoned'; saved['result'] = {'status': 'tombstoned', 'error_type': 'ZinomError'}
+            write_json(path, saved); break
+        self.assertEqual(self.metadata(self.b)['zinom']['status'], 'ok')  # o agregado ainda diz ok
+        with self.assertRaisesRegex(RelocationError, 'conteúdo retirado do Zinom'):
+            self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+
     def test_destination_retired_from_zinom_is_refused(self):
         meta = self.metadata(self.b); meta['zinom'] = {'status': 'tombstoned'}
         write_json(self.storage.bronze_dir / self.b / 'metadata.json', meta)
@@ -564,6 +586,50 @@ class TestMoveRecording(RelocationFixture):
         meta = self.metadata(dest)
         self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
         self.assertEqual(len(meta['recordings']), 1)
+
+    def test_intent_is_dropped_when_the_excluded_origin_has_no_verifiable_remote_scope(self):
+        from castanha import recording_exclusion
+        from castanha.recording_exclusion import MOVE_INTENT
+        from castanha.relocation import resume_move
+        real = recording_exclusion._exclude_locked
+        def sem_escopo_e_queda(fd, storage, slug, filename, expected_revision=None):
+            result = real(fd, storage, slug, filename, expected_revision)
+            op = recording_exclusion._load(fd); op['unscoped_remote'] = True; recording_exclusion._save(fd, op)
+            raise RuntimeError('queda logo depois da exclusão')  # antes da recusa do movimento
+        with patch('castanha.recording_exclusion._exclude_locked', side_effect=sem_escopo_e_queda):
+            with self.assertRaises(RuntimeError):
+                self.move(to=self.b)
+        self.assertTrue((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())
+        self.assertFalse(resume_move(self.a, self.storage))  # não adota: vira exclusão comum
+        self.assertFalse((self.storage.bronze_dir / self.a / MOVE_INTENT).exists())
+        self.assertNotIn('moved_to', self.operation(self.a))
+        restore_recording(self.a, self.operation(self.a)['id'], self.storage)  # e o desfazer vale
+        self.assertTrue((self.storage.bronze_dir / self.a / 'capture_job1.ogg').exists())
+        self.assertEqual(len(self.metadata(self.b)['recordings']), 1)
+
+    def test_planned_destination_taken_by_another_move_is_replanned_on_resume(self):
+        from castanha import recording_exclusion
+        from castanha.relocation import resume_move
+        real_save = recording_exclusion._save
+        def falha_no_moved_to(fd, op):
+            if op.get('moved_to') and not op['moved_to'].get('adopted_from_intent'):
+                raise RuntimeError('queda antes de criar o destino')
+            return real_save(fd, op)
+        # Primeiro movimento cai depois da exclusão, com o nome planejado ainda livre.
+        with patch('castanha.recording_exclusion._save', side_effect=falha_no_moved_to):
+            with self.assertRaises(RuntimeError):
+                self.move(new_title='Mesmo título', event=EVENT)
+        # Segundo movimento, de outra origem gravada no mesmo minuto, ocupa aquele nome.
+        outra = self.meeting('zorigem3', ['job11'], title='Origem 3', minute=1)  # mesmo minuto que job1
+        segundo = move_recording(outra, 'capture_job11.ogg', new_title='Mesmo título', storage=self.storage)
+        ocupado = segundo['destination']['slug']
+        self.assertEqual(len(self.metadata(ocupado)['recordings']), 1)
+        # A retomada do primeiro não recusa para sempre: planeja um nome livre.
+        self.assertTrue(resume_move(self.a, self.storage))
+        dest = self.operation(self.a)['moved_to']['slug']
+        self.assertNotEqual(dest, ocupado)
+        self.assertEqual(len(self.metadata(dest)['recordings']), 1)
+        self.assertEqual(len(self.metadata(ocupado)['recordings']), 1)  # o do outro ficou intacto
 
     def test_refused_exclusion_leaves_no_intent_behind(self):
         from castanha.recording_exclusion import MOVE_INTENT
@@ -1071,6 +1137,8 @@ class TestAgendaDoDia(unittest.TestCase):
         self.assertEqual(find_event(dia, 'weekly_20260912T133000Z').title, 'weekly_20260912T133000Z')
         self.assertEqual(find_event(dia, 'weekly').uid, 'weekly_20260912T133000Z')  # pela chave da série
         self.assertIsNone(find_event(dia, 'outra'))
+        # Uid completo de outra ocorrência da mesma série: não vale como "qualquer uma".
+        self.assertIsNone(find_event(dia, 'weekly_20260912T170000Z'))
 
     def test_day_bounds_follow_the_local_rules_of_that_date_not_today(self):
         import os, time

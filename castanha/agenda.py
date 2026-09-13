@@ -138,7 +138,12 @@ def find_event(dia: datetime.date, uid: str, config: Optional[Dict[str, Any]] = 
     exato = next((e for e in eventos if e.uid == alvo), None)
     if exato is not None:
         return exato
-    return next((e for e in eventos if series_key(e.uid) == series_key(alvo)), None)
+    # Um uid completo de ocorrência que sumiu não pode virar "qualquer ocorrência da
+    # série no dia": vincularia silenciosamente o evento errado. Só a chave da
+    # série (sem sufixo de ocorrência) casa por série.
+    if series_key(alvo) != alvo:
+        return None
+    return next((e for e in eventos if series_key(e.uid) == alvo), None)
 
 
 def next_timed(eventos: List[MeetingEvent]) -> Optional[MeetingEvent]:

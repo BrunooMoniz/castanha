@@ -157,6 +157,20 @@ def _destination_guards(dest: str, origin: str, storage) -> None:
     if any(isinstance(r, dict) and not r.get("job_id") for r in meta.get("recordings") or []):
         raise RelocationError("A reunião de destino é legada (gravação sem job nativo) e não passa pela ponte Bronze; "
                               "mova para uma reunião nova")
+    # Texto legado sem job nativo (por exemplo, depois de `delete-recording`): o anexo o
+    # levaria para a base e a síntese sairia com identidade só do job movido, ou seja,
+    # conteúdo histórico atribuído a outra gravação.
+    jobs_nativos = any(p.suffix == ".json" for p in (bronze_b / ".jobs").glob("*.json")) if (bronze_b / ".jobs").is_dir() else False
+    if not jobs_nativos:
+        for nome in ("transcript_raw.txt", ".jobs/base_transcript.txt"):
+            arquivo = bronze_b / nome
+            try:
+                if arquivo.exists() and arquivo.read_text(encoding="utf-8").strip():
+                    raise RelocationError("A reunião de destino tem transcrição legada sem gravação nativa; "
+                                          "mova para uma reunião nova")
+            except OSError as exc:
+                raise RelocationError("Não foi possível ler a reunião de destino; nada foi movido") from exc
+    _refuse_retired_destination(bronze_b, meta)
 
 
 # ------------------------------------------------------------------ vincular
@@ -298,6 +312,26 @@ def _refuse_retired_source(bronze: Path, metadata: Any, job: Dict[str, Any]) -> 
         for entry in (evidence.values() if isinstance(evidence, dict) else []):
             if isinstance(entry, dict) and entry.get("source_id") == source:
                 raise RelocationError("Esta gravação foi retirada do Zinom e não pode ser movida para outra identidade")
+
+
+def _refuse_retired_destination(bronze_b: Path, metadata: Any) -> None:
+    """Destino com qualquer fonte retirada do Zinom não recebe gravação: a nova síntese seria bloqueada.
+
+    Mesma verificação da origem: checkpoints e evidência terminal têm de concordar,
+    e um tombstone em qualquer um deles recusa antes de a origem ser excluída.
+    """
+    receipts = bronze_b / ".brain-ingest"
+    if not receipts.is_dir():
+        return
+    from castanha.bronze_ingest import TERMINAL_EVIDENCE, TERMINAL_STATES, BronzeIngestError, _verify_terminal_receipts
+    try:
+        checkpoints = _verify_terminal_receipts(receipts, metadata if isinstance(metadata, dict) else {})
+        evidence_path = receipts / TERMINAL_EVIDENCE
+        evidence = json.loads(evidence_path.read_bytes()) if evidence_path.exists() else {}
+    except (BronzeIngestError, ValueError, OSError, KeyError, TypeError) as exc:
+        raise RelocationError("Recibos do Zinom no destino inconsistentes ou ilegíveis; nada foi movido") from exc
+    if any(isinstance(s, dict) and s.get("status") in TERMINAL_STATES for s in checkpoints.values()) or (isinstance(evidence, dict) and evidence):
+        raise RelocationError("A reunião de destino tem conteúdo retirado do Zinom e não recebe gravações; escolha outra ou crie uma nova")
 
 
 def _refuse_orphan_legacy_base(bronze: Path, metadata: Any, job: Dict[str, Any]) -> None:
@@ -587,7 +621,11 @@ def move_recording(slug: str, filename: str, *, to: Optional[str] = None, new_ti
                     _destination_guards(to, slug, storage)
                 dest_slug = to
             else:
-                dest_slug = _create_destination(storage, dest_title, job, record_event, slug=planned)
+                try:
+                    dest_slug = _create_destination(storage, dest_title, job, record_event, slug=planned)
+                except RelocationError:
+                    # Nome planejado ocupado por outra operação neste meio tempo: um nome livre.
+                    dest_slug = _create_destination(storage, dest_title, job, record_event)
                 travas.enter_context(meeting_lock(storage.bronze_dir / dest_slug))
         except RelocationError as exc:
             # A origem já foi excluída com a intenção gravada: o daemon conclui o
@@ -649,13 +687,22 @@ def _adopt_intent(fd, storage, slug: str) -> bool:
     if op.get("moved_to"):
         _remove_intent(fd)  # o journal já tinha assumido; sobrou só o arquivo
         return False
+    if op.get("unscoped_remote"):
+        # A mesma recusa que o movimento faria: a exclusão fica comum e restaurável.
+        _remove_intent(fd)
+        return False
     dest_slug = str(intent.get("dest_slug") or "")
     _slug_ok(dest_slug)
     if intent.get("create_new"):
-        # Idempotente: cria, ou conclui uma criação interrompida, ou reutiliza a já pronta.
+        # Idempotente: cria, conclui uma criação interrompida ou reutiliza a já pronta. Se
+        # outra operação ocupou o nome planejado nesse meio tempo, planeja um nome livre.
         job = _job_from_quarantine(fd, op)
-        _create_destination(storage, str(intent.get("dest_title") or "Reunião"), job,
-                            intent.get("event") if isinstance(intent.get("event"), dict) else None, slug=dest_slug)
+        title = str(intent.get("dest_title") or "Reunião")
+        event = intent.get("event") if isinstance(intent.get("event"), dict) else None
+        try:
+            _create_destination(storage, title, job, event, slug=dest_slug)
+        except RelocationError:
+            dest_slug = _create_destination(storage, title, job, event)
     op["moved_to"] = {"slug": dest_slug, "job_id": uuid.uuid4().hex, "title": str(intent.get("dest_title") or dest_slug),
                       "at": _agora(), "phase": "attaching", "adopted_from_intent": True}
     _save(fd, op)
