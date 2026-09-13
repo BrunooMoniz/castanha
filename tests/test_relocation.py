@@ -750,23 +750,37 @@ class TestMoveRecording(RelocationFixture):
         dest = self.operation(self.a)['moved_to']['slug']
         self.assertIn(dest, criadas); self.assertEqual(len(self.metadata(dest)['recordings']), 1)
 
+    def test_destination_folder_without_metadata_is_never_claimed(self):
+        from castanha.relocation import _planned_slug
+        job = self.jobs(self.a)['job1']
+        planejado = _planned_slug(self.storage, 'Disputa', job)
+        (self.storage.bronze_dir / planejado).mkdir()  # outro movimento criou a pasta e ainda não gravou metadata
+        result = self.move(new_title='Disputa')
+        dest = result['destination']['slug']
+        self.assertNotEqual(dest, planejado)  # não reivindicou a pasta alheia
+        self.assertTrue((self.storage.bronze_dir / dest / 'metadata.json').exists())
+        self.assertEqual(self.metadata(dest)['created_for'], {'origin': self.a, 'exclusion_id': self.operation(self.a)['id']})
+        self.assertFalse(any(p.name.startswith('.creating-') for p in self.storage.bronze_dir.iterdir()))
+
     def test_interrupted_destination_creation_is_completed_on_resume(self):
         from castanha.relocation import resume_move
-        real = self.storage.write_bronze_metadata
+        from castanha import relocation
+        real = relocation.write_json
         estado = {'n': 0}
-        def disco_cheio_na_criacao(slug, meta):
-            if meta.get('created_by') == 'move_recording' and estado['n'] == 0:
-                estado['n'] += 1; raise OSError(28, 'No space left on device')  # pasta criada, metadata não
-            return real(slug, meta)
+        def disco_cheio_na_criacao(path, value):
+            if isinstance(value, dict) and value.get('created_by') == 'move_recording' and estado['n'] == 0:
+                estado['n'] += 1; raise OSError(28, 'No space left on device')  # na pasta temporária, antes do rename
+            return real(path, value)
         antes = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()}
-        with patch.object(self.storage, 'write_bronze_metadata', side_effect=disco_cheio_na_criacao):
-            with self.assertRaises(OSError):
-                self.move(new_title='Reunião nova', event=EVENT)
-        novas = [self.storage.bronze_dir / n for n in ({p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes)]
-        self.assertEqual(len(novas), 1); self.assertFalse((novas[0] / 'metadata.json').exists())
-        self.assertTrue(resume_move(self.a, self.storage))
+        with patch('castanha.relocation.write_json', side_effect=disco_cheio_na_criacao):
+            result = self.move(new_title='Reunião nova', event=EVENT)  # a falha vira replanejamento: conclui
+        self.assertEqual(result['status'], 'ok')
+        novas = {p.name for p in self.storage.bronze_dir.iterdir() if p.is_dir()} - antes
+        # Criação atômica: só a reunião completa ficou visível (nem pasta pela metade, nem temporária).
+        self.assertEqual(len(novas), 1); self.assertFalse(any(n.startswith('.creating-') for n in novas))
         dest = self.operation(self.a)['moved_to']['slug']
-        self.assertEqual(novas[0].name, dest)
+        self.assertIn(dest, novas)
+        self.assertFalse(resume_move(self.a, self.storage))  # nada pendente
         meta = self.metadata(dest)
         self.assertEqual(meta['created_by'], 'move_recording'); self.assertEqual(meta['calendar_event']['uid'], EVENT['uid'])
         self.assertEqual(len(meta['recordings']), 1)

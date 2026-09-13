@@ -410,18 +410,27 @@ def _create_destination(storage, title: str, job: Dict[str, Any], record_event: 
                     or not created_for or existente.get("created_for") != created_for):
                 raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
             return dest_slug
-        # Pasta criada e metadata não gravado (queda ou disco cheio no meio): concluir
-        # a criação, desde que a pasta esteja vazia além da trava.
-        if any(p.name != ".processing.lock" for p in bronze_b.iterdir()):
-            raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
-    else:
-        bronze_b.mkdir(parents=True, exist_ok=False)
+        # Pasta sem metadata: não é uma reunião, e não é nossa até prova em contrário.
+        # Como a criação abaixo é atômica (pasta temporária renomeada pronta), isso
+        # só acontece com uma criação alheia em andamento ou lixo: nome livre adiante.
+        raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido")
+    # Criação atômica: metadata escrito numa pasta temporária, renomeada para o nome
+    # final. Ou a reunião existe completa (com dono) ou não existe; dois movimentos
+    # concorrentes com o mesmo nome planejado não dividem a mesma pasta.
+    import os
     state = job.get("state") if isinstance(job.get("state"), dict) else {}
-    storage.write_bronze_metadata(dest_slug, {
-        "slug": dest_slug, "title": title, "recorded_at": recorded_at, "mode": state.get("mode", "dual"),
-        "calendar_event": record_event or {"title": title, "start": recorded_at, "attendees": []},
-        "recordings": [], "recording_revision": 0, "processing_status": "pending",
-        "created_by": "move_recording", "created_for": created_for})
+    temporaria = storage.bronze_dir / f".creating-{uuid.uuid4().hex}"
+    temporaria.mkdir(parents=True, exist_ok=False)
+    try:
+        write_json(temporaria / "metadata.json", {
+            "slug": dest_slug, "title": title, "recorded_at": recorded_at, "mode": state.get("mode", "dual"),
+            "calendar_event": record_event or {"title": title, "start": recorded_at, "attendees": []},
+            "recordings": [], "recording_revision": 0, "processing_status": "pending",
+            "created_by": "move_recording", "created_for": created_for})
+        os.rename(temporaria, bronze_b)  # falha se outro chegou antes: o nome não é nosso
+    except OSError as exc:
+        shutil.rmtree(temporaria, ignore_errors=True)
+        raise RelocationError("Já existe outra reunião com o nome planejado para o destino; nada foi movido") from exc
     return dest_slug
 
 
