@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from castanha import echo_cancel as echo_cancel_node
 from castanha.i18n import audio_status_message
 
 @dataclass
@@ -79,13 +80,15 @@ class AudioRecorder:
         self.peak_path: Optional[Path] = None
         self.mic_peak_path: Optional[Path] = None
         self.call_peak_path: Optional[Path] = None
+        self.echo = None
 
     def is_recording(self) -> bool:
         if self.process is None:
             return False
         return self.process.poll() is None
 
-    def start(self, output_path: Path, mode: str = "dual", bitrate: str = "64k") -> subprocess.Popen:
+    def start(self, output_path: Path, mode: str = "dual", bitrate: str = "64k",
+              echo_cancel: bool = False) -> subprocess.Popen:
         if self.is_recording():
             raise RuntimeError("Uma gravação já está em andamento.")
 
@@ -105,6 +108,15 @@ class AudioRecorder:
                 except OSError:
                     setattr(self, field, None)
 
+        # Sem fone, o microfone capta os participantes remotos que saem do
+        # alto-falante. Se o nó sem eco não subir, a gravação segue no mic cru.
+        self.echo = None
+        mic_input = self.devices.source
+        if echo_cancel and mode == "dual":
+            self.echo = echo_cancel_node.start(self.devices.source, self.devices.sink)
+            if self.echo:
+                mic_input = self.echo.source
+
         # Garante caminhos e fontes
         if mode == "dual":
             # Canal esquerdo: Microfone (usuário)
@@ -112,7 +124,7 @@ class AudioRecorder:
             cmd = [
                 "ffmpeg",
                 "-y",
-                "-f", "pulse", "-i", self.devices.source,
+                "-f", "pulse", "-i", mic_input,
                 "-f", "pulse", "-i", self.devices.monitor,
                 "-filter_complex",
                 "[0:a]pan=mono|c0=0.5*c0+0.5*c1[mic];[1:a]pan=mono|c0=0.5*c0+0.5*c1[sys];"
@@ -152,7 +164,12 @@ class AudioRecorder:
             )
         except OSError:
             self.stop_meter()
+            if self.echo:
+                self.echo.close()
+                self.echo = None
             raise
+        if self.echo:
+            self.echo.bind(self.process.pid)
         return self.process
 
     @staticmethod

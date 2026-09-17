@@ -25,6 +25,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bitrate": "64k",
         "sample_rate": 48000,
         "format": "ogg",
+        # Modo dual: tira do canal do microfone o som que sai do alto-falante.
+        "echo_cancel": True,
     },
     "calendar": {
         "enabled": True,

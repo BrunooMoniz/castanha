@@ -173,7 +173,8 @@ class CastanhaEngine:
             )
 
         temp_audio = Path(f"/tmp/castanha_rec_{int(time.time())}.ogg")
-        proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate)
+        proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate,
+                                   echo_cancel=audio_cfg.get("echo_cancel", True) is not False)
 
         current_meeting_info = None
         if meeting_slug:
@@ -228,6 +229,7 @@ class CastanhaEngine:
                                 or getattr(self.recorder.devices, "source", None)) if getattr(self.recorder, "devices", None) else None,
             "call_device_name": (getattr(self.recorder.devices, "monitor_name", None)
                                  or getattr(self.recorder.devices, "monitor", None)) if chosen_mode == "dual" and getattr(self.recorder, "devices", None) else None,
+            "echo_cancel": bool(getattr(self.recorder, "echo", None)),
             "error": None,
         })
 

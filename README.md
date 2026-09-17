@@ -178,7 +178,8 @@ read it through a symlink.
     "default_mode": "dual",
     "bitrate": "64k",
     "sample_rate": 48000,
-    "format": "ogg"
+    "format": "ogg",
+    "echo_cancel": true
   },
   "calendar": {
     "enabled": true,
@@ -211,6 +212,7 @@ read it through a symlink.
 
 - `storage.base_dir` — where Bronze/Silver/Gold live.
 - `audio.default_mode` — `dual` (mic + call audio) or `mic_only` (in person).
+- `audio.echo_cancel` — in `dual` mode, removes the speaker sound from the microphone channel (PipeWire WebRTC echo cancellation, only while recording). Without it, a call taken without headphones puts the remote voices on your channel. Default `true`; if the node cannot start, the raw microphone is recorded.
 - `transcription.language` — `auto` detects PT/EN/mixed; or pin `"pt"`, `"en"`.
 - `calendar.auto_record` — start recording by itself when a meeting begins.
 - `zinom` — optional sync to the [Zinom](https://zinom.ai) hub, off by default.

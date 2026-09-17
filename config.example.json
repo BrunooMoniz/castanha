@@ -9,7 +9,8 @@
     "default_mode": "dual",
     "bitrate": "64k",
     "sample_rate": 48000,
-    "format": "ogg"
+    "format": "ogg",
+    "echo_cancel": true
   },
   "calendar": {
     "enabled": true,

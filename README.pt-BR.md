@@ -184,7 +184,8 @@ atômica e recusa lê-lo através de um symlink.
     "default_mode": "dual",
     "bitrate": "64k",
     "sample_rate": 48000,
-    "format": "ogg"
+    "format": "ogg",
+    "echo_cancel": true
   },
   "calendar": {
     "enabled": true,
@@ -217,6 +218,7 @@ atômica e recusa lê-lo através de um symlink.
 
 - `storage.base_dir` — onde Bronze/Silver/Gold moram.
 - `audio.default_mode` — `dual` (mic + áudio da chamada) ou `mic_only` (presencial).
+- `audio.echo_cancel` — no modo `dual`, tira do canal do microfone o som que sai do alto-falante (cancelamento de eco WebRTC do PipeWire, só durante a gravação). Sem isso, chamada sem fone põe a voz dos participantes no seu canal. Padrão `true`; se o nó não subir, grava o microfone cru.
 - `transcription.language` — `auto` detecta PT/EN/misto; ou fixe `"pt"`, `"en"`.
 - `calendar.auto_record` — começa a gravar sozinho quando a reunião inicia.
 - `zinom` — sincronização opcional com o hub [Zinom](https://zinom.ai), desligada por padrão.

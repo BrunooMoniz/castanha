@@ -69,7 +69,7 @@ class TestEngine(unittest.TestCase):
 
     def _engine(self):
         engine = CastanhaEngine()
-        engine.recorder.start = lambda path, mode="dual", bitrate="64k": (
+        engine.recorder.start = lambda path, mode="dual", bitrate="64k", echo_cancel=False: (
             Path(path).write_bytes(b"ogg-de-mentira"), FakeProcess()
         )[1]
         return engine
