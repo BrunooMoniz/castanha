@@ -107,7 +107,10 @@ class EchoCancel:
                 os.killpg(self._supervisor.pid, signal.SIGKILL)
             except OSError:
                 self._supervisor.kill()
-            self._supervisor.wait(timeout=2)
+            try:
+                self._supervisor.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
         except OSError:
             pass
         if self._supervisor.stdin and not self._supervisor.stdin.closed:
@@ -170,11 +173,17 @@ def _supervise(conf_path: str) -> int:
     # Handlers antes do nó: sinal recebido durante o Popen não deixa órfão.
     signal.signal(signal.SIGTERM, finish)
     signal.signal(signal.SIGINT, finish)
+    # Sinal entre o fork e a atribuição de `node` deixaria o nó órfão: fica
+    # pendente até o supervisor conhecer o filho. O filho nasce desbloqueado.
+    stop_signals = {signal.SIGTERM, signal.SIGINT}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
     try:
         node = subprocess.Popen(["pipewire", "-c", conf_path],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals))
     except OSError:
         finish()
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, stop_signals)
 
     # Espera o PID da captura vigiando o nó: nó que cai cedo libera o start na
     # hora, e quem iniciou e morreu sem entregar o PID não deixa o nó vivo.

@@ -18,6 +18,7 @@ class FakeNode:
 
     def bind(self, pid):
         self.bound = pid
+        return True
 
     def close(self):
         self.closed = True
@@ -56,11 +57,13 @@ class RecorderUsesEchoCancel(unittest.TestCase):
                     recorder.process.kill()
                     recorder.process.wait()
                     recorder.process.stdin.close()
+        self.recorder = recorder
         return commands, start, process
 
     def test_dual_grava_a_fonte_sem_eco_e_amarra_o_no_a_captura(self):
         node = FakeNode()
         commands, start, process = self._start(node, mode="dual", echo_cancel=True)
+        self.assertIs(self.recorder.echo, node)
         start.assert_called_once_with("mic", "sink")
         self.assertEqual(_inputs(commands[0]), [node.source, "sink.monitor"])
         self.assertEqual(node.bound, process.pid)
