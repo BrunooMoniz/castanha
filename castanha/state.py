@@ -29,6 +29,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "call_device_name": None,
     "current_meeting": None,
     "mic_muted_at_start": None,
+    "echo_cancel": False,
     "next_meeting": None,
     "upcoming_meetings": [],
     "agenda_error": None,

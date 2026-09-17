@@ -166,8 +166,8 @@ class AudioRecorder:
             self.stop_meter()
             self.stop_echo()
             raise
-        if self.echo:
-            self.echo.bind(self.process.pid)
+        if self.echo and not self.echo.bind(self.process.pid):
+            self.echo = None
         return self.process
 
     @staticmethod

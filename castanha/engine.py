@@ -173,7 +173,8 @@ class CastanhaEngine:
             )
 
         temp_audio = Path(f"/tmp/castanha_rec_{int(time.time())}.ogg")
-        echo_cancel = chosen_mode == "dual" and audio_cfg.get("echo_cancel", True) is not False
+        echo_cancel = (chosen_mode == "dual"
+                       and str(audio_cfg.get("echo_cancel", True)).lower() not in ("false", "0", "no", "none"))
         proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate, echo_cancel=echo_cancel)
         if echo_cancel and not getattr(self.recorder, "echo", None):
             print("[Castanha] Microfone sem eco indisponível; gravando o microfone cru.", file=sys.stderr)

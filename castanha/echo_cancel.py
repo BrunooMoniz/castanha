@@ -13,6 +13,7 @@ https://docs.pipewire.org/page_module_echo_cancel.html
 """
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -82,13 +83,18 @@ class EchoCancel:
         self.source = source
         self._supervisor = supervisor
 
-    def bind(self, capture_pid: int) -> None:
-        """Entrega ao supervisor o PID da captura; o nó morre junto com ela."""
+    def bind(self, capture_pid: int) -> bool:
+        """Entrega ao supervisor o PID da captura; o nó morre junto com ela.
+
+        False: o supervisor já tinha saído e o FFmpeg caiu no microfone cru.
+        """
         try:
             self._supervisor.stdin.write(f"{capture_pid}\n".encode())
             self._supervisor.stdin.close()
+            return True
         except (OSError, ValueError):
             self.close()
+            return False
 
     def close(self) -> None:
         """Encerra o nó e recolhe o supervisor; o daemon não acumula zumbis."""
@@ -96,7 +102,11 @@ class EchoCancel:
             self._supervisor.terminate()
             self._supervisor.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._supervisor.kill()
+            # Supervisor é líder da própria sessão: o grupo leva o nó junto.
+            try:
+                os.killpg(self._supervisor.pid, signal.SIGKILL)
+            except OSError:
+                self._supervisor.kill()
             self._supervisor.wait(timeout=2)
         except OSError:
             pass
@@ -130,7 +140,8 @@ def start(mic: str, sink: str) -> Optional[EchoCancel]:
         pass
     if supervisor is not None:
         EchoCancel(name, supervisor).close()
-    elif conf_path:
+    if conf_path:
+        # Supervisor que morreu antes de instalar os handlers não limpa a conf.
         Path(conf_path).unlink(missing_ok=True)
     return None
 
@@ -144,24 +155,35 @@ def _alive(pid: int) -> bool:
 
 
 def _supervise(conf_path: str) -> int:
-    node = subprocess.Popen(["pipewire", "-c", conf_path],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    node = None
 
     def finish(*_):
-        node.terminate()
-        try:
-            node.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            node.kill()
+        if node is not None:
+            node.terminate()
+            try:
+                node.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                node.kill()
         Path(conf_path).unlink(missing_ok=True)
         os._exit(0)
 
+    # Handlers antes do nó: sinal recebido durante o Popen não deixa órfão.
     signal.signal(signal.SIGTERM, finish)
     signal.signal(signal.SIGINT, finish)
-    signal.signal(signal.SIGALRM, finish)
-    signal.alarm(int(_PID_WAIT_SECONDS))  # quem iniciou morreu antes de entregar o PID
-    line = sys.stdin.readline().strip()
-    signal.alarm(0)
+    try:
+        node = subprocess.Popen(["pipewire", "-c", conf_path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        finish()
+
+    # Espera o PID da captura vigiando o nó: nó que cai cedo libera o start na
+    # hora, e quem iniciou e morreu sem entregar o PID não deixa o nó vivo.
+    line = ""
+    deadline = time.monotonic() + _PID_WAIT_SECONDS
+    while time.monotonic() < deadline and node.poll() is None:
+        if select.select([sys.stdin], [], [], 0.2)[0]:
+            line = sys.stdin.readline().strip()
+            break
     capture_pid = int(line) if line.isdigit() else 0
     while capture_pid and _alive(capture_pid) and node.poll() is None:
         time.sleep(1)

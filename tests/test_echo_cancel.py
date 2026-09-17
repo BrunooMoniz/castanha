@@ -75,6 +75,21 @@ class RecorderUsesEchoCancel(unittest.TestCase):
             start.assert_not_called()
             self.assertEqual(_inputs(commands[0])[0], "mic")
 
+    def test_supervisor_que_ja_saiu_nao_deixa_o_estado_dizer_sem_eco(self):
+        node = FakeNode()
+        node.bind = lambda pid: False
+        recorder = _recorder()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("castanha.audio.echo_cancel_node.start", return_value=node), \
+                patch("castanha.audio.subprocess.Popen", side_effect=_fake_ffmpeg([])):
+            try:
+                recorder.start(Path(directory) / "capture.ogg", mode="dual", echo_cancel=True)
+                self.assertIsNone(recorder.echo)
+            finally:
+                recorder.process.kill()
+                recorder.process.wait()
+                recorder.process.stdin.close()
+
     def test_ffmpeg_que_nao_inicia_encerra_o_no(self):
         node = FakeNode()
         recorder = _recorder()
@@ -146,6 +161,36 @@ class Supervisor(unittest.TestCase):
         self.assertTrue(self._wait(self.node_pid.exists))
         echo_cancel.EchoCancel("fonte", self.supervisor).close()
         self.assertTrue(self._wait(self._node_gone))
+
+
+class StartSemNo(unittest.TestCase):
+    """Host sem o nó (binário ausente ou nó que cai na hora): mic cru, sem lixo e sem espera."""
+
+    def _start(self, fake_pipewire):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "run"
+            runtime.mkdir()
+            bindir = Path(directory) / "bin"
+            bindir.mkdir()
+            if fake_pipewire:
+                (bindir / "pipewire").write_text(fake_pipewire)
+                (bindir / "pipewire").chmod(0o755)
+            env = {"XDG_RUNTIME_DIR": str(runtime), "PATH": str(bindir)}
+            began = time.monotonic()
+            with patch.dict(os.environ, env):
+                node = echo_cancel.start("mic", "sink")
+            return node, time.monotonic() - began, list(runtime.glob('castanha-aec-*'))
+
+    def test_pipewire_ausente_nao_vaza_a_conf(self):
+        node, _, leftovers = self._start(None)
+        self.assertIsNone(node)
+        self.assertEqual(leftovers, [])
+
+    def test_no_que_cai_na_hora_libera_o_start_sem_esperar_o_teto(self):
+        node, elapsed, leftovers = self._start("#!/bin/sh\nexit 1\n")
+        self.assertIsNone(node)
+        self.assertEqual(leftovers, [])
+        self.assertLess(elapsed, echo_cancel.READY_TIMEOUT_SECONDS - 1)
 
 
 class Conf(unittest.TestCase):
