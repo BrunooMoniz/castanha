@@ -164,9 +164,7 @@ class AudioRecorder:
             )
         except OSError:
             self.stop_meter()
-            if self.echo:
-                self.echo.close()
-                self.echo = None
+            self.stop_echo()
             raise
         if self.echo:
             self.echo.bind(self.process.pid)
@@ -212,6 +210,13 @@ class AudioRecorder:
                     pass
             setattr(self, field, None)
 
+    def stop_echo(self) -> None:
+        # O supervisor já encerra o nó quando o FFmpeg termina; aqui o processo
+        # que iniciou a captura só o recolhe.
+        if self.echo:
+            self.echo.close()
+            self.echo = None
+
     def pause(self) -> None:
         if self.process and self.is_recording():
             os.killpg(os.getpgid(self.process.pid), signal.SIGSTOP)
@@ -240,6 +245,7 @@ class AudioRecorder:
                 stream.close()
         self.process = None
         self.stop_meter()
+        self.stop_echo()
 
         if not self.output_path or not self.output_path.exists():
             raise FileNotFoundError("O arquivo de áudio resultante não foi gerado.")

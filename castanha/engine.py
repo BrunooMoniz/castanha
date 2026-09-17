@@ -173,8 +173,10 @@ class CastanhaEngine:
             )
 
         temp_audio = Path(f"/tmp/castanha_rec_{int(time.time())}.ogg")
-        proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate,
-                                   echo_cancel=audio_cfg.get("echo_cancel", True) is not False)
+        echo_cancel = chosen_mode == "dual" and audio_cfg.get("echo_cancel", True) is not False
+        proc = self.recorder.start(temp_audio, mode=chosen_mode, bitrate=bitrate, echo_cancel=echo_cancel)
+        if echo_cancel and not getattr(self.recorder, "echo", None):
+            print("[Castanha] Microfone sem eco indisponível; gravando o microfone cru.", file=sys.stderr)
 
         current_meeting_info = None
         if meeting_slug:
@@ -316,6 +318,9 @@ class CastanhaEngine:
         stop_meter = getattr(self.recorder, "stop_meter", None)
         if callable(stop_meter):
             stop_meter()
+        stop_echo = getattr(self.recorder, "stop_echo", None)
+        if callable(stop_echo):
+            stop_echo()
         # start e stop podem ser comandos CLI distintos. Nesse caso o objeto
         # do stop não conhece o caminho em memória, então o estado persistido
         # é a autoridade para remover o artefato temporário.

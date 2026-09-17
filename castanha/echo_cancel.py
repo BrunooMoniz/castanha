@@ -91,10 +91,20 @@ class EchoCancel:
             self.close()
 
     def close(self) -> None:
+        """Encerra o nó e recolhe o supervisor; o daemon não acumula zumbis."""
         try:
             self._supervisor.terminate()
+            self._supervisor.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._supervisor.kill()
+            self._supervisor.wait(timeout=2)
         except OSError:
             pass
+        if self._supervisor.stdin and not self._supervisor.stdin.closed:
+            try:
+                self._supervisor.stdin.close()
+            except OSError:
+                pass
 
 
 def start(mic: str, sink: str) -> Optional[EchoCancel]:
