@@ -380,11 +380,7 @@ class FakeVps:
             job["prompt"] = self.uploads.pop(command.split()[2])
             return _proc(0)
         if "nohup flock" in command:
-            m = re.search(r"--provider (\S+) -m (\S+) --reasoning (\S+)", command)
-            job["outcome"] = self.outcomes[f"{m.group(1)}/{m.group(2)}"]
-            if callable(job["outcome"]):
-                job["outcome"] = job["outcome"](job["prompt"])
-            job.update(stage="RUNNING", launch=command)
+            self._lancamento(command, job)
             return _proc(0)
         if command == f"cat {remote}/result.txt":
             return _proc(0, job["outcome"][1])
@@ -394,6 +390,13 @@ class FakeVps:
             job.update(stage="UPLOAD", polls=0, cleaned=job.get("cleaned", 0) + 1)
             return _proc(0)
         raise AssertionError(command)
+
+    def _lancamento(self, command, job):
+        m = re.search(r"--provider (\S+) -m (\S+) --reasoning (\S+)", command)
+        job["outcome"] = self.outcomes[f"{m.group(1)}/{m.group(2)}"]
+        if callable(job["outcome"]):
+            job["outcome"] = job["outcome"](job["prompt"])
+        job.update(stage="RUNNING", launch=command)
 
 
 MODELOS = [{"provider": "anthropic", "model": "claude-opus-5"},
@@ -1133,6 +1136,163 @@ class TestGroqDurableFallback(unittest.TestCase):
         payload = json.loads(http.call_args.args[0].data)
         self.assertNotIn("reasoning_effort", payload)
         self.assertEqual(payload["max_completion_tokens"], 2048)
+
+
+OPENCLAW_MODELOS = [{"provider": "anthropic", "model": "claude-opus-5"},
+                    {"provider": "openai", "model": "gpt-5.5"}]
+
+
+def _envelope(texto, status="ok"):
+    return json.dumps({"status": status, "summary": "completed",
+                       "result": {"payloads": [{"text": texto, "mediaUrl": None}],
+                                  "meta": {"finalAssistantVisibleText": texto}}})
+
+
+class FakeOpenclawVps(FakeVps):
+    """Mesmo estado remoto, com a CLI do OpenClaw no lugar do `hermes chat`."""
+
+    def __call__(self, argv, capture_output=True, text=True, timeout=None):
+        command = argv[-1] if argv and argv[0] == "ssh" else ""
+        if "openclaw models status" in command:
+            self.argv.append(list(argv))
+            self.timeouts.append((argv[0], timeout))
+            return _proc(0, self.quota if hasattr(self, "quota") else '{"blocked": false}')
+        return super().__call__(argv, capture_output=capture_output, text=text, timeout=timeout)
+
+    def _lancamento(self, command, job):
+        m = re.search(r"--model '?([^ ']+)'? --thinking", command)
+        job["outcome"] = self.outcomes[m.group(1)]
+        if callable(job["outcome"]):
+            job["outcome"] = job["outcome"](job["prompt"])
+        job.update(stage="RUNNING", launch=command)
+
+
+class TestOpenclawSshLlm(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.env = patch.dict("os.environ", {"XDG_CONFIG_HOME": str(self.temp), "XDG_STATE_HOME": str(self.temp)})
+        self.env.start()
+        self.sleeps = []
+        self.now = 0.0
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def clock(self):
+        self.now += 5.0
+        return self.now
+
+    def openclaw(self, timeout_sec=900):
+        return S.OpenclawSshLlm("vps-fixture", OPENCLAW_MODELOS, timeout_sec=timeout_sec,
+                                sleep=self.sleeps.append, clock=self.clock)
+
+    def test_upload_running_done_e_prompt_so_no_arquivo(self):
+        vps = FakeOpenclawVps({"anthropic/claude-opus-5": ("done", _envelope("# Resumo\n\nDecidido."))}, polls=2)
+        oc = self.openclaw()
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            answer = oc.complete("SISTEMA sigiloso", "Transcrição privada da reunião")
+        self.assertEqual(answer, "# Resumo\n\nDecidido.")
+        self.assertEqual(oc.last_model, "anthropic/claude-opus-5")
+        job = next(iter(vps.jobs.values()))
+        self.assertIn("SISTEMA sigiloso\n\nTranscrição privada da reunião", job["prompt"])
+        for argv in vps.argv:
+            self.assertNotIn("sigiloso", " ".join(argv))
+            self.assertNotIn("privada", " ".join(argv))
+        self.assertIn("openclaw agent --agent main --message-file", job["launch"])
+        self.assertIn("--model anthropic/claude-opus-5 --thinking medium --json", job["launch"])
+        self.assertIn(". /root/.openclaw/gateway.env", job["launch"])
+        self.assertIn("--timeout 900", job["launch"])
+        self.assertIn("timeout --kill-after=30s 960s openclaw", job["launch"])
+        # Sessão própria por job: a conversa principal do agente não recebe a reunião.
+        session = re.search(r"--session-id '?(castanha-[0-9a-f]{64})'?", job["launch"])
+        self.assertTrue(session, job["launch"])
+        self.assertIn(session.group(1)[len("castanha-"):], job["launch"])
+
+    def test_envelope_json_vira_texto(self):
+        self.assertEqual(S.OpenclawSshLlm._answer(_envelope("pong")), "pong")
+        semi = json.dumps({"status": "ok", "result": {"payloads": [],
+                                                      "meta": {"finalAssistantVisibleText": "de meta"}}})
+        self.assertEqual(S.OpenclawSshLlm._answer(semi), "de meta")
+
+    def test_envelope_invalido_ou_sem_sucesso_pede_reparo(self):
+        for bruto in ("não é json", _envelope("x", status="error"),
+                      json.dumps({"status": "ok", "result": {"payloads": [{"text": "  "}]}})):
+            with self.assertRaises(S._HermesInvalidResponse):
+                S.OpenclawSshLlm._answer(bruto)
+
+    def test_cota_bloqueada_passa_ao_proximo_modelo(self):
+        vps = FakeOpenclawVps({"openai/gpt-5.5": ("done", _envelope("segundo"))})
+        vps.quota = '{"blocked": true}'
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            with self.assertRaises(S.LlmUnavailable) as ctx:
+                self.openclaw().complete("s", "u")
+        self.assertTrue(str(ctx.exception).startswith("OpenClaw indisponível na VPS: "), str(ctx.exception))
+
+    def test_cota_usa_timeout_proprio_maior_que_o_ssh_comum(self):
+        vps = FakeOpenclawVps({"anthropic/claude-opus-5": ("done", _envelope("ok"))})
+        with patch("castanha.summarizer.subprocess.run", side_effect=vps):
+            self.openclaw().complete("s", "u")
+        cota = [t for argv, (tool, t) in zip(vps.argv, vps.timeouts)
+                if "openclaw models status" in argv[-1]]
+        self.assertEqual(set(cota), {S.OPENCLAW_QUOTA_TIMEOUT_SEC})
+
+    def test_job_do_openclaw_nao_colide_com_o_do_hermes(self):
+        h = S.HermesSshLlm("vps-fixture", OPENCLAW_MODELOS)
+        oc = S.OpenclawSshLlm("vps-fixture", OPENCLAW_MODELOS)
+        self.assertNotEqual(h._job_id("anthropic", "claude-opus-5", "p"),
+                            oc._job_id("anthropic", "claude-opus-5", "p"))
+
+    def test_host_ou_modelos_ausentes_nao_chamam_a_vps(self):
+        with patch("castanha.summarizer.subprocess.run", side_effect=AssertionError("sem rede")):
+            with self.assertRaises(S.LlmUnavailable):
+                S.OpenclawSshLlm("", OPENCLAW_MODELOS).complete("s", "u")
+            with self.assertRaises(S.LlmUnavailable):
+                S.OpenclawSshLlm("vps-fixture", []).complete("s", "u")
+
+
+class TestOpenclawNoSummarizer(unittest.TestCase):
+    def setUp(self):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        env = patch.dict(os.environ, {"XDG_STATE_HOME": state.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def summarizer(self, provider="openclaw_ssh", fallback="groq", key="gsk_teste"):
+        cfg = {"llm": {"provider": provider, "fallback_provider": fallback, "api_key": key,
+                       "openclaw_ssh_host": "vps-fixture", "openclaw_models": OPENCLAW_MODELOS}}
+        with patch("castanha.summarizer.load_config", return_value=cfg):
+            return MeetingSummarizer()
+
+    def test_openclaw_responde_e_registra_o_provedor(self):
+        s = self.summarizer()
+        with patch.object(s.openclaw, "_run", return_value="ok") as run, \
+             patch("castanha.summarizer.urllib.request.urlopen") as groq:
+            self.assertEqual(s._call_llm("sis", "usu"), "ok")
+        self.assertEqual(run.call_count, 1)
+        groq.assert_not_called()
+        self.assertEqual(s.last_provider, "openclaw:anthropic/claude-opus-5")
+
+    def test_indisponivel_cai_para_a_groq(self):
+        s = self.summarizer()
+        err = io.StringIO()
+        with patch.object(s.openclaw, "_run", side_effect=S.LlmUnavailable("SSH da VPS indisponível")), \
+             patch.object(s, "_call_groq", return_value="reserva"), \
+             patch("sys.stderr", err):
+            self.assertEqual(s._call_llm("sis", "usu"), "reserva")
+        self.assertEqual(s._provider_in_use(), "groq")
+        self.assertIn("[Castanha] OpenClaw indisponível (SSH da VPS indisponível); usando Groq como reserva",
+                      err.getvalue())
+
+    def test_job_em_andamento_nao_cai_para_a_groq(self):
+        s = self.summarizer()
+        with patch.object(s.openclaw, "_run",
+                          side_effect=S.HermesInProgress("Resumo ainda em andamento na VPS; retomada automática")), \
+             patch.object(s, "_call_groq") as groq:
+            with self.assertRaises(S.HermesInProgress):
+                s._call_llm("sis", "usu")
+        groq.assert_not_called()
 
 
 if __name__ == "__main__":

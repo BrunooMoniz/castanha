@@ -87,6 +87,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         ],
         "hermes_reasoning": "medium",
         "hermes_timeout_sec": 900,
+        # "openclaw_ssh": mesmo fluxo, pela CLI do OpenClaw 2.0 na VPS .68.
+        # O gateway só escuta em loopback lá; o job roda na própria VPS.
+        "openclaw_ssh_host": "zinom-vps",
+        "openclaw_models": [
+            {"provider": "anthropic", "model": "claude-opus-5"},
+            {"provider": "openai", "model": "gpt-5.5"},
+        ],
+        "openclaw_reasoning": "medium",
+        "openclaw_timeout_sec": 900,
         # Reserva quando a cadeia Hermes inteira falha; "" desliga a reserva.
         "fallback_provider": "groq",
         "api_key": os.environ.get("GROQ_API_KEY", ""),

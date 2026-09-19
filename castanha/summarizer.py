@@ -393,6 +393,11 @@ class _HermesInvalidResponse(_HermesJobFailed):
 
 
 class HermesSshLlm:
+    # Identidade do motor: entra no hash do job para que dois motores nunca
+    # dividam o mesmo diretório remoto com comandos diferentes.
+    engine = "hermes"
+    label = "Hermes"
+
     def __init__(self, host: str, models, reasoning: str = "medium", timeout_sec: int = 900,
                  sleep=time.sleep, clock=time.monotonic):
         self.host = host
@@ -404,10 +409,10 @@ class HermesSshLlm:
         self.clock = clock
         self.last_model: Optional[str] = None  # "anthropic/claude-opus-5"
 
-    def _ssh(self, command: str) -> str:
+    def _ssh(self, command: str, timeout: int = 15) -> str:
         try:
             result = subprocess.run(["ssh", *HERMES_SSH_OPTS, self.host, command],
-                                    capture_output=True, text=True, timeout=15)
+                                    capture_output=True, text=True, timeout=timeout)
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise LlmUnavailable("SSH da VPS indisponível") from exc
         if result.returncode != 0:
@@ -468,22 +473,34 @@ class HermesSshLlm:
             raise _HermesInvalidResponse("resposta vazia")
         return answer
 
-    def _run(self, provider: str, model: str, prompt: str) -> str:
-        identity = {"provider": provider, "model": model, "reasoning": self.reasoning, "prompt": prompt}
+    def _quota(self, provider: str) -> None:
+        """Levanta se o provedor remoto não tem credencial utilizável."""
+        from castanha.hermes_quota import remote_command
+        try:
+            quota = json.loads(self._ssh(remote_command(provider)))
+        except (ValueError, TypeError) as exc:
+            raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS") from exc
+        if not isinstance(quota, dict) or quota.get("unavailable"):
+            raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS")
+        if quota.get("blocked"):
+            raise _HermesJobFailed("credenciais indisponíveis por cota ou autenticação; aguardando renovação")
+
+    def _job_id(self, provider: str, model: str, prompt: str) -> str:
+        identity = {"engine": self.engine, "provider": provider, "model": model,
+                    "reasoning": self.reasoning, "prompt": prompt}
+        if self.engine == "hermes":
+            # Jobs já persistidos na VPS continuam sendo encontrados pelo hash
+            # original: o motor histórico não entra na identidade dele.
+            identity.pop("engine")
         canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        job_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _run(self, provider: str, model: str, prompt: str) -> str:
+        job_id = self._job_id(provider, model, prompt)
         remote = f".local/state/castanha/llm/{job_id}"
         state = self._state(remote)
         if state != "DONE":
-            from castanha.hermes_quota import remote_command
-            try:
-                quota = json.loads(self._ssh(remote_command(provider)))
-            except (ValueError, TypeError) as exc:
-                raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS") from exc
-            if not isinstance(quota, dict) or quota.get("unavailable"):
-                raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS")
-            if quota.get("blocked"):
-                raise _HermesJobFailed("credenciais indisponíveis por cota ou autenticação; aguardando renovação")
+            self._quota(provider)
         if state == "UPLOAD":
             self._upload(prompt, remote)
             state = "RUNNING"
@@ -514,9 +531,9 @@ class HermesSshLlm:
 
     def complete(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         if not self.host:
-            raise LlmUnavailable("Hermes indisponível na VPS: host SSH não configurado")
+            raise LlmUnavailable(f"{self.label} indisponível na VPS: host SSH não configurado")
         if not self.models:
-            raise LlmUnavailable("Hermes indisponível na VPS: nenhum modelo configurado")
+            raise LlmUnavailable(f"{self.label} indisponível na VPS: nenhum modelo configurado")
         # Sem flag de system prompt na CLI: tudo vai no único arquivo de consulta.
         prompt = f"{system_prompt.rstrip()}\n\n{user_prompt.rstrip()}\n"
         if json_mode:
@@ -546,13 +563,88 @@ class HermesSshLlm:
                                 "Resposta da síntese inválida após reparo; revisão necessária, "
                                 "transcrição preservada") from exc
             except _HermesJobFailed as exc:
-                print(f"[Castanha] Hermes {provider}/{model} falhou ({exc}); tentando o próximo modelo",
+                print(f"[Castanha] {self.label} {provider}/{model} falhou ({exc}); tentando o próximo modelo",
                       file=sys.stderr)
                 reasons.append(f"{provider}/{model}: {exc}")
                 continue
             self.last_model = f"{provider}/{model}"
             return answer
-        raise LlmUnavailable("Hermes indisponível na VPS: " + "; ".join(reasons))
+        raise LlmUnavailable(f"{self.label} indisponível na VPS: " + "; ".join(reasons))
+
+
+# ---------------------------------------------------------------- OpenClaw
+# Mesmo fluxo do Hermes (upload do prompt, job solto com flock, retomada pelo
+# hash), trocando a CLI: `openclaw agent` fala com o gateway da VPS, que só
+# escuta em loopback e exige o token do gateway.env no ambiente.
+OPENCLAW_ENV_PREFIX = "export HOME=/root; set -a; . /root/.openclaw/gateway.env; set +a; "
+OPENCLAW_AGENT = "main"
+# `openclaw models status` é uma CLI Node: 2,7 s de CPU na VPS. Os 15 s do SSH
+# comum não deixam folga para a rede.
+OPENCLAW_QUOTA_TIMEOUT_SEC = 45
+# Folga para a CLI encerrar sozinha dentro do próprio --timeout antes do
+# `timeout` externo matar o processo e perder a saída.
+OPENCLAW_KILL_MARGIN_SEC = 60
+
+
+class OpenclawSshLlm(HermesSshLlm):
+    engine = "openclaw"
+    label = "OpenClaw"
+
+    def _quota(self, provider: str) -> None:
+        from castanha.openclaw_quota import remote_command
+        try:
+            quota = json.loads(self._ssh(remote_command(provider, OPENCLAW_ENV_PREFIX),
+                                         timeout=OPENCLAW_QUOTA_TIMEOUT_SEC))
+        except (ValueError, TypeError) as exc:
+            raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS") from exc
+        if not isinstance(quota, dict) or quota.get("unavailable"):
+            raise LlmUnavailable("Não foi possível verificar a cota registrada na VPS")
+        if quota.get("blocked"):
+            raise _HermesJobFailed("credenciais indisponíveis por cota ou autenticação; aguardando renovação")
+
+    def _launch(self, remote: str, provider: str, model: str) -> None:
+        # A sessão é própria de cada job: a conversa principal do agente não
+        # recebe transcrição de reunião.
+        session = "castanha-" + remote.rsplit("/", 1)[-1]
+        ref = f"{provider}/{model}"
+        script = (f"if test -f {remote}/result.txt || test -f {remote}/exit.txt; then exit 0; fi; "
+                  + OPENCLAW_ENV_PREFIX
+                  + f"timeout --kill-after=30s {self.timeout_sec + OPENCLAW_KILL_MARGIN_SEC}s "
+                  f"openclaw agent --agent {shlex.quote(OPENCLAW_AGENT)} "
+                  f"--message-file {remote}/prompt.txt --model {shlex.quote(ref)} "
+                  f"--thinking {shlex.quote(self.reasoning)} --json "
+                  f"--session-id {shlex.quote(session)} --timeout {self.timeout_sec} "
+                  f"> {remote}/result.part 2> {remote}/worker.log; rc=$?; "
+                  f"if [ $rc -eq 0 ] && [ -s {remote}/result.part ]; then mv {remote}/result.part {remote}/result.txt; "
+                  f"else echo $rc > {remote}/exit.txt; fi")
+        self._ssh(f"umask 077; nohup flock -n {remote}/job.lock sh -c {shlex.quote(script)} "
+                  ">/dev/null 2>&1 </dev/null &")
+
+    @staticmethod
+    def _answer(text: str) -> str:
+        """O texto da resposta sai do envelope JSON da CLI, não do stdout cru."""
+        try:
+            envelope = json.loads(text)
+        except (ValueError, TypeError) as exc:
+            raise _HermesInvalidResponse("envelope JSON inválido") from exc
+        if not isinstance(envelope, dict) or envelope.get("status") != "ok":
+            raise _HermesInvalidResponse("turno sem sucesso")
+        result = envelope.get("result") if isinstance(envelope.get("result"), dict) else {}
+        partes = [p.get("text") for p in (result.get("payloads") or [])
+                  if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        answer = "\n".join(parte for parte in partes if parte.strip()).strip()
+        if not answer:
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            visivel = meta.get("finalAssistantVisibleText")
+            answer = visivel.strip() if isinstance(visivel, str) else ""
+        if not answer:
+            raise _HermesInvalidResponse("resposta vazia")
+        return answer
+
+
+# Provedores que resolvem o resumo por uma CLI de agente na VPS: contexto
+# grande, sem partes, e o resultado pode ficar pendente entre execuções.
+REMOTE_LLM_PROVIDERS = ("hermes_ssh", "openclaw_ssh")
 
 
 class MeetingSummarizer:
@@ -566,12 +658,20 @@ class MeetingSummarizer:
         self.hermes = HermesSshLlm(llm_cfg.get("hermes_ssh_host", ""), llm_cfg.get("hermes_models", []),
                                    reasoning=llm_cfg.get("hermes_reasoning", "medium"),
                                    timeout_sec=llm_cfg.get("hermes_timeout_sec", 900))
-        # Quem produziu o último resumo: "hermes:<provider>/<model>" ou "groq".
+        self.openclaw = OpenclawSshLlm(llm_cfg.get("openclaw_ssh_host", ""),
+                                       llm_cfg.get("openclaw_models", []),
+                                       reasoning=llm_cfg.get("openclaw_reasoning", "medium"),
+                                       timeout_sec=llm_cfg.get("openclaw_timeout_sec", 900))
+        # Quem produziu o último resumo: "hermes:<p>/<m>", "openclaw:<p>/<m>" ou "groq".
         self.last_provider: Optional[str] = None
         self._effective_provider: Optional[str] = None
 
     def _provider_in_use(self):
         return self._effective_provider or self.provider
+
+    def _remote_llm(self):
+        """O motor de agente remoto do provedor em uso, ou None."""
+        return {"hermes_ssh": self.hermes, "openclaw_ssh": self.openclaw}.get(self._provider_in_use())
 
     def _groq_gold_budget(self, system_prompt):
         # GPT-OSS compartilha a saída entre raciocínio e resposta. O Gold
@@ -580,9 +680,10 @@ class MeetingSummarizer:
             "openai/gpt-oss-20b", "openai/gpt-oss-120b")
 
     def _call_llm(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
-        if self._provider_in_use() == "hermes_ssh":
+        remoto = self._remote_llm()
+        if remoto is not None:
             try:
-                answer = self.hermes.complete(system_prompt, user_prompt, json_mode)
+                answer = remoto.complete(system_prompt, user_prompt, json_mode)
             except HermesInProgress:
                 # Job vivo na VPS: a retomada acha o resultado. Trocar por Groq
                 # agora jogaria fora o resumo melhor que está quase pronto.
@@ -592,14 +693,16 @@ class MeetingSummarizer:
             except LlmUnavailable as exc:
                 if self.fallback_provider != "groq" or not self.api_key:
                     raise
-                print(f"[Castanha] Hermes indisponível ({exc}); usando Groq como reserva", file=sys.stderr)
+                print(f"[Castanha] {remoto.label} indisponível ({exc}); usando Groq como reserva",
+                      file=sys.stderr)
                 self._effective_provider = "groq"
                 return self._call_groq(system_prompt, user_prompt, json_mode)
-            self.last_provider = f"hermes:{self.hermes.last_model}"
+            self.last_provider = f"{remoto.engine}:{remoto.last_model}"
             return answer
         if self._provider_in_use() != "groq":
             # Outro provedor configurado nunca vai parar na Groq por engano.
-            raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; só 'hermes_ssh' e 'groq'")
+            raise LlmUnavailable(f"provedor de LLM '{self.provider}' não suportado; "
+                                 "só 'hermes_ssh', 'openclaw_ssh' e 'groq'")
         if not self.api_key:
             return ""
         return self._call_groq(system_prompt, user_prompt, json_mode)
@@ -802,7 +905,7 @@ Transcrição Bruta:
 
         # Hermes tem contexto grande: sem partes, e a transcrição íntegra é
         # anexada aqui em vez de pedir ao modelo que a reescreva.
-        sem_transcricao = self.provider == "hermes_ssh" or bool(manual.strip())
+        sem_transcricao = self.provider in REMOTE_LLM_PROVIDERS or bool(manual.strip())
         llm_output = ""
         narrativa = ""  # só o que a LLM escreveu, sem a transcrição anexada
         if raw_transcript.strip() or manual.strip():
@@ -958,7 +1061,7 @@ _Pendente: depende do resumo automático._
                     return self._gold_from_notes(groq_header, notas)
                 data = self._gold_response(f"{header}\nNotas Silver:\n{notas}\n\nTranscrição:\n{raw_transcript}\n")
                 return (self._repair_uncitable_gold(data, silver_content)
-                        if self._provider_in_use() == "hermes_ssh" else data)
+                        if self._provider_in_use() in REMOTE_LLM_PROVIDERS else data)
             except LlmTooLarge as e:
                 # A reserva pode ter sido selecionada durante a primeira
                 # chamada. Recalcule o pedido usando seu orçamento real.
