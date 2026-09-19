@@ -36,7 +36,19 @@ def quota_state(status, provider):
     # pura). Presente ali basta; ausente das duas listas é bloqueio.
     listed = [row for row in (auth.get("providers") or [])
               if isinstance(row, dict) and row.get("provider") == provider]
-    return {"blocked": not listed}
+    if listed:
+        return {"blocked": False}
+    # Anthropic sem perfil próprio pode autenticar pelo login nativo do Claude
+    # CLI na VPS: o plugin expõe isso como provider "claude-cli" com
+    # syntheticAuth. Foi o estado da .68 em 19/09/2026 depois que o painel
+    # removeu o setup-token, e as chamadas seguiam respondendo 200.
+    if provider == "anthropic":
+        nativo = [row for row in (auth.get("providers") or [])
+                  if isinstance(row, dict) and row.get("provider") == "claude-cli"
+                  and isinstance(row.get("syntheticAuth"), dict)]
+        if nativo:
+            return {"blocked": False}
+    return {"blocked": True}
 
 
 def remote_command(provider, env_prefix):

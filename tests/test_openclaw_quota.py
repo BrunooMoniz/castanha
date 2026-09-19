@@ -80,3 +80,12 @@ class TestRemoteCommand(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_anthropic_via_login_nativo_do_claude_cli_nao_bloqueia(self):
+        status = _status([], [{"provider": "claude-cli", "effective": {"kind": "synthetic"},
+                               "syntheticAuth": {"value": "plugin-owned", "source": "Claude CLI native auth"}}])
+        self.assertFalse(quota_state(status, "anthropic")["blocked"])
+
+    def test_claude_cli_sem_synthetic_auth_bloqueia(self):
+        status = _status([], [{"provider": "claude-cli", "effective": {"kind": "synthetic"}}])
+        self.assertTrue(quota_state(status, "anthropic")["blocked"])
