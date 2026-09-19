@@ -95,6 +95,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             {"provider": "openai", "model": "gpt-5.5"},
         ],
         "openclaw_reasoning": "medium",
+        "openclaw_agent": "castanha",  # agente sem ferramentas na VPS
         "openclaw_timeout_sec": 900,
         # Reserva quando a cadeia Hermes inteira falha; "" desliga a reserva.
         "fallback_provider": "groq",

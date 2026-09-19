@@ -577,7 +577,10 @@ class HermesSshLlm:
 # hash), trocando a CLI: `openclaw agent` fala com o gateway da VPS, que só
 # escuta em loopback e exige o token do gateway.env no ambiente.
 OPENCLAW_ENV_PREFIX = "export HOME=/root; set -a; . /root/.openclaw/gateway.env; set +a; "
-OPENCLAW_AGENT = "main"
+# Agente dedicado, SEM ferramentas (tools.profile minimal + deny "*" na VPS): a
+# transcrição da reunião nunca alcança MCP, canais ou memória do Maestro. É o
+# equivalente do `--safe-mode -t none` do Hermes.
+OPENCLAW_AGENT = "castanha"
 # `openclaw models status` é uma CLI Node: 2,7 s de CPU na VPS. Os 15 s do SSH
 # comum não deixam folga para a rede.
 OPENCLAW_QUOTA_TIMEOUT_SEC = 45
@@ -589,6 +592,10 @@ OPENCLAW_KILL_MARGIN_SEC = 60
 class OpenclawSshLlm(HermesSshLlm):
     engine = "openclaw"
     label = "OpenClaw"
+
+    def __init__(self, *args, agent: str = OPENCLAW_AGENT, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.agent = agent or OPENCLAW_AGENT
 
     def _quota(self, provider: str) -> None:
         from castanha.openclaw_quota import remote_command
@@ -610,7 +617,7 @@ class OpenclawSshLlm(HermesSshLlm):
         script = (f"if test -f {remote}/result.txt || test -f {remote}/exit.txt; then exit 0; fi; "
                   + OPENCLAW_ENV_PREFIX
                   + f"timeout --kill-after=30s {self.timeout_sec + OPENCLAW_KILL_MARGIN_SEC}s "
-                  f"openclaw agent --agent {shlex.quote(OPENCLAW_AGENT)} "
+                  f"openclaw agent --agent {shlex.quote(self.agent)} "
                   f"--message-file {remote}/prompt.txt --model {shlex.quote(ref)} "
                   f"--thinking {shlex.quote(self.reasoning)} --json "
                   f"--session-id {shlex.quote(session)} --timeout {self.timeout_sec} "
@@ -661,7 +668,8 @@ class MeetingSummarizer:
         self.openclaw = OpenclawSshLlm(llm_cfg.get("openclaw_ssh_host", ""),
                                        llm_cfg.get("openclaw_models", []),
                                        reasoning=llm_cfg.get("openclaw_reasoning", "medium"),
-                                       timeout_sec=llm_cfg.get("openclaw_timeout_sec", 900))
+                                       timeout_sec=llm_cfg.get("openclaw_timeout_sec", 900),
+                                       agent=llm_cfg.get("openclaw_agent", OPENCLAW_AGENT))
         # Quem produziu o último resumo: "hermes:<p>/<m>", "openclaw:<p>/<m>" ou "groq".
         self.last_provider: Optional[str] = None
         self._effective_provider: Optional[str] = None

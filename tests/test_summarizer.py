@@ -1199,7 +1199,7 @@ class TestOpenclawSshLlm(unittest.TestCase):
         for argv in vps.argv:
             self.assertNotIn("sigiloso", " ".join(argv))
             self.assertNotIn("privada", " ".join(argv))
-        self.assertIn("openclaw agent --agent main --message-file", job["launch"])
+        self.assertIn("openclaw agent --agent castanha --message-file", job["launch"])
         self.assertIn("--model anthropic/claude-opus-5 --thinking medium --json", job["launch"])
         self.assertIn(". /root/.openclaw/gateway.env", job["launch"])
         self.assertIn("--timeout 900", job["launch"])
