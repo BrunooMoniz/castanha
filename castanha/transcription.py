@@ -466,7 +466,7 @@ def vps_contract(config):
 
 
 class VpsSshTranscriber(BaseTranscriber):
-    def __init__(self, host: str = "zinom-vps-2", contract: Optional[dict] = None):
+    def __init__(self, host: str = "zinom-vps", contract: Optional[dict] = None):
         self.host = host
         self.contract = dict(contract) if contract is not None else vps_contract(load_config().get("transcription", {}))
 
@@ -708,7 +708,7 @@ def get_transcriber(estimated_duration_sec: float = 60.0) -> BaseTranscriber:
         return transcriber
     if provider != "vps_ssh":
         raise TranscriptionPending("Provedor não suportado; selecione VPS ou revisão manual Groq")
-    vps_host = t_cfg.get("vps_ssh_host", "zinom-vps-2")
+    vps_host = t_cfg.get("vps_ssh_host", "zinom-vps")
     if vps_host:
         return VpsSshTranscriber(vps_host, vps_contract(t_cfg))
     raise TranscriptionPending("Nenhum transcritor configurado; original preservado")

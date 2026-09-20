@@ -79,7 +79,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # "hermes_ssh": Hermes Agent na VPS, com as assinaturas do Bruno (Claude e
         # Codex), sem ferramentas nem memória. "groq" continua válido como primário.
         "provider": "hermes_ssh",
-        "hermes_ssh_host": "zinom-vps-2",
+        "hermes_ssh_host": "zinom-vps",
         # Cadeia ordenada: o próximo modelo só entra quando o anterior falhou de fato.
         "hermes_models": [
             {"provider": "anthropic", "model": "claude-opus-5"},

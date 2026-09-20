@@ -127,7 +127,7 @@ class CastanhaEngine:
             if transcriber.__class__.__name__ == "VpsSshTranscriber":
                 return "", "failed", str(e)
             print(f"[Castanha] Erro no transcritor primário: {e}. Tentando VPS local como fallback...", file=sys.stderr)
-            host = (self.config.get("transcription", {}) or {}).get("vps_ssh_host") or "zinom-vps-2"
+            host = (self.config.get("transcription", {}) or {}).get("vps_ssh_host") or "zinom-vps"
             try:
                 trans_res = VpsSshTranscriber(host).transcribe(audio_path, mode=mode)
                 return trans_res.text, trans_res.provider, None
@@ -583,7 +583,7 @@ class CastanhaEngine:
                         # Job remoto já aceito ou indisponível: próximo sync retoma.
                         if isinstance(exc, TranscriptionPending) or transcriber.__class__.__name__ == "VpsSshTranscriber":
                             raise
-                        host = self.config.get("transcription", {}).get("vps_ssh_host", "zinom-vps-2")
+                        host = self.config.get("transcription", {}).get("vps_ssh_host", "zinom-vps")
                         transcription = VpsSshTranscriber(host).transcribe(source, mode=mode)
                     if not transcription.text.strip():
                         raise RuntimeError("Transcrição vazia; áudio preservado para nova tentativa")
