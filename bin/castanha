@@ -771,6 +771,8 @@ def cmd_meet(args):
     print(t("cli.meet.native_host", mark=mark(info["native_host"])))
     loaded = info["chromium_loaded"]
     print(t("cli.meet.chromium", mark="?" if loaded is None else mark(loaded)))
+    if not info.get("per_channel"):
+        print(t("cli.meet.needs_per_channel"))
     if info["enabled"] and info["flags"] and loaded is False:
         print(t("cli.meet.restart_chromium"))
 

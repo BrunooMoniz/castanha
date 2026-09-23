@@ -14,6 +14,7 @@ transcrição como está (rótulo do canal), nunca inventa um nome.
 """
 
 import base64
+import bisect
 import datetime as _dt
 import hashlib
 import json
@@ -222,7 +223,12 @@ def prune(now: Optional[float] = None, days: int = RETENTION_DAYS) -> None:
 
 
 class Session:
-    """Uma aba do Meet. Guarda o mapa sempre; escreve só com gravação ativa."""
+    """Uma aba do Meet. Guarda o mapa sempre; escreve só com gravação ativa.
+
+    Cada vínculo guarda o instante em que foi aprendido: o arquivo aberto no
+    meio da chamada registra o mapa com esses instantes, não com a hora da
+    abertura. Níveis só entram com a gravação rodando (pausa não grava voz).
+    """
 
     def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None,
                  check_interval: float = 2.0):
@@ -231,20 +237,21 @@ class Session:
         self.clock = clock
         self.root = root
         self.code: Optional[str] = None
-        self.devices: Dict[str, str] = {}
-        self.sources: Dict[int, str] = {}
+        self.devices: Dict[str, Tuple[str, float]] = {}
+        self.sources: Dict[int, Tuple[str, float]] = {}
         self.file = None
         self.path: Optional[Path] = None
         self.errors = 0
         self._checked_at = -1e9
-        self._active = False
+        self._status: Optional[str] = None
 
-    def _is_active(self) -> bool:
+    def _recording_status(self) -> Optional[str]:
         now = self.clock()
         if now - self._checked_at >= self.check_interval:
-            self._active = self.recording_active() is not None
+            state = self.recording_active()
+            self._status = (state or {}).get("status") if state else None
             self._checked_at = now
-        return self._active
+        return self._status
 
     def _write(self, record: Dict[str, Any]) -> None:
         if self.file is None:
@@ -255,15 +262,22 @@ class Session:
             self.path = root / f"{self.code}-{stamp}-{os.getpid()}.jsonl"
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             self.file = os.fdopen(fd, "a", encoding="utf-8")
-            header = {"type": "session", "code": self.code, "t": self.clock(), "decoder": DECODER_VERSION}
+            header = {"type": "session", "code": self.code, "t": self.clock(), "decoder": DECODER_VERSION,
+                      "errors_before": self.errors}
             self.file.write(json.dumps(header, ensure_ascii=False) + "\n")
-            for device, name in self.devices.items():
-                self.file.write(json.dumps({"type": "device", "t": self.clock(), "device": device, "name": name},
+            for device, (name, learned) in self.devices.items():
+                self.file.write(json.dumps({"type": "device", "t": learned, "device": device, "name": name},
                                            ensure_ascii=False) + "\n")
-            for ssrc, device in self.sources.items():
-                self.file.write(json.dumps({"type": "source", "t": self.clock(), "device": device, "ssrc": ssrc}) + "\n")
+            for ssrc, (device, learned) in self.sources.items():
+                self.file.write(json.dumps({"type": "source", "t": learned, "device": device, "ssrc": ssrc}) + "\n")
         self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.file.flush()
+
+    def note_error(self, reason: str) -> None:
+        """Mapa possivelmente incompleto: fica registrado para o recorte recusar a janela."""
+        self.errors += 1
+        if self.file is not None and self.code is not None:
+            self._write({"type": "error", "t": self.clock(), "reason": reason})
 
     def handle(self, msg: Any) -> None:
         if not isinstance(msg, dict):
@@ -278,33 +292,35 @@ class Session:
             return
         kind = msg.get("type")
         now = self.clock()
+        status = self._recording_status()
+        if status is None:
+            # Gravação acabou: o arquivo fecha e a próxima abre outro, com o mapa daquele momento.
+            self.close()
         if kind == "collections":
             try:
                 raw = base64.b64decode(msg.get("b64") or "", validate=True)
                 events = decode_collections(raw)
             except (ValueError, zlib.error, TypeError):
-                self.errors += 1
+                self.note_error("decode")
                 return
-            active = self._is_active()
-            if not active:
-                self.close()
+            # Instante em que a página recebeu a mensagem: vale também no
+            # reenvio depois de um reinício do host.
+            sent = msg.get("t")
+            learned = sent / 1000.0 if _number(sent) and abs(sent / 1000.0 - now) < 86400 else now
             for event in events:
                 if event["type"] == "device":
-                    changed = self.devices.get(event["device"]) != event["name"]
-                    self.devices[event["device"]] = event["name"]
+                    changed = (self.devices.get(event["device"]) or (None,))[0] != event["name"]
+                    if changed:
+                        self.devices[event["device"]] = (event["name"], learned)
                 else:
-                    changed = self.sources.get(event["ssrc"]) != event["device"]
-                    self.sources[event["ssrc"]] = event["device"]
-                if changed and active and self.file is not None:
-                    self._write({**event, "t": now})
+                    changed = (self.sources.get(event["ssrc"]) or (None,))[0] != event["device"]
+                    if changed:
+                        self.sources[event["ssrc"]] = (event["device"], learned)
+                if changed and status is not None and self.file is not None:
+                    self._write({**event, "t": learned})
         elif kind == "levels":
             frames = msg.get("frames")
-            if not isinstance(frames, list) or not frames:
-                return
-            if not self._is_active():
-                # Gravação acabou: o arquivo fecha e a próxima abre outro,
-                # com o mapa daquele momento.
-                self.close()
+            if status != "recording" or not isinstance(frames, list) or not frames:
                 return
             clean = []
             for frame in frames[:5000]:
@@ -363,7 +379,7 @@ def run_host(stdin=None, session: Optional[Session] = None) -> int:
             try:
                 msg = _read_message(stdin)
             except (_Oversized, ValueError):
-                session.errors += 1
+                session.note_error("message")
                 continue
             if msg is None:
                 return 0
@@ -451,7 +467,8 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
         code = next(iter(candidates))
     else:
         return None
-    devices, sources, frames, late = {}, {}, [], set()
+    pauses = _pause_windows(start, state.get("pauses"))
+    devices, sources, frames, late, errors = {}, {}, [], set(), 0
     for records in candidates[code]:
         for record in records:
             kind, t = record.get("type"), record.get("t")
@@ -464,9 +481,14 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
             elif kind == "source" and isinstance(record.get("ssrc"), int) and _number(t):
                 sources.setdefault(str(record["ssrc"]), []).append([t, record.get("device")])
             elif kind == "levels":
+                # Voz durante a pausa não entra no Bronze.
                 frames.extend(f for f in record.get("frames") or []
                               if isinstance(f, list) and len(f) == 3 and all(_number(x) for x in f)
-                              and lo <= f[0] <= hi)
+                              and lo <= f[0] <= hi and not any(a <= f[0] <= b for a, b in pauses))
+            elif kind == "error" and _number(t) and t <= hi:
+                errors += 1
+            elif kind == "session" and record.get("errors_before"):
+                errors += 1
     for history in sources.values():
         history.sort(key=lambda item: item[0])
     frames.sort()
@@ -475,12 +497,12 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
     return {"version": 2, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
             "window": [lo, hi], "devices": devices, "sources": sources,
-            "late_sources": sorted(late - set(sources)), "frames": frames}
+            "late_sources": sorted(late - set(sources)), "errors": errors, "frames": frames}
 
 
 def _owner(history, ts: float):
-    """Dono da fonte no instante do pacote; antes do primeiro registro, o primeiro."""
-    owner = history[0][1]
+    """Dono da fonte no instante do pacote; antes do primeiro vínculo, ninguém."""
+    owner = None
     for t, device in history:
         if t > ts:
             break
@@ -505,14 +527,22 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
     devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
     late = set(snap.get("late_sources") or [])
     exclude = list(exclude)
-    for ts, ssrc, level in snap.get("frames") or []:
-        if level < SPEAKING_LEVEL or any(a <= ts <= b for a, b in exclude):
+    active = [(ts, str(ssrc)) for ts, ssrc, level in snap.get("frames") or []
+              if level >= SPEAKING_LEVEL and not any(a <= ts <= b for a, b in exclude)]
+    owned = sorted(ts for ts, ssrc in active if sources.get(ssrc) and _owner(sources[ssrc], ts))
+
+    def someone_owned_near(ts):
+        i = bisect.bisect_left(owned, ts - FRAME_SPAN)
+        return i < len(owned) and owned[i] <= ts + FRAME_SPAN
+
+    for ts, ssrc in active:
+        history = sources.get(ssrc)
+        device = _owner(history, ts) if history else None
+        if device is None and ssrc not in late and someone_owned_near(ts):
+            # Fonte sem dono junto de quem tem dono: a mistura do Meet. Sozinha,
+            # é alguém que o host não mapeou (reinício, mensagem perdida).
             continue
-        history = sources.get(str(ssrc))
-        if not history and str(ssrc) not in late:
-            continue
-        name = devices.get(_owner(history, ts)) if history else None
-        per_name.setdefault(name, []).append(ts)
+        per_name.setdefault(devices.get(device) if device else None, []).append(ts)
     intervals = []
     for name, stamps in per_name.items():
         stamps.sort()
@@ -649,7 +679,7 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
         segment = _segment_index(segments, u_start)
         if _segment_index(segments, max(u_start, u_end - 1e-6)) != segment:
             continue
-        lag, correlation = (lags[segment] if lags and segment < len(lags) else (0.0, 1.0))
+        lag, correlation = (lags[segment] if lags and segment < len(lags) else (0.0, 0.0))
         if correlation < MIN_CORRELATION:
             continue
         shift = start + segments[segment][2] - lag
@@ -717,7 +747,8 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
         snap = json.loads(snap_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if snap.get("version") != 2:
+    if snap.get("version") != 2 or snap.get("errors"):
+        # Mensagem do Meet perdida ou ilegível: o mapa pode estar incompleto.
         return None
     ordered = sorted(utterances, key=lambda s: (s.get("start", 0), s.get("end", 0), s.get("channel", 0)))
     state = job.get("state") or {}
@@ -742,7 +773,8 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     spoken: Dict[str, int] = {}
     for item in names.values():
         spoken[item["name"]] = spoken.get(item["name"], 0) + 1
-    roster = sorted(set((snap.get("devices") or {}).values()))
+    # Presença observada = teve voz dentro da gravação; quem só estava no mapa fica de fora.
+    roster = sorted({name for _, _, name in speaking_intervals(snap, exclude=_pause_windows(start, pauses)) if name})
     result = {
         "key": key, "version": ALGORITHM_VERSION, "source": EVIDENCE_SOURCE, "decoder": snap.get("decoder"),
         "meeting_code": snap.get("meeting_code"),
@@ -882,7 +914,9 @@ def status(project_root: Path, flags: Optional[Path] = None, manifest: Optional[
         registered = json.loads(manifest.read_text(encoding="utf-8")).get("path") == str(project_root / "bin" / "castanha-meet-host")
     except (OSError, ValueError):
         registered = False
-    return {"enabled": enabled(), "flags": in_flags, "native_host": registered,
+    from castanha.config import load_config
+    per_channel = (load_config().get("transcription") or {}).get("por_canal") is True
+    return {"enabled": enabled(), "flags": in_flags, "native_host": registered, "per_channel": per_channel,
             "chromium_loaded": _running_chromium_has(extension), "extension": extension}
 
 

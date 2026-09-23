@@ -444,6 +444,8 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
     encontra sem identidade; e o marcador de conclusão é o job, não a presença
     do registro em `recordings`, que o daemon pode reconstruir sozinho.
     """
+    job = dict(job)
+    speakers = job.pop("__speakers", None)
     jobs_dir = bronze_b / ".jobs"
     jobs_dir.mkdir(exist_ok=True)
     ext = Path(str(job.get("audio_path"))).suffix or ".ogg"
@@ -488,8 +490,11 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
         write_json(job_file, new_job)
     # Artefatos por hash do áudio (canais já transcritos, escolha de provedor):
     # com eles o destino não precisa voltar ao ASR nem à VPS.
-    for relative in (Path(".channels") / sha, Path(".providers") / f"{sha}.json",
-                     Path(".speakers") / f"{sha}.json"):
+    speakers_target = bronze_b / ".speakers" / f"{sha}.json"
+    if speakers and not speakers_target.exists():
+        speakers_target.parent.mkdir(exist_ok=True)
+        atomic_write(speakers_target, speakers)
+    for relative in (Path(".channels") / sha, Path(".providers") / f"{sha}.json"):
         source, target = bronze_a / relative, bronze_b / relative
         if source.exists() and not target.exists():
             target.parent.mkdir(exist_ok=True)
@@ -879,11 +884,17 @@ def _job_from_quarantine(fd, op: Dict[str, Any]) -> Dict[str, Any]:
     from castanha.recording_exclusion import _archive, _backup
     removed = op.get("removed_job_file")
     with _archive(fd, op["id"]) as archive:
+        # Quem falou quando (Meet) sai com a exclusão; o movimento leva junto.
+        speakers = next((_backup(archive, item) for item in op.get("files") or []
+                         if item.get("root") == "bronze"
+                         and item.get("parts") == [".speakers", f"{op.get('audio_sha256')}.json"]), None)
         for item in op.get("files") or []:
             if item.get("root") == "bronze" and item.get("parts") == [".jobs", removed]:
                 texto = _backup(archive, item)
                 if texto:
                     job = json.loads(texto)
                     if isinstance(job, dict):
+                        if speakers:
+                            job["__speakers"] = speakers
                         return job
     raise RelocationError("Job da gravação movida não encontrado na quarentena; movimento não concluído")

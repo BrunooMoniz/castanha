@@ -60,6 +60,11 @@ def source_message(device, ssrc, kind=1):
     return gzip.compress(msg((1, msg((2, msg((3, msg((1, msg((1, 458274574110721))), (2, source)))))))))
 
 
+def attribute(utterances, snap, start, pauses=None, lags=None):
+    """Correlação boa em todos os trechos, salvo quando o teste escolhe outra."""
+    return ms.attribute(utterances, snap, start, pauses, [(0.0, 1.0)] * 8 if lags is None else lags)
+
+
 def frames(start, end, ssrc, level=0.2, step=0.02):
     t, out = start, []
     while t < end:
@@ -107,7 +112,7 @@ class SessionTest(unittest.TestCase):
         self.collections(source_message(ANA, 111))
         self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
         self.assertFalse(self.root.exists())
-        self.assertEqual(self.session.devices, {ANA: "Ana Teste"})
+        self.assertEqual({d: v[0] for d, v in self.session.devices.items()}, {ANA: "Ana Teste"})
 
     def test_recording_writes_private_file_with_the_map_known_before_it_started(self):
         self.collections(device_message(ANA, "Ana Teste"))
@@ -156,6 +161,27 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.session.errors, 1)
         self.assertEqual(len(list(self.root.glob("*.jsonl"))), 1)
 
+    def test_pause_keeps_the_map_but_not_the_voices(self):
+        state = {"status": "recording"}
+        session = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0)
+        session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 111, 0.2]]})
+        state["status"] = "paused"
+        session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 222, 0.2]]})
+        session.handle({"code": CODE, "type": "collections", "b64": base64.b64encode(device_message(BETO, "Beto Teste")).decode()})
+        text = next(self.root.glob("*.jsonl")).read_text()
+        self.assertNotIn("222", text)
+        self.assertIn("Beto Teste", text)
+
+    def test_lost_message_is_recorded_and_the_map_keeps_the_learned_time(self):
+        self.collections(source_message(ANA, 111))
+        learned = self.now
+        self.active, self.now = True, self.now + 30
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.send(type="collections", b64="!!!")
+        records = [json.loads(line) for line in next(self.root.glob("*.jsonl")).read_text().splitlines()]
+        self.assertEqual([r["t"] for r in records if r["type"] == "source"], [learned])
+        self.assertEqual([r["reason"] for r in records if r["type"] == "error"], ["decode"])
+
     def test_other_call_in_the_same_tab_is_ignored(self):
         self.active = True
         self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
@@ -202,20 +228,33 @@ class TimelineTest(unittest.TestCase):
                          self.start + 12)
 
     def test_each_remote_utterance_gets_the_participant_who_was_speaking(self):
-        names = ms.attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], self.snap(), self.start)
+        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], self.snap(), self.start)
         self.assertEqual({i: v["name"] for i, v in names.items()}, {0: "Ana Teste", 1: "Beto Teste"})
 
+    def test_without_measured_correlation_nothing_is_named(self):
+        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start), {})
+
+    def test_voice_before_the_source_was_bound_belongs_to_nobody(self):
+        snap = dict(self.snap(), sources={"111": [[self.start + 9, ANA]], "222": [[0, BETO]]})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+
+    def test_unbound_voice_alone_competes_with_a_named_one(self):
+        # Host reiniciado: a fonte 777 não tem dono no mapa e fala sozinha 6 s.
+        snap = self.snap(extra_frames=frames(self.start + 20, self.start + 23, 111)
+                         + frames(self.start + 23, self.start + 29, 777))
+        self.assertEqual(attribute([self.utt(20, 29)], snap, self.start), {})
+
     def test_microphone_never_gets_a_name(self):
-        self.assertEqual(ms.attribute([self.utt(1.1, 3.9, origin="microfone_local")], self.snap(), self.start), {})
+        self.assertEqual(attribute([self.utt(1.1, 3.9, origin="microfone_local")], self.snap(), self.start), {})
 
     def test_mixed_or_silent_interval_keeps_the_channel_label(self):
         # 3.0–6.0 pega Ana e Beto por igual; 9–12 ninguém falava.
-        self.assertEqual(ms.attribute([self.utt(3.0, 6.0), self.utt(9, 12)], self.snap(), self.start), {})
+        self.assertEqual(attribute([self.utt(3.0, 6.0), self.utt(9, 12)], self.snap(), self.start), {})
 
     def test_unknown_source_and_quiet_frames_do_not_count(self):
         snap = self.snap(extra_frames=frames(self.start + 9, self.start + 12, 999)
                          + frames(self.start + 13, self.start + 16, 111, level=0.01))
-        self.assertEqual(ms.attribute([self.utt(9.1, 11.9), self.utt(13.1, 15.9)], snap, self.start), {})
+        self.assertEqual(attribute([self.utt(9.1, 11.9), self.utt(13.1, 15.9)], snap, self.start), {})
 
     def test_utterance_across_a_pause_gets_no_name(self):
         # Ana fala 1–4 no arquivo; a pausa de 60 s cai no meio e Beto só fala durante ela.
@@ -223,50 +262,50 @@ class TimelineTest(unittest.TestCase):
                 "frames": frames(self.start + 1, self.start + 3, 111) + frames(self.start + 3.5, self.start + 62, 222)
                 + frames(self.start + 63, self.start + 64, 111)}
         pauses = [{"paused_at": self.start + 3, "resumed_at": self.start + 63}]
-        self.assertEqual(ms.attribute([self.utt(1.0, 4.0)], snap, self.start, pauses), {})
+        self.assertEqual(attribute([self.utt(1.0, 4.0)], snap, self.start, pauses), {})
         # Logo depois da pausa, mesmo com atraso, a voz de Beto na pausa não conta.
-        names = ms.attribute([self.utt(3.1, 3.9)], snap, self.start, pauses, lags=[(0, 1), (1.0, 1)])
+        names = attribute([self.utt(3.1, 3.9)], snap, self.start, pauses, lags=[(0, 1), (1.0, 1)])
         self.assertEqual(names, {})
 
     def test_participant_voice_without_name_blocks_attribution(self):
         # Dispositivo sem nome conhecido e fonte cujo dono só chegou depois da gravação.
         nameless = self.snap(extra_frames=frames(self.start + 2, self.start + 4, 333))
         nameless["sources"]["333"] = [[0, f"{SPACE}/devices/999"]]
-        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], nameless, self.start), {})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], nameless, self.start), {})
         late = dict(self.snap(extra_frames=frames(self.start + 2, self.start + 4, 444)), late_sources=["444"])
-        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], late, self.start), {})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], late, self.start), {})
 
     def test_meet_mix_source_that_belongs_to_nobody_is_ignored(self):
         snap = self.snap(extra_frames=frames(self.start + 1, self.start + 8, 42))
-        names = ms.attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
+        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
         self.assertEqual([names[0]["name"], names[1]["name"]], ["Ana Teste", "Beto Teste"])
 
     def test_short_interjection_is_tolerated_but_a_real_second_voice_is_not(self):
         snap = self.snap()
         # Beto 5–8; Ana entra 0,3 s (interjeição) e depois 2 s (outra fala).
         quick = dict(snap, frames=snap["frames"] + frames(self.start + 6.0, self.start + 6.2, 111))
-        self.assertEqual(ms.attribute([self.utt(5.2, 7.8)], quick, self.start)[0]["name"], "Beto Teste")
+        self.assertEqual(attribute([self.utt(5.2, 7.8)], quick, self.start)[0]["name"], "Beto Teste")
         mixed = {"devices": snap["devices"], "sources": snap["sources"],
                  "frames": frames(self.start + 20, self.start + 28, 111) + frames(self.start + 28, self.start + 30, 222)}
-        self.assertEqual(ms.attribute([self.utt(20, 30)], mixed, self.start), {})
+        self.assertEqual(attribute([self.utt(20, 30)], mixed, self.start), {})
 
     def test_source_reassigned_mid_call_keeps_the_owner_of_each_moment(self):
         snap = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"},
                 "sources": {"111": [[0, ANA], [self.start + 10, BETO]]},
                 "frames": frames(self.start + 1, self.start + 4, 111) + frames(self.start + 11, self.start + 14, 111)}
-        names = ms.attribute([self.utt(1.1, 3.9), self.utt(11.1, 13.9)], snap, self.start)
+        names = attribute([self.utt(1.1, 3.9), self.utt(11.1, 13.9)], snap, self.start)
         self.assertEqual([names[0]["name"], names[1]["name"]], ["Ana Teste", "Beto Teste"])
 
     def test_weak_correlation_in_a_segment_cancels_only_that_segment(self):
         pauses = [{"paused_at": self.start + 4.5, "resumed_at": self.start + 5.5}]
-        names = ms.attribute([self.utt(1.1, 3.9), self.utt(4.6, 6.9)], self.snap(), self.start, pauses,
+        names = attribute([self.utt(1.1, 3.9), self.utt(4.6, 6.9)], self.snap(), self.start, pauses,
                              lags=[(0, 0.9), (0, 0.05)])
         self.assertEqual(list(names), [0])
 
     def test_pause_moves_later_utterances_to_the_right_speaker(self):
         pauses = [{"paused_at": self.start + 4.5, "resumed_at": self.start + 5.5}]
         # Depois da pausa de 1 s, o segundo 4,6 do arquivo é o 5,6 da chamada (Beto).
-        names = ms.attribute([self.utt(4.6, 6.9)], self.snap(), self.start, pauses)
+        names = attribute([self.utt(4.6, 6.9)], self.snap(), self.start, pauses)
         self.assertEqual(names[0]["name"], "Beto Teste")
 
     def test_lag_is_found_by_correlating_the_system_channel(self):
@@ -332,6 +371,16 @@ class SnapshotTest(unittest.TestCase):
         snap = ms.snapshot(self.state(), self.t0 + 30, root=self.root)
         self.assertEqual([d for _, d in snap["sources"]["111"]], [ANA])
         self.assertEqual(snap["late_sources"], ["555"])
+
+    def test_voices_during_a_pause_and_errors_are_accounted(self):
+        self.session(CODE, self.t0, self.t0 + 60)
+        path = next(self.root.glob("*.jsonl"))
+        with open(path, "a") as handle:
+            handle.write("\n" + json.dumps({"type": "error", "t": self.t0 + 10, "reason": "message"}) + "\n")
+        state = dict(self.state(), pauses=[{"paused_at": self.t0 + 10, "resumed_at": self.t0 + 20}])
+        snap = ms.snapshot(state, self.t0 + 30, root=self.root)
+        self.assertFalse(any(self.t0 + 10 <= f[0] <= self.t0 + 20 for f in snap["frames"]))
+        self.assertEqual(snap["errors"], 1)
 
     def test_no_overlap_means_no_snapshot(self):
         self.session(CODE, self.t0 - 7200, self.t0 - 3600)
@@ -536,3 +585,19 @@ class EngineIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.test_relocation import RelocationFixture  # noqa: E402
+
+
+class RelocationTest(RelocationFixture):
+    def test_moved_recording_takes_its_meet_timeline(self):
+        from castanha.durability import file_sha256, write_json
+        sha = file_sha256(self.storage.bronze_dir / self.a / "capture_job1.ogg")
+        snap = {"version": 2, "devices": {ANA: "Ana Teste"}, "sources": {"111": [[0, ANA]]}, "frames": [[1.0, 111, 0.2]]}
+        write_json(self.storage.bronze_dir / self.a / ".speakers" / f"{sha}.json", snap)
+        self.assertEqual(self.move(to=self.b)["status"], "ok")
+        moved = self.storage.bronze_dir / self.b / ".speakers" / f"{sha}.json"
+        self.assertEqual(json.loads(moved.read_text()), snap)
+        self.assertFalse((self.storage.bronze_dir / self.a / ".speakers" / f"{sha}.json").exists())
+        self.assertNotIn("__speakers", json.dumps(self.jobs(self.b)))

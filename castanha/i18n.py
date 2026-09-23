@@ -13,6 +13,10 @@ STRINGS = {
     "cli.meet.flags": {"en": "{mark} Extension in chromium-flags.conf", "pt": "{mark} Extensão no chromium-flags.conf"},
     "cli.meet.native_host": {"en": "{mark} Native host registered", "pt": "{mark} Host nativo registrado"},
     "cli.meet.chromium": {"en": "{mark} Loaded in the running Chromium", "pt": "{mark} Carregada no Chromium aberto"},
+    "cli.meet.needs_per_channel": {
+        "en": "✗ transcription.por_canal is off: names only appear with per-channel transcription.",
+        "pt": "✗ transcription.por_canal está desligado: os nomes só aparecem com a transcrição por canal.",
+    },
     "cli.meet.restart_chromium": {
         "en": "Close and reopen Chromium to load the extension (it takes effect on the next Meet call).",
         "pt": "Feche e abra o Chromium para carregar a extensão (vale a partir da próxima chamada do Meet).",

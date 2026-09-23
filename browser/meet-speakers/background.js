@@ -3,10 +3,13 @@ const HOST = "io.github.brunoomoniz.castanha.meet";
 chrome.runtime.onConnect.addListener((tab) => {
   if (tab.name !== "castanha-meet-v1") return;
   let native = null;
+  let opened = 0;
   const open = () => {
     try {
       native = chrome.runtime.connectNative(HOST);
       native.onDisconnect.addListener(() => { native = null; void chrome.runtime.lastError; });
+      // Host novo começa com o mapa vazio: a página reenvia o que já sabe.
+      if (opened++) tab.postMessage({ type: "replay" });
     } catch (e) { native = null; }
   };
   tab.onMessage.addListener((msg) => {

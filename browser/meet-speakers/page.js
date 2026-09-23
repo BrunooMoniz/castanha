@@ -13,12 +13,23 @@
     return btoa(s);
   };
   const pcs = [];
+  // O mapa só chega quando alguém entra ou muda. Se o host nativo reiniciar,
+  // ele precisa receber tudo de novo: guardamos as mensagens e reenviamos.
+  const history = [];
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window || !ev.data || ev.data[TAG + "-replay"] !== true) return;
+    for (const msg of history) post({ ...msg, replay: true });
+  });
   const watch = (channel) => {
     if (channel.label !== "collections") return;
     channel.binaryType = "arraybuffer";
     channel.addEventListener("message", (ev) => {
       const t = Date.now();
-      const send = (buf) => post({ type: "collections", code: code(), t, b64: toB64(buf) });
+      const send = (buf) => {
+        const msg = { type: "collections", code: code(), t, b64: toB64(buf) };
+        if (history.length < 2000) history.push(msg);
+        post(msg);
+      };
       if (ev.data instanceof ArrayBuffer) send(ev.data);
       else if (ev.data && ev.data.arrayBuffer) ev.data.arrayBuffer().then(send);
     });
