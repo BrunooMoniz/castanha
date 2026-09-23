@@ -826,8 +826,11 @@ class TeamsTest(unittest.TestCase):
     def test_presence_signal_passes_local_check_when_the_channel_has_sound(self):
         start = self.now
         snap = {"meeting_code": self.TEAMS, "devices": {self.ANA_ID: [[0, "Ana Teste"]]}, "sources": {"414": [[0, self.ANA_ID]]},
-                "frames": frames(start + 0, start + 20, 414)}
+                "frames": frames(start + 0, start + 20, 414), "presence_only": True}
         utt = [{"origin": "audio_sistema", "start": 5.0, "end": 9.0}]
+        # Com nível medido (não só presença), vale a conferência por amplitude.
+        measured = dict(snap, presence_only=False)
+        self.assertEqual(ms.attribute(utt, measured, start, lags=[(0, 1)], envelope=[0.2 + 0.1 * ((i // 2) % 2) for i in range(200)]), {})
         loud = [0.2 + 0.1 * ((i // 2) % 2) for i in range(200)]
         self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=loud)[0]["name"], "Ana Teste")
         self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=[0.0] * 200), {})
@@ -878,10 +881,11 @@ class TeamsPageScriptTest(unittest.TestCase):
         devices = {d for m in mappings for d, _ in m["devices"]}
         history = [(s, o) for m in mappings for s, o in m["sources"]]
         self.assertEqual(devices, {"8:orgid:ana", "8:orgid:beto"})
-        self.assertEqual(history, [(414, "8:orgid:ana"), (415, "8:orgid:beto"), (415, None)])
+        self.assertEqual(history, [(414, "8:orgid:ana"), (415, "8:orgid:beto"), (415, None), (414, None)])
         frames_ = [f for m in posted if m["type"] == "levels" for f in m["frames"]]
         self.assertEqual({f[1] for f in frames_}, {414, 415})
         self.assertTrue(all(f[2] == 0.2 for f in frames_))
+        self.assertTrue(all(m.get("presence") for m in posted if m["type"] == "levels" and m["frames"]))
         # O que a página manda o host aceita e transforma na mesma linha do tempo.
         with tempfile.TemporaryDirectory() as tmp:
             session = ms.Session(recording_active=lambda: {"status": "recording"}, clock=lambda: 1790000005.0,

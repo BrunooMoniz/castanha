@@ -39,7 +39,8 @@
   let overflow = false;
   window.addEventListener("message", (ev) => {
     if (ev.source !== window || !ev.data || ev.data[TAG + "-replay"] !== true) return;
-    for (const msg of history) post({ ...msg, replay: true });
+    const current = code();
+    for (const msg of history) if (msg.code === current) post({ ...msg, replay: true });
     // Histórico cortado: o host marca a janela e não atribui com mapa velho.
     if (overflow) post({ type: "replay_incomplete", code: code(), t: Date.now() });
   });
@@ -73,6 +74,7 @@
   // em que ele chegou. O instante do pacote vale mais que o da consulta.
   const seen = new Map();
   const PRESENT_LEVEL = 0.2;
+  let presenceOnly = true;  // o lote só tem presença (Teams sem audioLevel)
   const teamsSources = new Set();
   // Teams não tem o canal "collections": a própria página mantém a lista de
   // participantes, e cada um responde se uma fonte de áudio (CSRC) é dele.
@@ -92,12 +94,21 @@
   if (TEAMS) setInterval(() => {
     const c = code();
     const call = teamsCall();
-    if (!c || !call) return;
+    // Lista de participantes indisponível: os vínculos antigos não valem mais.
+    const revokeAll = () => {
+      if (!teamsOwner.size || !currentCode) return;
+      const sources = [...teamsOwner.keys()].map((csrc) => [csrc, null]);
+      teamsOwner.clear();
+      const msg = { type: "mapping", code: currentCode, t: Date.now(), devices: [], sources };
+      if (history.length < 20000) history.push(msg); else overflow = true;
+      post(msg);
+    };
+    if (!c || !call) { revokeAll(); return; }
     resetIfNewCall(c);
     const people = [];
     try {
       for (const p of call.participants || []) if (p && p.id && p.displayName) people.push(p);
-    } catch (e) { return; }
+    } catch (e) { revokeAll(); return; }
     const devices = [], sources = [];
     for (const p of people) {
       if (teamsKnown.get(p.id) !== p.displayName) { teamsKnown.set(p.id, p.displayName); devices.push([p.id, String(p.displayName)]); }
@@ -141,7 +152,9 @@
         try { sources = r.getContributingSources(); } catch (e) { continue; }
         for (const s of sources) {
           // Teams pode não mandar o nível: fonte presente no pacote = falando.
-          const level = typeof s.audioLevel === "number" ? s.audioLevel : (TEAMS ? PRESENT_LEVEL : -1);
+          const measured = typeof s.audioLevel === "number";
+          if (measured) presenceOnly = false;
+          const level = measured ? s.audioLevel : (TEAMS ? PRESENT_LEVEL : -1);
           if (level < 0.01) continue;
           const ts = Math.round(epoch(s.timestamp));
           if (seen.get(s.source) === ts) continue;
@@ -156,7 +169,8 @@
     const c = code();
     if (!c) { frames = []; return; }
     resetIfNewCall(c);
-    post({ type: "levels", code: c, t: Date.now(), frames, gaps });
+    post({ type: "levels", code: c, t: Date.now(), frames, gaps, presence: presenceOnly && frames.length > 0 });
+    presenceOnly = true;
     frames = [];
     gaps = [];
   }, 1000);

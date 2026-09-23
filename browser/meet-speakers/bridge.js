@@ -21,6 +21,8 @@
       // quando a gravação acaba.
       if (port && ++beats % 10) return;
     }
+    // Reenvio de outra reunião não reabre nada.
+    if (msg.replay && portCode && msg.code && msg.code !== portCode) return;
     // Reunião nova na mesma aba: outra sessão no host (ele recusa código diferente).
     if (port && msg.code && portCode && msg.code !== portCode) { try { port.disconnect(); } catch (e) {} port = null; }
     try { if (!port) { connect(); portCode = msg.code || null; } if (msg.code && !portCode) portCode = msg.code; port.postMessage(msg); } catch (e) { port = null; }

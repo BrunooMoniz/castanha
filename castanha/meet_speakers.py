@@ -395,7 +395,10 @@ class Session:
                             and not any(a <= ts / 1000.0 <= b for a, b in self._pauses)):
                         clean.append([round(ts / 1000.0, 3), int(ssrc), round(float(level), 3)])
             if clean:
-                self._write({"type": "levels", "t": now, "frames": clean})
+                record = {"type": "levels", "t": now, "frames": clean}
+                if msg.get("presence") is True and platform(self.code) == "teams":
+                    record["presence"] = True  # nível artificial: só diz quem está presente
+                self._write(record)
         elif kind == "mapping":
             # Teams: a página já entrega dispositivo→nome e fonte→dispositivo.
             if platform(self.code) != "teams":
@@ -551,6 +554,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     code = next(iter(candidates))
     pauses = _pause_windows(start, state.get("pauses"), end=stopped_at)
     devices, sources, frames, late, errors, gaps = {}, {}, [], set(), 0, []
+    measured = False
     for records in candidates[code]:
         for record in records:
             kind, t = record.get("type"), record.get("t")
@@ -563,6 +567,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
             elif kind == "source" and isinstance(record.get("ssrc"), int) and _number(t):
                 sources.setdefault(str(record["ssrc"]), []).append([t, record.get("device")])
             elif kind == "levels":
+                measured = measured or record.get("presence") is not True
                 # Voz durante a pausa não entra no Bronze.
                 frames.extend(f for f in record.get("frames") or []
                               if isinstance(f, list) and len(f) == 3 and all(_number(x) for x in f)
@@ -583,7 +588,8 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
     return {"version": 2, "decoder": DECODER_VERSION, "source": evidence_source(code), "meeting_code": code,
             "window": [lo, hi], "recording": [start, stopped_at], "devices": devices, "sources": sources,
-            "late_sources": sorted(late - set(sources)), "errors": errors, "gaps": sorted(gaps), "frames": frames}
+            "late_sources": sorted(late - set(sources)), "errors": errors, "gaps": sorted(gaps),
+            "presence_only": platform(code) == "teams" and not measured, "frames": frames}
 
 
 def _owner(history, ts: float):
@@ -853,9 +859,10 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
             local = [level_at.get(int(math.floor((i * step + shift) / step)), 0.0)
                      for i in range(first, last)]
             piece = envelope[first:last]
-            if platform(snap.get("meeting_code")) == "teams":
+            presence = snap.get("presence_only") is True
+            if presence:
                 local = [1.0 if value > 0 else 0.0 for value in local]  # presença, não amplitude
-            if len(set(local)) == 1 and platform(snap.get("meeting_code")) == "teams":
+            if len(set(local)) == 1 and presence:
                 # Teams só diz "presente": sem variação no trecho, basta haver som gravado.
                 if sum(piece) / len(piece) < PRESENCE_MIN_RMS:
                     continue

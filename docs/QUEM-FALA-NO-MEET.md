@@ -63,7 +63,15 @@ o nível de áudio, a presença da fonte no pacote conta como fala (nível 0,2).
 O código da sessão é `teams-` + hash do thread da reunião. No texto aparece
 `Nome (Teams)` e a evidência é `microsoft_teams_webrtc`. Os objetos internos do
 Teams não são documentados: se sumirem, a página não manda mapa e a transcrição
-fica com o rótulo do canal.
+fica com o rótulo do canal. Participante que sai, ou lista indisponível, revoga os
+vínculos; reunião nova na mesma aba abre outra sessão.
+
+Prova em reunião real (teams.live.com, 23/09/2026): três participantes com
+nome, 14 de 16 falas com o nome certo, 2 recusadas, nenhuma errada. O Teams não
+mandou `audioLevel`: cada lote marca `presence`, e a conferência local vira
+"presença bate com a gravação" (sem variação no trecho, basta haver som). Limite
+que sobra no Teams: aba do Teams silenciada enquanto outro aplicativo toca voz,
+com a mesma pessoa falando sem pausa no Teams, não é detectável por esse sinal.
 
 ## Ligar, conferir, desligar
 

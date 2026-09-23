@@ -48,6 +48,11 @@ run(now + 3000);
 // Beto sai e a fonte 415 segue chegando sem dono: o vínculo é revogado.
 participants = participants.filter((p) => p.id !== "8:orgid:beto");
 run(now + 2000);
+// Lista de participantes quebra: tudo revogado.
+const saved = participants;
+participants = { [Symbol.iterator]() { throw new Error("indisponível"); } };
+run(now + 1000);
+participants = saved;
 // Outra reunião na mesma aba, sem recarregar.
 thread = "19:meeting_OUTRAreuniao@thread.v2";
 participants = [{ id: "8:orgid:carla", displayName: "Carla Teste", hasAudioSource: (s) => s === 500 }];
