@@ -181,6 +181,26 @@ class SessionTest(unittest.TestCase):
         session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 444, 0.2]]})
         self.assertIsNone(session.file)
 
+    def test_batches_around_a_pause_keep_only_recorded_moments(self):
+        state = {"status": "recording", "pauses": []}
+        session = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0)
+        session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 111, 0.2]]})
+        state.update(status="paused", pauses=[{"paused_at": self.now + 1, "resumed_at": None}])
+        self.now += 1.5
+        # Lote em trânsito: 0,8 s antes da pausa entra; 0,2 s depois dela, não.
+        session.handle({"code": CODE, "type": "levels", "frames": [[(self.now - 0.7) * 1000, 222, 0.2],
+                                                                   [(self.now - 0.3) * 1000, 333, 0.2]]})
+        state.update(status="recording", pauses=[{"paused_at": self.now - 0.5, "resumed_at": self.now + 10}])
+        self.now += 10.2
+        # Primeiro lote depois de retomar ainda traz um pacote da pausa.
+        session.handle({"code": CODE, "type": "levels", "frames": [[(self.now - 0.5) * 1000, 444, 0.2],
+                                                                   [(self.now - 0.1) * 1000, 555, 0.2]]})
+        text = next(self.root.glob("*.jsonl")).read_text()
+        self.assertIn(" 222,", text)
+        self.assertIn(" 555,", text)
+        self.assertNotIn(" 333,", text)
+        self.assertNotIn(" 444,", text)
+
     def test_pause_keeps_the_map_but_not_the_voices(self):
         state = {"status": "recording"}
         session = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0)
@@ -311,6 +331,11 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(attribute([self.utt(1.1, 3.9)], nameless, self.start), {})
         late = dict(self.snap(extra_frames=frames(self.start + 2, self.start + 4, 444)), late_sources=["444"])
         self.assertEqual(attribute([self.utt(1.1, 3.9)], late, self.start), {})
+
+    def test_quiet_named_voice_still_competes(self):
+        snap = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                "frames": frames(self.start + 1, self.start + 4.5, 111) + frames(self.start + 4.5, self.start + 10, 222, level=0.04)}
+        self.assertEqual(attribute([self.utt(1, 10)], snap, self.start), {})
 
     def test_unknown_voice_louder_than_the_named_one_competes(self):
         snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 777, level=0.6))
@@ -480,6 +505,11 @@ class InstallTest(unittest.TestCase):
         ms.install(self.project, self.flags, self.manifest)
         ms.uninstall(self.flags, self.manifest)
         self.assertEqual(self.flags.read_text(), "--ozone-platform=wayland\n")
+
+    def test_default_paths_follow_xdg_config_home(self):
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "xdg")}):
+            self.assertEqual(ms._flags_file(), self.root / "xdg" / "chromium-flags.conf")
+            self.assertEqual(ms._native_manifest().parent, self.root / "xdg" / "chromium" / "NativeMessagingHosts")
 
     def test_extension_id_matches_the_manifest_key(self):
         import hashlib

@@ -46,6 +46,8 @@ RETENTION_DAYS = 7
 # Nível linear (0..1, convertido de dBov pelo navegador). Fala medida no teste
 # de 23/09/2026 ficou entre 0,14 e 0,28; fonte calada, 0.
 SPEAKING_LEVEL = 0.05
+# Voz baixa (microfone fraco) não dá nome a ninguém, mas concorre.
+COMPETING_LEVEL = 0.02
 FRAME_SPAN = 0.12
 MERGE_GAP = 0.8
 SNAPSHOT_MARGIN = 5.0
@@ -254,12 +256,14 @@ class Session:
         self._checked_at = -1e9
         self._status: Optional[str] = None
         self._stopped_at: Optional[float] = None
+        self._pauses: List[Tuple[float, float]] = []
 
     def _recording_status(self) -> Optional[str]:
         now = self.clock()
         if now - self._checked_at >= self.check_interval:
             state = self.recording_active()
             self._status = (state or {}).get("status") if state else None
+            self._pauses = _pause_windows(0, (state or {}).get("pauses"), end=1e18)
             stopped = (state or {}).get("stopped_at")
             # Depois do stop, só o último lote (pacotes anteriores ao stop) ainda entra.
             self._stopped_at = stopped if _number(stopped) and now - stopped < STOP_GRACE else None
@@ -338,7 +342,12 @@ class Session:
             if not isinstance(frames, list) or not frames:
                 return
             stopped_at = self._stopped_at if status == "processing" else None
-            if status != "recording" and stopped_at is None:
+            if status == "paused":
+                # Lote em trânsito na pausa: só os pacotes de antes dela.
+                if not self._pauses:
+                    return
+                stopped_at = self._pauses[-1][0]
+            if status not in ("recording", "paused") and stopped_at is None:
                 return
             clean = []
             for frame in frames[:5000]:
@@ -347,7 +356,8 @@ class Session:
                         and all(math.isfinite(x) for x in frame)):
                     ts, ssrc, level = frame
                     if (0 < ssrc < 2 ** 32 and 0 <= level <= 1 and abs(ts / 1000.0 - now) < 3600
-                            and (stopped_at is None or ts / 1000.0 <= stopped_at)):
+                            and (stopped_at is None or ts / 1000.0 <= stopped_at)
+                            and not any(a <= ts / 1000.0 <= b for a, b in self._pauses)):
                         clean.append([round(ts / 1000.0, 3), int(ssrc), round(float(level), 3)])
             if clean:
                 self._write({"type": "levels", "t": now, "frames": clean})
@@ -555,7 +565,8 @@ def _name_at(devices: Dict[str, Any], device: Optional[str], ts: float) -> Optio
     return name
 
 
-def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = ()) -> List[Tuple[float, float, Optional[str]]]:
+def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = (),
+                       min_level: float = SPEAKING_LEVEL) -> List[Tuple[float, float, Optional[str]]]:
     """Intervalos (início, fim, nome) em relógio de parede, a partir dos níveis.
 
     Fonte de participante sem nome conhecido (dispositivo sem nome, ou dono só
@@ -568,7 +579,7 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
     late = set(snap.get("late_sources") or [])
     exclude = list(exclude)
     active = [(ts, str(ssrc), level) for ts, ssrc, level in snap.get("frames") or []
-              if level >= SPEAKING_LEVEL and not any(a <= ts <= b for a, b in exclude)]
+              if level >= min_level and not any(a <= ts <= b for a, b in exclude)]
     owned = sorted((ts, level) for ts, ssrc, level in active if sources.get(ssrc) and _owner(sources[ssrc], ts))
     owned_ts = [ts for ts, _ in owned]
 
@@ -577,7 +588,8 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
         # (medido em 3 sessões reais: diferença máxima 0,0). Uma voz desconhecida
         # mais alta que todos, ou sozinha, é gente e concorre.
         i = bisect.bisect_left(owned_ts, ts - FRAME_SPAN)
-        loudest = max((owned[j][1] for j in range(i, len(owned)) if owned_ts[j] <= ts + FRAME_SPAN), default=None)
+        j = bisect.bisect_right(owned_ts, ts + FRAME_SPAN)
+        loudest = max((owned[k][1] for k in range(i, j)), default=None)
         return loudest is not None and level <= loudest + MIX_MARGIN
 
     for ts, ssrc, level in active:
@@ -711,6 +723,7 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
     segments = audio_segments(start, pauses)
     pause_walls = _pause_windows(start, pauses)
     intervals = speaking_intervals(snap, exclude=pause_walls)
+    competing = speaking_intervals(snap, exclude=pause_walls, min_level=COMPETING_LEVEL)
     result = {}
     for index, utterance in enumerate(utterances):
         if utterance.get("origin") != REMOTE_ORIGIN:
@@ -729,16 +742,18 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
             continue
         shift = start + segments[segment][2] - lag
         lo, hi = u_start + shift - EDGE_TOLERANCE, u_end + shift + EDGE_TOLERANCE
-        overlap: Dict[Optional[str], float] = {}
-        for a, b, name in intervals:
-            if b <= lo or a >= hi:
-                continue
-            overlap[name] = overlap.get(name, 0.0) + min(b, hi) - max(a, lo)
+        def overlaps(source):
+            out: Dict[Optional[str], float] = {}
+            for a, b, who in source:
+                if b > lo and a < hi:
+                    out[who] = out.get(who, 0.0) + min(b, hi) - max(a, lo)
+            return out
+        overlap = overlaps(intervals)
         named = sorted(((n, v) for n, v in overlap.items() if n is not None), key=lambda kv: -kv[1])
         if not named:
             continue
         name, covered = named[0]
-        others = sum(v for n, v in overlap.items() if n != name)
+        others = sum(v for n, v in overlaps(competing).items() if n != name)
         width = hi - lo
         coverage = covered / width
         if coverage < MIN_COVERAGE or others > MAX_OTHER_SHARE * width or (others and covered < DOMINANCE * others):
@@ -859,12 +874,17 @@ def save_snapshot(bronze: Path, audio_sha256: str, state: Dict[str, Any], stoppe
 
 # ------------------------------------------------------------- instalação
 
+def _xdg_config() -> Path:
+    value = os.environ.get("XDG_CONFIG_HOME")
+    return Path(value) if value else Path.home() / ".config"
+
+
 def _flags_file() -> Path:
-    return Path.home() / ".config" / "chromium-flags.conf"
+    return _xdg_config() / "chromium-flags.conf"
 
 
 def _native_manifest() -> Path:
-    return Path.home() / ".config" / "chromium" / "NativeMessagingHosts" / f"{HOST_NAME}.json"
+    return _xdg_config() / "chromium" / "NativeMessagingHosts" / f"{HOST_NAME}.json"
 
 
 def _extension_dir(project_root: Path) -> Path:
