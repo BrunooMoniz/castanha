@@ -552,6 +552,14 @@ class InstallTest(unittest.TestCase):
         ms.uninstall(self.flags, self.manifest)
         self.assertEqual(self.flags.read_text(), "--ozone-platform=wayland\n")
 
+    def test_running_chromium_is_found_with_rewritten_argv(self):
+        proc = self.root / "proc" / "123"
+        proc.mkdir(parents=True)
+        (proc / "cmdline").write_bytes(b"/usr/lib/chromium/chromium --ozone-platform=wayland --load-extension=/x,/ext/meet\0")
+        with patch.object(ms, "Path", side_effect=lambda p="": self.root / "proc" if p == "/proc" else Path(p)):
+            self.assertTrue(ms._running_chromium_has("/ext/meet"))
+            self.assertFalse(ms._running_chromium_has("/outra"))
+
     def test_default_paths_follow_xdg_config_home(self):
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "xdg")}):
             self.assertEqual(ms._flags_file(), self.root / "xdg" / "chromium-flags.conf")

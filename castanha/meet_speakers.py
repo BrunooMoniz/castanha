@@ -1021,9 +1021,12 @@ def _running_chromium_has(extension: str) -> Optional[bool]:
     found = None
     for proc in Path("/proc").glob("[0-9]*"):
         try:
-            args = (proc / "cmdline").read_bytes().split(b"\0")
+            args = [a for a in (proc / "cmdline").read_bytes().split(b"\0") if a]
         except OSError:
             continue
+        if len(args) == 1:
+            # O Chromium reescreve o próprio argv numa string só, separada por espaços.
+            args = args[0].split(b" ")
         if not args or not args[0].endswith(b"/chromium") or any(a.startswith(b"--type=") for a in args):
             continue
         found = any(a.startswith(b"--load-extension=") and extension.encode() in a for a in args)
