@@ -165,6 +165,22 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.session.errors, 1)
         self.assertEqual(len(list(self.root.glob("*.jsonl"))), 1)
 
+    def test_last_batch_before_the_stop_still_enters(self):
+        state = {"status": "recording"}
+        session = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0)
+        session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 111, 0.2]]})
+        state.update(status="processing", stopped_at=self.now + 1)
+        self.now += 1.5
+        session.handle({"code": CODE, "type": "levels", "frames": [[(self.now - 1.0) * 1000, 222, 0.2],
+                                                                   [(self.now - 0.2) * 1000, 333, 0.2]]})
+        text = next(self.root.glob("*.jsonl")).read_text()
+        self.assertIn("222", text)
+        self.assertNotIn("333", text)
+        # Passado o prazo do último lote, o arquivo fecha.
+        self.now += ms.STOP_GRACE
+        session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 444, 0.2]]})
+        self.assertIsNone(session.file)
+
     def test_pause_keeps_the_map_but_not_the_voices(self):
         state = {"status": "recording"}
         session = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0)
@@ -296,6 +312,10 @@ class TimelineTest(unittest.TestCase):
         late = dict(self.snap(extra_frames=frames(self.start + 2, self.start + 4, 444)), late_sources=["444"])
         self.assertEqual(attribute([self.utt(1.1, 3.9)], late, self.start), {})
 
+    def test_unknown_voice_louder_than_the_named_one_competes(self):
+        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 777, level=0.6))
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+
     def test_meet_mix_source_that_belongs_to_nobody_is_ignored(self):
         snap = self.snap(extra_frames=frames(self.start + 1, self.start + 8, 42))
         names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
@@ -338,6 +358,13 @@ class TimelineTest(unittest.TestCase):
         lag, r = ms.estimate_lag(envelope, self.snap(), self.start)
         self.assertAlmostEqual(lag, 0.5, delta=0.11)
         self.assertGreater(r, 0.8)
+
+    def test_periodic_signal_with_two_equal_lags_is_refused(self):
+        # Blocos de 1 s de voz e 1 s de silêncio: atraso 0 e 2 s se encaixam igual.
+        snap = {"frames": [f for k in range(-6, 30, 2) for f in frames(self.start + k, self.start + k + 1, 111)]}
+        envelope = [0.3 if int(i * 0.1) % 2 == 0 else 0.0 for i in range(200)]
+        lag, r = ms.estimate_lag(envelope, snap, self.start)
+        self.assertEqual(r, 0.0)
 
     def test_each_segment_between_pauses_finds_its_own_lag(self):
         # Depois da pausa o arquivo ficou 1 s mais atrasado (áudio acumulado na volta).
@@ -411,12 +438,12 @@ class SnapshotTest(unittest.TestCase):
         self.session(CODE, self.t0 - 7200, self.t0 - 3600)
         self.assertIsNone(ms.snapshot(self.state(), self.t0 + 30, root=self.root))
 
-    def test_two_calls_at_once_need_the_event_code_to_pick_one(self):
+    def test_two_calls_at_once_are_refused_even_with_the_event_code(self):
+        # O gravador pega o som das duas chamadas; o código do evento não isola o áudio.
         self.session(CODE, self.t0, self.t0 + 60)
         self.session("xyz-wxyz-xyz", self.t0, self.t0 + 60, name="Outra Pessoa")
-        self.assertIsNone(ms.snapshot(self.state(), self.t0 + 30, root=self.root))
         meeting = {"conference_url": f"https://meet.google.com/{CODE}?authuser=0"}
-        self.assertEqual(ms.snapshot(self.state(meeting), self.t0 + 30, root=self.root)["meeting_code"], CODE)
+        self.assertIsNone(ms.snapshot(self.state(meeting), self.t0 + 30, root=self.root))
 
 
 class InstallTest(unittest.TestCase):

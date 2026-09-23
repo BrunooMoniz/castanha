@@ -38,6 +38,9 @@ EVIDENCE_SOURCE = "google_meet_webrtc"
 MEET_CODE_RE = re.compile(r"^[a-z]{3,}-[a-z]{3,}-[a-z]{3,}$")
 DEVICE_RE = re.compile(r"^spaces/[\w-]+/devices/\d+$")
 MAX_MESSAGE_BYTES = 1 << 20
+# A extensão manda níveis a cada 1 s: o recorte espera o último lote.
+STOP_GRACE = 5.0
+FINAL_BATCH_WAIT = 1.5
 MAX_INFLATED_BYTES = 4 << 20
 RETENTION_DAYS = 7
 # Nível linear (0..1, convertido de dBov pelo navegador). Fala medida no teste
@@ -60,6 +63,10 @@ LAG_WINDOW = 3.0
 LAG_STEP = 0.1
 MIN_CORRELATION = 0.2
 REMOTE_ORIGIN = "audio_sistema"
+MIX_MARGIN = 0.02
+# Dois picos de correlação quase iguais em atrasos distantes: alinhamento ambíguo.
+LAG_AMBIGUITY = 0.05
+LAG_DISTINCT = 0.5
 
 
 def _state_dir() -> Path:
@@ -208,7 +215,7 @@ def _recording_active() -> Optional[Dict[str, Any]]:
         state = json.loads((_state_dir() / "state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return state if state.get("status") in ("recording", "paused") else None
+    return state if state.get("status") in ("recording", "paused", "processing") else None
 
 
 def prune(now: Optional[float] = None, days: int = RETENTION_DAYS) -> None:
@@ -246,12 +253,16 @@ class Session:
         self.errors = 0
         self._checked_at = -1e9
         self._status: Optional[str] = None
+        self._stopped_at: Optional[float] = None
 
     def _recording_status(self) -> Optional[str]:
         now = self.clock()
         if now - self._checked_at >= self.check_interval:
             state = self.recording_active()
             self._status = (state or {}).get("status") if state else None
+            stopped = (state or {}).get("stopped_at")
+            # Depois do stop, só o último lote (pacotes anteriores ao stop) ainda entra.
+            self._stopped_at = stopped if _number(stopped) and now - stopped < STOP_GRACE else None
             self._checked_at = now
         return self._status
 
@@ -295,6 +306,8 @@ class Session:
         kind = msg.get("type")
         now = self.clock()
         status = self._recording_status()
+        if status == "processing" and self._stopped_at is None:
+            status = None
         if status is None:
             # Gravação acabou: o arquivo fecha e a próxima abre outro, com o mapa daquele momento.
             self.close()
@@ -322,7 +335,10 @@ class Session:
                     self._write({**event, "t": learned})
         elif kind == "levels":
             frames = msg.get("frames")
-            if status != "recording" or not isinstance(frames, list) or not frames:
+            if not isinstance(frames, list) or not frames:
+                return
+            stopped_at = self._stopped_at if status == "processing" else None
+            if status != "recording" and stopped_at is None:
                 return
             clean = []
             for frame in frames[:5000]:
@@ -330,7 +346,8 @@ class Session:
                         and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in frame)
                         and all(math.isfinite(x) for x in frame)):
                     ts, ssrc, level = frame
-                    if 0 < ssrc < 2 ** 32 and 0 <= level <= 1 and abs(ts / 1000.0 - now) < 3600:
+                    if (0 < ssrc < 2 ** 32 and 0 <= level <= 1 and abs(ts / 1000.0 - now) < 3600
+                            and (stopped_at is None or ts / 1000.0 <= stopped_at)):
                         clean.append([round(ts / 1000.0, 3), int(ssrc), round(float(level), 3)])
             if clean:
                 self._write({"type": "levels", "t": now, "frames": clean})
@@ -465,13 +482,11 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
         candidates.setdefault(header.get("code"), []).append(records)
     if not candidates:
         return None
-    wanted = meet_code(state.get("current_meeting"))
-    if wanted in candidates:
-        code = wanted
-    elif len(candidates) == 1:
-        code = next(iter(candidates))
-    else:
+    # Duas chamadas ao mesmo tempo: o gravador pega o som das duas, e o código
+    # do evento não isola o áudio. Sem atribuição.
+    if len(candidates) != 1:
         return None
+    code = next(iter(candidates))
     pauses = _pause_windows(start, state.get("pauses"), end=stopped_at)
     devices, sources, frames, late, errors = {}, {}, [], set(), 0
     for records in candidates[code]:
@@ -552,19 +567,22 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
     devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
     late = set(snap.get("late_sources") or [])
     exclude = list(exclude)
-    active = [(ts, str(ssrc)) for ts, ssrc, level in snap.get("frames") or []
+    active = [(ts, str(ssrc), level) for ts, ssrc, level in snap.get("frames") or []
               if level >= SPEAKING_LEVEL and not any(a <= ts <= b for a, b in exclude)]
-    owned = sorted(ts for ts, ssrc in active if sources.get(ssrc) and _owner(sources[ssrc], ts))
+    owned = sorted((ts, level) for ts, ssrc, level in active if sources.get(ssrc) and _owner(sources[ssrc], ts))
+    owned_ts = [ts for ts, _ in owned]
 
-    def someone_owned_near(ts):
-        i = bisect.bisect_left(owned, ts - FRAME_SPAN)
-        return i < len(owned) and owned[i] <= ts + FRAME_SPAN
+    def looks_like_mix(ts, level):
+        # A mistura do Meet nunca aparece sozinha nem mais alta que quem fala
+        # (medido em 3 sessões reais: diferença máxima 0,0). Uma voz desconhecida
+        # mais alta que todos, ou sozinha, é gente e concorre.
+        i = bisect.bisect_left(owned_ts, ts - FRAME_SPAN)
+        loudest = max((owned[j][1] for j in range(i, len(owned)) if owned_ts[j] <= ts + FRAME_SPAN), default=None)
+        return loudest is not None and level <= loudest + MIX_MARGIN
 
-    for ts, ssrc in active:
+    for ts, ssrc, level in active:
         history = sources.get(ssrc)
-        if not history and ssrc not in late and someone_owned_near(ts):
-            # Fonte que nunca teve dono, junto de quem tem: a mistura do Meet.
-            # Sozinha, é alguém que o host não mapeou (reinício, mensagem perdida).
+        if not history and ssrc not in late and looks_like_mix(ts, level):
             continue
         device = _owner(history, ts) if history else None
         per_name.setdefault(_name_at(devices, device, ts), []).append(ts)
@@ -670,13 +688,15 @@ def estimate_lags(envelope: List[float], snap: Dict[str, Any], start: float,
         lo, hi = int(math.ceil(a / step)), min(len(envelope), int(b / step) if math.isfinite(b) else len(envelope))
         piece = envelope[lo:hi]
         walls = [start + i * step + paused for i in range(lo, hi)]
-        best = (0.0, -1.0)
+        scores = []
         for k in range(-steps, steps + 1):
             lag = k * step
             meet = [level_at.get(int(math.floor((w - lag) / step)), 0.0) for w in walls]
-            r = _pearson(piece, meet)
-            if r > best[1] + 1e-9 or (abs(r - best[1]) <= 1e-9 and abs(lag) < abs(best[0])):
-                best = (round(lag, 3), r)
+            scores.append((round(lag, 3), _pearson(piece, meet)))
+        best = max(scores, key=lambda item: (item[1], -abs(item[0])))
+        if any(abs(lag - best[0]) > LAG_DISTINCT and r >= best[1] - LAG_AMBIGUITY for lag, r in scores):
+            # Sinal periódico ou pobre: o atraso não é único e o nome poderia ser o do vizinho.
+            best = (best[0], 0.0)
         out.append(best)
     return out
 

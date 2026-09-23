@@ -305,7 +305,7 @@ class CastanhaEngine:
         if state.get("status") not in ["recording", "paused", "processing"]:
             return {"status": "error", "message": "Nenhuma gravação em andamento para finalizar."}
 
-        self.state_mgr.write({"status": "processing", "processing_pid": os.getpid(),
+        self.state_mgr.write({"status": "processing", "processing_pid": os.getpid(), "stopped_at": time.time(),
                               "audio_peak": 0.0, "audio_peak_updated_at": 0.0,
                               "mic_peak": 0.0, "call_peak": 0.0, "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0})
         notify(t("notify.finishing_title"), t("notify.finishing_body"))
@@ -391,7 +391,10 @@ class CastanhaEngine:
                 write_json(job_file, job)
                 from castanha import meet_speakers
                 if meet_speakers.enabled(self.config):
-                    meet_speakers.save_snapshot(bronze, job["sha256"], state, time.time())
+                    stopped_at = self.state_mgr.read().get("stopped_at") or time.time()
+                    # O último lote de níveis ainda está a caminho do host.
+                    time.sleep(max(0.0, stopped_at + meet_speakers.FINAL_BATCH_WAIT - time.time()))
+                    meet_speakers.save_snapshot(bronze, job["sha256"], state, stopped_at)
                 metadata = self.storage._read_bronze_metadata(slug) or {
                     "slug": slug, "title": title, "recorded_at": job["recorded_at"],
                     "mode": state.get("mode", "dual"), "calendar_event": current_meeting,
