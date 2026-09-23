@@ -222,6 +222,12 @@ class SessionTest(unittest.TestCase):
         self.assertEqual([r["t"] for r in records if r["type"] == "source"], [learned])
         self.assertEqual([r["reason"] for r in records if r["type"] == "error"], ["decode"])
 
+    def test_page_stall_is_recorded(self):
+        self.active = True
+        self.send(type="levels", frames=[], gaps=[[self.now * 1000 - 3000, self.now * 1000]])
+        text = next(self.root.glob("*.jsonl")).read_text()
+        self.assertIn('"type": "gap"', text)
+
     def test_incomplete_replay_is_recorded_as_error(self):
         self.active = True
         self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
@@ -300,6 +306,11 @@ class TimelineTest(unittest.TestCase):
         snap = self.snap(extra_frames=frames(self.start + 20, self.start + 23, 111)
                          + frames(self.start + 23, self.start + 29, 777))
         self.assertEqual(attribute([self.utt(20, 29)], snap, self.start), {})
+
+    def test_utterance_over_a_page_stall_gets_no_name(self):
+        snap = dict(self.snap(), gaps=[[self.start + 2.0, self.start + 3.0]])
+        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
+        self.assertEqual(list(names), [1])
 
     def test_microphone_never_gets_a_name(self):
         self.assertEqual(attribute([self.utt(1.1, 3.9, origin="microfone_local")], self.snap(), self.start), {})

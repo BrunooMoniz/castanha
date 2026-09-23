@@ -53,8 +53,16 @@
   // em que ele chegou. O instante do pacote vale mais que o da consulta.
   const seen = new Map();
   let frames = [];
+  // Travada da página: sem consulta, falas de outra pessoa podem sumir. O
+  // host recebe o buraco e não atribui nome às falas que caem nele. Acima de
+  // 1,5 s: aba em segundo plano e sem som tem o timer reduzido a 1 s.
+  let gaps = [];
+  let lastPoll = Date.now();
   const epoch = (ts) => (ts > 1e12 ? ts : performance.timeOrigin + ts);
   setInterval(() => {
+    const nowPoll = Date.now();
+    if (nowPoll - lastPoll > 1500 && pcs.length) gaps.push([lastPoll, nowPoll]);
+    lastPoll = nowPoll;
     for (let i = pcs.length - 1; i >= 0; i--) {
       const pc = pcs[i];
       if (pc.connectionState === "closed") { pcs.splice(i, 1); continue; }
@@ -77,8 +85,9 @@
   setInterval(() => {
     const c = code();
     if (!c) { frames = []; return; }
-    post({ type: "levels", code: c, t: Date.now(), frames });
+    post({ type: "levels", code: c, t: Date.now(), frames, gaps });
     frames = [];
+    gaps = [];
   }, 1000);
   window.addEventListener("pagehide", () => post({ type: "bye", code: code(), t: Date.now() }));
 })();

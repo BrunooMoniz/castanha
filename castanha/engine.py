@@ -554,10 +554,9 @@ class CastanhaEngine:
         jobs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in jobs_dir.glob("*.json")]
         removed = set(metadata.get("removed_job_ids", []))
         jobs = [(p, job) for p, job in jobs if job.get("id") not in removed]
-        for path, job in jobs:
+        for path, _ in jobs:
             # Retomável por qualquer entrada (stop, retry, sync): falta o recorte, tenta de novo.
-            if job.get("stage") != "done":
-                self._save_meet_snapshot(bronze, path)
+            self._save_meet_snapshot(bronze, path)
         if not jobs:
             return {"status": "empty", "result": {"slug": slug, "zinom": metadata.get("zinom", {}),
                     "content_status": "empty", "message": "Nenhuma gravação ativa para processar"}}

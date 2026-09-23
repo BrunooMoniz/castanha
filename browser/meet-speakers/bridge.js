@@ -15,7 +15,7 @@
     if (ev.source !== window || ev.origin !== location.origin || !ev.data || !ev.data[TAG]) return;
     const msg = ev.data[TAG];
     if (!msg || typeof msg.type !== "string") return;
-    if (msg.type === "levels" && (!msg.frames || !msg.frames.length)) {
+    if (msg.type === "levels" && (!msg.frames || !msg.frames.length) && !(msg.gaps && msg.gaps.length)) {
       // Silêncio: um sinal a cada 10 s basta para o host fechar o arquivo
       // quando a gravação acaba.
       if (port && ++beats % 10) return;

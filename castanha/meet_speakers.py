@@ -349,8 +349,12 @@ class Session:
                 if changed and status is not None and self.file is not None:
                     self._write({**event, "t": learned})
         elif kind == "levels":
-            frames = msg.get("frames")
-            if not isinstance(frames, list) or not frames:
+            frames = msg.get("frames") if isinstance(msg.get("frames"), list) else []
+            gaps = [g for g in (msg.get("gaps") if isinstance(msg.get("gaps"), list) else [])[:100]
+                    if isinstance(g, list) and len(g) == 2 and all(_number(x) for x in g) and g[0] <= g[1]]
+            if gaps and status is not None:
+                self._write({"type": "gap", "t": now, "gaps": [[g[0] / 1000.0, g[1] / 1000.0] for g in gaps]})
+            if not frames:
                 return
             stopped_at = self._stopped_at if status == "processing" else None
             if status == "paused":
@@ -509,7 +513,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
         return None
     code = next(iter(candidates))
     pauses = _pause_windows(start, state.get("pauses"), end=stopped_at)
-    devices, sources, frames, late, errors = {}, {}, [], set(), 0
+    devices, sources, frames, late, errors, gaps = {}, {}, [], set(), 0, []
     for records in candidates[code]:
         for record in records:
             kind, t = record.get("type"), record.get("t")
@@ -528,6 +532,10 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
                               and lo <= f[0] <= hi and not any(a <= f[0] <= b for a, b in pauses))
             elif kind == "error" and _number(t) and t <= hi:
                 errors += 1
+            elif kind == "gap":
+                gaps.extend(g for g in record.get("gaps") or []
+                            if isinstance(g, list) and len(g) == 2 and all(_number(x) for x in g)
+                            and g[1] >= lo and g[0] <= hi)
             elif kind == "session" and record.get("errors_before"):
                 errors += 1
     for history in list(sources.values()) + list(devices.values()):
@@ -538,7 +546,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
     return {"version": 2, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
             "window": [lo, hi], "recording": [start, stopped_at], "devices": devices, "sources": sources,
-            "late_sources": sorted(late - set(sources)), "errors": errors, "frames": frames}
+            "late_sources": sorted(late - set(sources)), "errors": errors, "gaps": sorted(gaps), "frames": frames}
 
 
 def _owner(history, ts: float):
@@ -776,6 +784,8 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
             continue
         shift = start + segments[segment][2] - lag
         lo, hi = u_start + shift - EDGE_TOLERANCE, u_end + shift + EDGE_TOLERANCE
+        if any(a < hi and b > lo for a, b in snap.get("gaps") or []):
+            continue  # a página travou nesse trecho: a coleta pode ter perdido outra voz
         def overlaps(source):
             out: Dict[Optional[str], float] = {}
             for a, b, who in source:
