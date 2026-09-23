@@ -363,10 +363,23 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
 
     def test_meet_mix_source_that_belongs_to_nobody_is_ignored(self):
-        # Como na chamada real: a mistura acompanha quem fala, nunca sozinha.
-        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 42) + frames(self.start + 5, self.start + 8, 42))
-        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
+        # Como na chamada real: a mistura acompanha toda a fala com dono, nunca sozinha.
+        base = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]}}
+        talk = [f for k in range(0, 60, 8) for f in frames(self.start + k + 1, self.start + k + 4, 111)
+                + frames(self.start + k + 5, self.start + k + 8, 222)]
+        mix = [[t, 42, level] for t, _, level in talk]
+        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], dict(base, frames=talk + mix), self.start)
         self.assertEqual([names[0]["name"], names[1]["name"]], ["Ana Teste", "Beto Teste"])
+
+    def test_unknown_source_only_over_someone_is_a_person_not_the_mix(self):
+        # Só 3 s por cima de Ana: não acompanha a fala toda, então é gente.
+        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 777, level=0.1))
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+
+    def test_very_quiet_reply_still_competes(self):
+        snap = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                "frames": frames(self.start + 1, self.start + 4.6, 111) + frames(self.start + 4.6, self.start + 11, 222, level=0.012)}
+        self.assertEqual(attribute([self.utt(1, 11)], snap, self.start), {})
 
     def test_short_interjection_is_tolerated_but_a_real_second_voice_is_not(self):
         snap = self.snap()
@@ -684,7 +697,8 @@ class EngineIntegrationTest(unittest.TestCase):
         self.assertNotIn("(Meet)", (bronze / "transcript_raw.txt").read_text())
         self.assertEqual(list((bronze / ".speakers").glob("*.result.json")), [])
 
-    def test_snapshot_is_taken_on_resume_if_the_stop_died_before_it(self):
+    def test_snapshot_is_taken_on_retry_if_the_stop_died_before_it(self):
+        from castanha.transcription import TranscriptionResult, Utterance
         engine = self.engine()
         with patch.object(engine, "_save_meet_snapshot", side_effect=RuntimeError("queda")):
             with self.assertRaises(RuntimeError):
@@ -692,7 +706,17 @@ class EngineIntegrationTest(unittest.TestCase):
         slug = engine.state_mgr.read()["capture_slug"]
         bronze = engine.storage.bronze_dir / slug
         self.assertFalse((bronze / ".speakers").exists())
-        self.stop(engine)
+        engine.state_mgr.write({"status": "idle"})
+        # Entrada de recuperação que não passa pelo stop: castanha retry.
+        with patch("castanha.engine.get_transcriber") as provider, \
+             patch.object(engine.summarizer, "generate_silver", return_value="## Resumo\n\nx"), \
+             patch.object(engine.summarizer, "generate_gold", return_value={"facts": []}):
+            provider.return_value.transcribe.side_effect = lambda path, mode="dual": (
+                TranscriptionResult("oi", [Utterance("Falante", "oi", 0.2, 0.9)], "fixture", {})
+                if int(Path(path).stem[-1]) == 0 else
+                TranscriptionResult("ana fala beto fala", [Utterance("Falante", "ana fala", 1.1, 3.9),
+                                                           Utterance("Falante", "beto fala", 5.1, 7.9)], "fixture", {}))
+            engine.reprocess_meeting(slug)
         self.assertIn("Ana Teste (Meet): ana fala", (bronze / "transcript_raw.txt").read_text())
 
     def test_disabled_flag_keeps_channel_labels(self):

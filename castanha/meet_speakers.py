@@ -47,14 +47,14 @@ RETENTION_DAYS = 7
 # de 23/09/2026 ficou entre 0,14 e 0,28; fonte calada, 0.
 SPEAKING_LEVEL = 0.05
 # Voz baixa (microfone fraco) não dá nome a ninguém, mas concorre.
-COMPETING_LEVEL = 0.02
+COMPETING_LEVEL = 0.01  # o piso que a extensão manda: tudo que chega concorre
 FRAME_SPAN = 0.12
 MERGE_GAP = 0.8
 SNAPSHOT_MARGIN = 5.0
 # Atribuição: a fala precisa estar coberta pelo participante e ele precisa
 # dominar o intervalo; empate ou cobertura rala mantém o rótulo do canal.
 EDGE_TOLERANCE = 0.3
-MIN_COVERAGE = 0.3
+MIN_COVERAGE = 0.5
 DOMINANCE = 3.0
 # Soma das outras vozes (com ou sem nome) no intervalo, como fração dele.
 MAX_OTHER_SHARE = 0.15
@@ -66,6 +66,10 @@ LAG_STEP = 0.1
 MIN_CORRELATION = 0.2
 REMOTE_ORIGIN = "audio_sistema"
 MIX_MARGIN = 0.02
+# A mistura acompanha TODA a fala com dono (100% nas 3 sessões reais medidas).
+MIX_MIN_COVERAGE = 0.8
+MIX_MIN_EVIDENCE = 300  # pacotes de 0,1 s com dono: 30 s de fala para concluir
+MAX_SNAPSHOT_BYTES = 16 << 20
 # Outras vozes: no máximo 15% do intervalo e nunca mais que 1 s (uma frase
 # curta de outra pessoa já é uma fala dela).
 MAX_OTHER_SECONDS = 1.0
@@ -599,10 +603,22 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
         loudest = max((owned[k][1] for k in range(i, j)), default=None)
         return loudest is not None and level <= loudest + MIX_MARGIN
 
-    # Uma fonte sem dono que alguma vez não se comportou como mistura é gente
-    # em todos os seus pacotes, inclusive quando fala por cima de alguém.
-    people = {ssrc for ts, ssrc, level in active
-              if not sources.get(ssrc) and ssrc not in late and not looks_like_mix(ts, level)}
+    # Mistura = fonte sem dono que nunca fala sozinha nem mais alta que quem
+    # tem dono E acompanha quase toda a fala com dono. Qualquer outra fonte sem
+    # dono é gente em todos os seus pacotes, inclusive por cima de alguém.
+    owned_bins = {int(ts * 10) for ts in owned_ts if ts >= 0}
+    unowned: Dict[str, set] = {}
+    people = set()
+    for ts, ssrc, level in active:
+        if sources.get(ssrc) or ssrc in late:
+            continue
+        unowned.setdefault(ssrc, set()).add(int(ts * 10))
+        if not looks_like_mix(ts, level):
+            people.add(ssrc)
+    for ssrc, bins in unowned.items():
+        covered = sum(1 for k in owned_bins if k in bins or k - 1 in bins or k + 1 in bins)
+        if len(owned_bins) < MIX_MIN_EVIDENCE or covered < MIX_MIN_COVERAGE * len(owned_bins):
+            people.add(ssrc)
     for ts, ssrc, level in active:
         history = sources.get(ssrc)
         if not history and ssrc not in late and ssrc not in people:
@@ -895,6 +911,10 @@ def save_snapshot(bronze: Path, audio_sha256: str, state: Dict[str, Any], stoppe
         if not snap:
             return None
         from castanha.durability import write_json
+        if len(json.dumps(snap)) > MAX_SNAPSHOT_BYTES:
+            # Grande demais para a exclusão/restauração copiarem: sem nomes nesta gravação.
+            print("[Castanha] Linha do tempo do Meet grande demais; gravação fica sem nomes", file=sys.stderr)
+            return None
         path = _speakers_dir(bronze) / f"{audio_sha256}.json"
         write_json(path, snap)
         return path

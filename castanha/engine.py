@@ -272,7 +272,9 @@ class CastanhaEngine:
             return
         if (bronze / ".speakers" / f"{job.get('sha256')}.json").exists():
             return
-        stopped_at = self.state_mgr.read().get("stopped_at") or time.time()
+        stopped_at = job.get("stopped_at")
+        if not isinstance(stopped_at, (int, float)):
+            return  # job anterior ao recurso: sem janela confiável
         # O último lote de níveis ainda está a caminho do host.
         time.sleep(max(0.0, min(meet_speakers.FINAL_BATCH_WAIT, stopped_at + meet_speakers.FINAL_BATCH_WAIT - time.time())))
         meet_speakers.save_snapshot(bronze, job.get("sha256"), job.get("state") or {}, stopped_at)
@@ -405,7 +407,8 @@ class CastanhaEngine:
                 durable_audio = bronze / f"capture_{job_id}{audio_path.suffix}"
                 atomic_write(durable_audio, audio_path)
                 job = {"id": job_id, "audio_path": str(durable_audio), "sha256": file_sha256(durable_audio), "state": state,
-                       "stage": "pending", "recorded_at": state.get("started_at") or datetime.now().isoformat()}
+                       "stage": "pending", "recorded_at": state.get("started_at") or datetime.now().isoformat(),
+                       "stopped_at": self.state_mgr.read().get("stopped_at") or time.time()}
                 write_json(job_file, job)
                 metadata = self.storage._read_bronze_metadata(slug) or {
                     "slug": slug, "title": title, "recorded_at": job["recorded_at"],
@@ -419,7 +422,6 @@ class CastanhaEngine:
                 metadata["processing_status"] = "pending"
                 metadata.setdefault("transcription_provider", "pending")
                 write_json(bronze / "metadata.json", metadata)
-            self._save_meet_snapshot(bronze, job_file)
 
         result = self.process_pending(slug)
         self.state_mgr.write({"status": "idle", "pid": None, "processing_pid": None, "audio_path": None,
@@ -552,6 +554,10 @@ class CastanhaEngine:
         jobs = [(p, json.loads(p.read_text(encoding="utf-8"))) for p in jobs_dir.glob("*.json")]
         removed = set(metadata.get("removed_job_ids", []))
         jobs = [(p, job) for p, job in jobs if job.get("id") not in removed]
+        for path, job in jobs:
+            # Retomável por qualquer entrada (stop, retry, sync): falta o recorte, tenta de novo.
+            if job.get("stage") != "done":
+                self._save_meet_snapshot(bronze, path)
         if not jobs:
             return {"status": "empty", "result": {"slug": slug, "zinom": metadata.get("zinom", {}),
                     "content_status": "empty", "message": "Nenhuma gravação ativa para processar"}}
