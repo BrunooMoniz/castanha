@@ -2,6 +2,7 @@
 (() => {
   const TAG = "castanha-meet-v1";
   let port = null;
+  let portCode = null;
   let beats = 0;
   const replay = () => window.postMessage({ [TAG + "-replay"]: true }, location.origin);
   const connect = () => {
@@ -20,6 +21,8 @@
       // quando a gravação acaba.
       if (port && ++beats % 10) return;
     }
-    try { if (!port) connect(); port.postMessage(msg); } catch (e) { port = null; }
+    // Reunião nova na mesma aba: outra sessão no host (ele recusa código diferente).
+    if (port && msg.code && portCode && msg.code !== portCode) { try { port.disconnect(); } catch (e) {} port = null; }
+    try { if (!port) { connect(); portCode = msg.code || null; } if (msg.code && !portCode) portCode = msg.code; port.postMessage(msg); } catch (e) { port = null; }
   });
 })();

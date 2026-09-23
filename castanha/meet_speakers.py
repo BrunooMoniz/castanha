@@ -93,6 +93,7 @@ MAX_OTHER_SECONDS = 1.0
 LOCAL_MARGIN = 1.0
 LOCAL_MIN_BINS = 20
 LOCAL_CORRELATION = 0.1
+PRESENCE_MIN_RMS = 0.005
 # Dois picos de correlação quase iguais em atrasos distantes: alinhamento ambíguo.
 LAG_AMBIGUITY = 0.05
 LAG_DISTINCT = 0.5
@@ -407,8 +408,9 @@ class Session:
                         and isinstance(pair[1], str) and pair[1].strip() and pair[1].isprintable()):
                     events.append({"type": "device", "device": pair[0], "name": pair[1].strip()[:200]})
             for pair in (msg.get("sources") if isinstance(msg.get("sources"), list) else [])[:500]:
+                # Dono None = vínculo revogado (a fonte deixou de pertencer a alguém conhecido).
                 if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], int) and not isinstance(pair[0], bool)
-                        and 0 < pair[0] < 2 ** 32 and isinstance(pair[1], str) and TEAMS_ID_RE.match(pair[1])):
+                        and 0 < pair[0] < 2 ** 32 and (pair[1] is None or (isinstance(pair[1], str) and TEAMS_ID_RE.match(pair[1])))):
                     events.append({"type": "source", "device": pair[1], "ssrc": pair[0]})
             self._apply_mapping(events, learned, status)
         elif kind == "replay_incomplete":
@@ -660,7 +662,9 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
             people.add(ssrc)
     for ssrc, bins in unowned.items():
         covered = sum(1 for k in owned_bins if k in bins or k - 1 in bins or k + 1 in bins)
-        if len(owned_bins) < MIX_MIN_EVIDENCE or covered < MIX_MIN_COVERAGE * len(owned_bins):
+        if (len(owned_bins) < MIX_MIN_EVIDENCE or covered < MIX_MIN_COVERAGE * len(owned_bins)
+                or platform(snap.get("meeting_code")) == "teams"):
+            # O Teams não tem fonte de mistura e não manda nível: toda fonte sem dono é gente.
             people.add(ssrc)
     for ts, ssrc, level in active:
         history = sources.get(ssrc)
@@ -848,7 +852,14 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
                 continue
             local = [level_at.get(int(math.floor((i * step + shift) / step)), 0.0)
                      for i in range(first, last)]
-            if _pearson(envelope[first:last], local) < LOCAL_CORRELATION:
+            piece = envelope[first:last]
+            if platform(snap.get("meeting_code")) == "teams":
+                local = [1.0 if value > 0 else 0.0 for value in local]  # presença, não amplitude
+            if len(set(local)) == 1 and platform(snap.get("meeting_code")) == "teams":
+                # Teams só diz "presente": sem variação no trecho, basta haver som gravado.
+                if sum(piece) / len(piece) < PRESENCE_MIN_RMS:
+                    continue
+            elif _pearson(piece, local) < LOCAL_CORRELATION:
                 continue
         result[index] = {"name": name, "coverage": round(coverage, 3)}
     return result

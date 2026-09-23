@@ -808,6 +808,30 @@ class TeamsTest(unittest.TestCase):
                              "devices": [[self.ANA_ID, "Ana Teste"]], "sources": [[414, self.ANA_ID]]})
         self.assertEqual(self.session.devices, {})
 
+    def test_revoked_source_competes_without_a_name(self):
+        start = self.now
+        snap = {"meeting_code": self.TEAMS, "devices": {self.ANA_ID: [[0, "Ana Teste"]], self.BETO_ID: [[0, "Beto Teste"]]},
+                "sources": {"414": [[0, self.ANA_ID], [start + 5, None]], "415": [[0, self.BETO_ID]]},
+                "frames": frames(start + 6, start + 9, 414) + frames(start + 6, start + 7, 415)}
+        self.assertEqual(attribute([{"origin": "audio_sistema", "start": 6.1, "end": 8.9}], snap, start), {})
+
+    def test_teams_has_no_mix_source(self):
+        # Fonte sem vínculo sempre junto de Ana (mesmo nível artificial): no Teams é gente.
+        start = self.now
+        talk = [f for k in range(0, 60, 8) for f in frames(start + k + 1, start + k + 4, 414)]
+        snap = {"meeting_code": self.TEAMS, "devices": {self.ANA_ID: [[0, "Ana Teste"]]}, "sources": {"414": [[0, self.ANA_ID]]},
+                "frames": talk + [[t, 999, lv] for t, _, lv in talk]}
+        self.assertEqual(attribute([{"origin": "audio_sistema", "start": 1.1, "end": 3.9}], snap, start), {})
+
+    def test_presence_signal_passes_local_check_when_the_channel_has_sound(self):
+        start = self.now
+        snap = {"meeting_code": self.TEAMS, "devices": {self.ANA_ID: [[0, "Ana Teste"]]}, "sources": {"414": [[0, self.ANA_ID]]},
+                "frames": frames(start + 0, start + 20, 414)}
+        utt = [{"origin": "audio_sistema", "start": 5.0, "end": 9.0}]
+        loud = [0.2 + 0.1 * ((i // 2) % 2) for i in range(200)]
+        self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=loud)[0]["name"], "Ana Teste")
+        self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=[0.0] * 200), {})
+
     def test_codes_and_labels(self):
         self.assertTrue(ms.MEET_CODE_RE.match(self.TEAMS))
         self.assertFalse(ms.MEET_CODE_RE.match("teams-xyz"))
@@ -839,22 +863,28 @@ class TeamsPageScriptTest(unittest.TestCase):
     def test_page_script_sends_teams_mapping_and_levels(self):
         harness = Path(__file__).resolve().parent / "meet_page_harness.js"
         out = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30, check=True)
-        posted = json.loads(out.stdout)
-        codes = {m.get("code") for m in posted}
-        self.assertEqual(len(codes), 1)
-        code = codes.pop()
+        posted_all = json.loads(out.stdout)
+        codes = [m.get("code") for m in posted_all]
+        first = codes[0]
+        self.assertEqual(len(set(codes)), 2)
+        posted = [m for m in posted_all if m.get("code") == first]
+        second = [m for m in posted_all if m.get("code") != first]
+        # Reunião nova recomeça do zero: só Carla, sem nada da anterior.
+        second_devices = {d for m in second if m["type"] == "mapping" for d, _ in m["devices"]}
+        self.assertEqual(second_devices, {"8:orgid:carla"})
+        code = first
         self.assertTrue(ms.MEET_CODE_RE.match(code) and code.startswith("teams-"))
         mappings = [m for m in posted if m["type"] == "mapping"]
         devices = {d for m in mappings for d, _ in m["devices"]}
-        owners = {s: o for m in mappings for s, o in m["sources"]}
+        history = [(s, o) for m in mappings for s, o in m["sources"]]
         self.assertEqual(devices, {"8:orgid:ana", "8:orgid:beto"})
-        self.assertEqual(owners, {414: "8:orgid:ana", 415: "8:orgid:beto"})
+        self.assertEqual(history, [(414, "8:orgid:ana"), (415, "8:orgid:beto"), (415, None)])
         frames_ = [f for m in posted if m["type"] == "levels" for f in m["frames"]]
         self.assertEqual({f[1] for f in frames_}, {414, 415})
         self.assertTrue(all(f[2] == 0.2 for f in frames_))
         # O que a página manda o host aceita e transforma na mesma linha do tempo.
         with tempfile.TemporaryDirectory() as tmp:
-            session = ms.Session(recording_active=lambda: {"status": "recording"}, clock=lambda: 1790000003.0,
+            session = ms.Session(recording_active=lambda: {"status": "recording"}, clock=lambda: 1790000005.0,
                                  root=Path(tmp), check_interval=0)
             for message in posted:
                 session.handle(message)

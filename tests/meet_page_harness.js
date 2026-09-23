@@ -5,9 +5,10 @@ const path = require("path");
 const vm = require("vm");
 
 const posted = [];
+let thread = "19:meeting_ABCdef123@thread.v2";
 const timers = [];
 let now = 1790000000000;
-const participants = [
+let participants = [
   { id: "8:orgid:ana", displayName: "Ana Teste", hasAudioSource: (s) => s === 414 },
   { id: "8:orgid:beto", displayName: "Beto Teste", hasAudioSource: (s) => s === 415 },
 ];
@@ -21,7 +22,7 @@ const window = {
   RTCPeerConnection: FakePC,
   location: { hostname: "teams.microsoft.com", origin: "https://teams.microsoft.com", pathname: "/v2/",
               href: "https://teams.microsoft.com/v2/?meetingjoin=true#/l/meetup-join/19%3ameeting_ABCdef123%40thread.v2/0" },
-  msteamscalling: { deref: () => ({ callingService: { getActiveCall: () => ({ threadId: "19:meeting_ABCdef123@thread.v2", participants }) } }) },
+  msteamscalling: { deref: () => ({ callingService: { getActiveCall: () => ({ threadId: thread, participants }) } }) },
   postMessage: (msg) => posted.push(msg["castanha-meet-v1"]),
   addEventListener: () => {},
 };
@@ -43,5 +44,13 @@ const run = (until) => {
 };
 run(now + 3000);
 speaking = 415;
+run(now + 3000);
+// Beto sai e a fonte 415 segue chegando sem dono: o vínculo é revogado.
+participants = participants.filter((p) => p.id !== "8:orgid:beto");
+run(now + 2000);
+// Outra reunião na mesma aba, sem recarregar.
+thread = "19:meeting_OUTRAreuniao@thread.v2";
+participants = [{ id: "8:orgid:carla", displayName: "Carla Teste", hasAudioSource: (s) => s === 500 }];
+speaking = 500;
 run(now + 3000);
 process.stdout.write(JSON.stringify(posted));

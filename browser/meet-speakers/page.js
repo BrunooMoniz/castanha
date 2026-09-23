@@ -78,10 +78,22 @@
   // participantes, e cada um responde se uma fonte de áudio (CSRC) é dele.
   const teamsKnown = new Map();
   const teamsOwner = new Map();
+  const teamsKnownSource = new Set();
+  // Outra reunião na mesma aba (o Teams troca sem recarregar): tudo recomeça.
+  let currentCode = null;
+  const resetIfNewCall = (c) => {
+    if (!c || c === currentCode) return;
+    if (currentCode !== null) {
+      history.length = 0; overflow = false;
+      teamsKnown.clear(); teamsOwner.clear(); teamsKnownSource.clear(); teamsSources.clear(); seen.clear(); frames = []; gaps = [];
+    }
+    currentCode = c;
+  };
   if (TEAMS) setInterval(() => {
     const c = code();
     const call = teamsCall();
     if (!c || !call) return;
+    resetIfNewCall(c);
     const people = [];
     try {
       for (const p of call.participants || []) if (p && p.id && p.displayName) people.push(p);
@@ -93,7 +105,13 @@
     for (const csrc of teamsSources) {
       let owner = null;
       for (const p of people) { try { if (p.hasAudioSource && p.hasAudioSource(csrc)) { owner = p.id; break; } } catch (e) {} }
-      if (owner && teamsOwner.get(csrc) !== owner) { teamsOwner.set(csrc, owner); sources.push([csrc, owner]); }
+      // Ninguém reconhece a fonte (saiu, reconectou, lista indisponível): o
+      // vínculo antigo é revogado para não herdar outra voz.
+      if ((teamsOwner.get(csrc) || null) !== owner) {
+        if (owner) teamsOwner.set(csrc, owner); else teamsOwner.delete(csrc);
+        if (owner || teamsKnownSource.has(csrc)) sources.push([csrc, owner]);
+        if (owner) teamsKnownSource.add(csrc);
+      }
     }
     if (devices.length || sources.length) {
       const msg = { type: "mapping", code: c, t: Date.now(), devices, sources };
@@ -137,6 +155,7 @@
   setInterval(() => {
     const c = code();
     if (!c) { frames = []; return; }
+    resetIfNewCall(c);
     post({ type: "levels", code: c, t: Date.now(), frames, gaps });
     frames = [];
     gaps = [];
