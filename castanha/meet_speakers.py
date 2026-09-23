@@ -66,6 +66,13 @@ LAG_STEP = 0.1
 MIN_CORRELATION = 0.2
 REMOTE_ORIGIN = "audio_sistema"
 MIX_MARGIN = 0.02
+# Outras vozes: no máximo 15% do intervalo e nunca mais que 1 s (uma frase
+# curta de outra pessoa já é uma fala dela).
+MAX_OTHER_SECONDS = 1.0
+# Conferência local: o canal gravado precisa acompanhar o Meet naquela fala.
+LOCAL_MARGIN = 1.0
+LOCAL_MIN_BINS = 20
+LOCAL_CORRELATION = 0.1
 # Dois picos de correlação quase iguais em atrasos distantes: alinhamento ambíguo.
 LAG_AMBIGUITY = 0.05
 LAG_DISTINCT = 0.5
@@ -592,9 +599,13 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
         loudest = max((owned[k][1] for k in range(i, j)), default=None)
         return loudest is not None and level <= loudest + MIX_MARGIN
 
+    # Uma fonte sem dono que alguma vez não se comportou como mistura é gente
+    # em todos os seus pacotes, inclusive quando fala por cima de alguém.
+    people = {ssrc for ts, ssrc, level in active
+              if not sources.get(ssrc) and ssrc not in late and not looks_like_mix(ts, level)}
     for ts, ssrc, level in active:
         history = sources.get(ssrc)
-        if not history and ssrc not in late and looks_like_mix(ts, level):
+        if not history and ssrc not in late and ssrc not in people:
             continue
         device = _owner(history, ts) if history else None
         per_name.setdefault(_name_at(devices, device, ts), []).append(ts)
@@ -677,6 +688,14 @@ def _pearson(a: List[float], b: List[float]) -> float:
     return cov / math.sqrt(va * vb) if va > 0 and vb > 0 else 0.0
 
 
+def _level_bins(snap: Dict[str, Any], step: float = LAG_STEP) -> Dict[int, float]:
+    level_at: Dict[int, float] = {}
+    for ts, _, level in snap.get("frames") or []:
+        key = int(math.floor(ts / step))
+        level_at[key] = level_at.get(key, 0.0) + level
+    return level_at
+
+
 def estimate_lag(envelope: List[float], snap: Dict[str, Any], start: float,
                  pauses=None, step: float = LAG_STEP) -> Tuple[float, float]:
     """(atraso em s, correlação) de um trecho. Positivo: o som chega à gravação depois do sinal do Meet."""
@@ -690,10 +709,7 @@ def estimate_lags(envelope: List[float], snap: Dict[str, Any], start: float,
     Ao voltar do SIGSTOP o PipeWire pode entregar o áudio acumulado e deslocar
     o resto do arquivo; cada trecho acha o próprio atraso.
     """
-    level_at: Dict[int, float] = {}
-    for ts, _, level in snap.get("frames") or []:
-        key = int(math.floor(ts / step))
-        level_at[key] = level_at.get(key, 0.0) + level
+    level_at = _level_bins(snap, step)
     out = []
     steps = int(round(LAG_WINDOW / step))
     for a, b, paused in audio_segments(start, pauses):
@@ -714,7 +730,8 @@ def estimate_lags(envelope: List[float], snap: Dict[str, Any], start: float,
 
 
 def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: float,
-              pauses=None, lags: Optional[List[Tuple[float, float]]] = None) -> Dict[int, Dict[str, Any]]:
+              pauses=None, lags: Optional[List[Tuple[float, float]]] = None,
+              envelope: Optional[List[float]] = None, step: float = LAG_STEP) -> Dict[int, Dict[str, Any]]:
     """Índice da fala → {nome, cobertura}. Só o canal do sistema; o microfone nunca.
 
     Fala que atravessa uma pausa, trecho com correlação fraca, fonte sem nome
@@ -724,6 +741,7 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
     pause_walls = _pause_windows(start, pauses)
     intervals = speaking_intervals(snap, exclude=pause_walls)
     competing = speaking_intervals(snap, exclude=pause_walls, min_level=COMPETING_LEVEL)
+    level_at = _level_bins(snap, step) if envelope is not None else {}
     result = {}
     for index, utterance in enumerate(utterances):
         if utterance.get("origin") != REMOTE_ORIGIN:
@@ -756,8 +774,21 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
         others = sum(v for n, v in overlaps(competing).items() if n != name)
         width = hi - lo
         coverage = covered / width
-        if coverage < MIN_COVERAGE or others > MAX_OTHER_SHARE * width or (others and covered < DOMINANCE * others):
+        if (coverage < MIN_COVERAGE or others > min(MAX_OTHER_SHARE * width, MAX_OTHER_SECONDS)
+                or (others and covered < DOMINANCE * others)):
             continue
+        if envelope is not None:
+            # A correlação do trecho inteiro não vê um desvio curto (Meet mudo
+            # e outro áudio tocando): a fala precisa bater com o Meet sozinha.
+            seg_lo, seg_hi = segments[segment][0], segments[segment][1]
+            first = max(int(math.ceil(max(u_start - LOCAL_MARGIN, seg_lo) / step)), 0)
+            last = min(int((min(u_end + LOCAL_MARGIN, seg_hi)) / step), len(envelope))
+            if last - first < LOCAL_MIN_BINS:
+                continue
+            local = [level_at.get(int(math.floor((i * step + shift) / step)), 0.0)
+                     for i in range(first, last)]
+            if _pearson(envelope[first:last], local) < LOCAL_CORRELATION:
+                continue
         result[index] = {"name": name, "coverage": round(coverage, 3)}
     return result
 
@@ -828,7 +859,7 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     if start is None or not envelope:
         return None
     lags = estimate_lags(envelope, snap, start, pauses)
-    names = attribute(ordered, snap, start, pauses, lags)
+    names = attribute(ordered, snap, start, pauses, lags, envelope=envelope)
     remote = sum(1 for s in ordered if s.get("origin") == REMOTE_ORIGIN)
     spoken: Dict[str, int] = {}
     for item in names.values():

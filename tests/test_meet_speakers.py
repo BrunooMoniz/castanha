@@ -337,12 +337,34 @@ class TimelineTest(unittest.TestCase):
                 "frames": frames(self.start + 1, self.start + 4.5, 111) + frames(self.start + 4.5, self.start + 10, 222, level=0.04)}
         self.assertEqual(attribute([self.utt(1, 10)], snap, self.start), {})
 
+    def test_unknown_voice_that_spoke_alone_keeps_competing_when_quieter(self):
+        snap = self.snap(extra_frames=frames(self.start + 20, self.start + 22, 777)
+                         + frames(self.start + 23, self.start + 28, 111, level=0.3)
+                         + frames(self.start + 25, self.start + 28, 777, level=0.1))
+        self.assertEqual(attribute([self.utt(23, 28)], snap, self.start), {})
+
+    def test_three_seconds_of_someone_else_in_a_long_segment_is_not_absorbed(self):
+        snap = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                "frames": frames(self.start + 30, self.start + 57, 111) + frames(self.start + 57, self.start + 60, 222)}
+        self.assertEqual(attribute([self.utt(30, 60)], snap, self.start), {})
+
+    def test_recording_that_stops_following_the_meet_locally_gets_no_name(self):
+        # Ana fala 1–4 no Meet, mas o canal gravado tem outro som, sem relação (Meet mudo).
+        envelope = [0.0] * 100
+        for i in range(100):
+            envelope[i] = 0.3 if (i // 3) % 2 == 0 else 0.0
+        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start, lags=[(0, 1)], envelope=envelope), {})
+        following = [0.3 if 1 <= i * 0.1 < 4 or 5 <= i * 0.1 < 8 else 0.0 for i in range(100)]
+        names = ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start, lags=[(0, 1)], envelope=following)
+        self.assertEqual(names[0]["name"], "Ana Teste")
+
     def test_unknown_voice_louder_than_the_named_one_competes(self):
         snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 777, level=0.6))
         self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
 
     def test_meet_mix_source_that_belongs_to_nobody_is_ignored(self):
-        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 8, 42))
+        # Como na chamada real: a mistura acompanha quem fala, nunca sozinha.
+        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 42) + frames(self.start + 5, self.start + 8, 42))
         names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8)], snap, self.start)
         self.assertEqual([names[0]["name"], names[1]["name"]], ["Ana Teste", "Beto Teste"])
 
@@ -661,6 +683,17 @@ class EngineIntegrationTest(unittest.TestCase):
         bronze = engine.storage.bronze_dir / slug
         self.assertNotIn("(Meet)", (bronze / "transcript_raw.txt").read_text())
         self.assertEqual(list((bronze / ".speakers").glob("*.result.json")), [])
+
+    def test_snapshot_is_taken_on_resume_if_the_stop_died_before_it(self):
+        engine = self.engine()
+        with patch.object(engine, "_save_meet_snapshot", side_effect=RuntimeError("queda")):
+            with self.assertRaises(RuntimeError):
+                self.stop(engine)
+        slug = engine.state_mgr.read()["capture_slug"]
+        bronze = engine.storage.bronze_dir / slug
+        self.assertFalse((bronze / ".speakers").exists())
+        self.stop(engine)
+        self.assertIn("Ana Teste (Meet): ana fala", (bronze / "transcript_raw.txt").read_text())
 
     def test_disabled_flag_keeps_channel_labels(self):
         data = json.loads(self.config_file.read_text())
