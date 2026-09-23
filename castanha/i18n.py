@@ -4,6 +4,19 @@ import os
 import re
 
 STRINGS = {
+    # Quem fala no Google Meet (castanha meet)
+    "cli.help.meet": {
+        "en": "Who speaks in Google Meet: install, uninstall or status of the Chromium extension",
+        "pt": "Quem fala no Google Meet: instalar, remover ou ver o estado da extensão do Chromium",
+    },
+    "cli.meet.enabled": {"en": "{mark} Enabled in Castanha", "pt": "{mark} Ligado no Castanha"},
+    "cli.meet.flags": {"en": "{mark} Extension in chromium-flags.conf", "pt": "{mark} Extensão no chromium-flags.conf"},
+    "cli.meet.native_host": {"en": "{mark} Native host registered", "pt": "{mark} Host nativo registrado"},
+    "cli.meet.chromium": {"en": "{mark} Loaded in the running Chromium", "pt": "{mark} Carregada no Chromium aberto"},
+    "cli.meet.restart_chromium": {
+        "en": "Close and reopen Chromium to load the extension (it takes effect on the next Meet call).",
+        "pt": "Feche e abra o Chromium para carregar a extensão (vale a partir da próxima chamada do Meet).",
+    },
     # Audio (persistido em metadata.json como audio_diagnostico)
     "audio_status.ok": {
         "en": "Audio captured on both channels.",

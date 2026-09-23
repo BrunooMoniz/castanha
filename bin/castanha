@@ -751,6 +751,30 @@ def cmd_agenda_hidden(args):
         print(f"  {e['title'] or t('cli.hidden_list.no_title')}\n     chave: {e['key']}")
 
 
+def cmd_meet(args):
+    from castanha import meet_speakers
+    if args.meet_cmd == "install":
+        meet_speakers.set_enabled(True)
+        info = meet_speakers.install(project_root)
+    elif args.meet_cmd == "uninstall":
+        meet_speakers.uninstall()
+        meet_speakers.set_enabled(False)
+        info = meet_speakers.status(project_root)
+    else:
+        info = meet_speakers.status(project_root)
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False))
+        return
+    mark = lambda ok: "✓" if ok else "✗"
+    print(t("cli.meet.enabled", mark=mark(info["enabled"])))
+    print(t("cli.meet.flags", mark=mark(info["flags"])))
+    print(t("cli.meet.native_host", mark=mark(info["native_host"])))
+    loaded = info["chromium_loaded"]
+    print(t("cli.meet.chromium", mark="?" if loaded is None else mark(loaded)))
+    if info["enabled"] and info["flags"] and loaded is False:
+        print(t("cli.meet.restart_chromium"))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="castanha",
@@ -893,6 +917,11 @@ def main():
     p_restore.set_defaults(func=cmd_recording_exclusion)
 
     # Sync
+    p_meet = subparsers.add_parser("meet", help=t("cli.help.meet"))
+    p_meet.add_argument("meet_cmd", nargs="?", default="status", choices=["install", "uninstall", "status"])
+    p_meet.add_argument("--json", action="store_true")
+    p_meet.set_defaults(func=cmd_meet)
+
     p_sync = subparsers.add_parser("sync", help=t("cli.help.sync"))
     p_sync.add_argument("slug", nargs="?", default=None, help=t("cli.help.sync_slug"))
     p_sync.add_argument("--all", action="store_true", help=t("cli.help.sync_all"))

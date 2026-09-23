@@ -63,6 +63,16 @@ attendees:
                         '    presence: "unverified"\n    speech: "unverified"\n')
     if not attendees:
         frontmatter += "  []\n"
+    speakers = metadata.get("speaker_attribution") or {}
+    if speakers.get("participants"):
+        # Presença e voz observadas na própria chamada do Meet, não no convite.
+        frontmatter += f'speakers:\n  source: {json.dumps(speakers.get("source"), ensure_ascii=False)}\n  participants:\n'
+        for person in speakers["participants"]:
+            spoke = person.get("utterances", 0) > 0
+            frontmatter += (f'    - name: {json.dumps(person.get("name", ""), ensure_ascii=False)}\n'
+                            '      presence: "observed"\n'
+                            f'      speech: "{"meet_audio_level" if spoke else "not_observed"}"\n'
+                            f'      utterances: {int(person.get("utterances", 0))}\n')
     frontmatter += f'audio_status: "{metadata.get("audio_status", "ok")}"\n'
     frontmatter += "tags:\n  - meeting\n  - castanha\n  - silver\n---\n\n"
     return frontmatter
@@ -311,6 +321,9 @@ ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
   na fala também não prova que essa pessoa foi quem falou.
 - Preserve a origem e os tempos quando disponíveis. Sem evidência explícita
   de quem falou, mantenha autoria desconhecida e responsável null.
+- EXCEÇÃO com evidência: linha rotulada "Nome (Meet)" teve a voz atribuída pelo
+  sinal de áudio do próprio Google Meet para aquele participante. Nessas linhas
+  a autoria é conhecida: pode dizer que essa pessoa falou aquilo.
 """
 
 # No caminho Hermes a transcrição não é pedida de volta: reescrever 2 h de fala

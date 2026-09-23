@@ -1,0 +1,20 @@
+// Um host nativo por aba do Meet: cada chamada vira uma sessão própria no Castanha.
+const HOST = "io.github.brunoomoniz.castanha.meet";
+chrome.runtime.onConnect.addListener((tab) => {
+  if (tab.name !== "castanha-meet-v1") return;
+  let native = null;
+  const open = () => {
+    try {
+      native = chrome.runtime.connectNative(HOST);
+      native.onDisconnect.addListener(() => { native = null; void chrome.runtime.lastError; });
+    } catch (e) { native = null; }
+  };
+  tab.onMessage.addListener((msg) => {
+    if (!native) open();
+    try { if (native) native.postMessage(msg); } catch (e) { native = null; }
+  });
+  tab.onDisconnect.addListener(() => {
+    try { if (native) native.postMessage({ type: "bye", t: Date.now() }); native && native.disconnect(); } catch (e) {}
+    native = null;
+  });
+});

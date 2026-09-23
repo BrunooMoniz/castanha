@@ -84,6 +84,21 @@ def _reuniao_de_agora(evento: Dict[str, Any], agora: Optional[datetime] = None) 
     return (inicio - ANTECEDENCIA_ANEXO) <= agora < fim
 
 
+def _speaker_summary(attributions: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Resumo da atribuição por voz para o metadata, sem as falas."""
+    if not attributions:
+        return None
+    participants: Dict[str, int] = {}
+    for item in attributions.values():
+        for p in item.get("participants", []):
+            participants[p["name"]] = participants.get(p["name"], 0) + p.get("utterances", 0)
+    return {"source": next(iter(attributions.values()))["source"],
+            "meeting_codes": sorted({a.get("meeting_code") for a in attributions.values() if a.get("meeting_code")}),
+            "attributed": sum(a["attributed"] for a in attributions.values()),
+            "remote_utterances": sum(a["remote_utterances"] for a in attributions.values()),
+            "participants": [{"name": n, "utterances": c} for n, c in sorted(participants.items())]}
+
+
 class CastanhaEngine:
     def __init__(self):
         self.config = load_config()
@@ -215,6 +230,7 @@ class CastanhaEngine:
             "audio_path": str(temp_audio),
             "mode": chosen_mode,
             "started_at": datetime.now().isoformat(),
+            "pauses": [],
             "elapsed_seconds": 0,
             "current_meeting": current_meeting_info,
             "target_meeting_slug": meeting_slug,
@@ -258,7 +274,8 @@ class CastanhaEngine:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-        self.state_mgr.write({"status": "paused", "audio_peak": 0.0, "audio_peak_updated_at": 0.0,
+        pauses = list(state.get("pauses") or []) + [{"paused_at": time.time(), "resumed_at": None}]
+        self.state_mgr.write({"status": "paused", "pauses": pauses, "audio_peak": 0.0, "audio_peak_updated_at": 0.0,
                               "mic_peak": 0.0, "call_peak": 0.0, "mic_peak_updated_at": 0.0, "call_peak_updated_at": 0.0})
         notify(t("notify.paused_title"), t("notify.paused_body"))
         return {"status": "paused"}
@@ -276,7 +293,10 @@ class CastanhaEngine:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
-        self.state_mgr.write({"status": "recording"})
+        pauses = [dict(p) for p in state.get("pauses") or []]
+        if pauses and pauses[-1].get("resumed_at") is None:
+            pauses[-1]["resumed_at"] = time.time()
+        self.state_mgr.write({"status": "recording", "pauses": pauses})
         notify(t("notify.resumed_title"), t("notify.resumed_body"))
         return {"status": "recording"}
 
@@ -369,6 +389,9 @@ class CastanhaEngine:
                 job = {"id": job_id, "audio_path": str(durable_audio), "sha256": file_sha256(durable_audio), "state": state,
                        "stage": "pending", "recorded_at": state.get("started_at") or datetime.now().isoformat()}
                 write_json(job_file, job)
+                from castanha import meet_speakers
+                if meet_speakers.enabled(self.config):
+                    meet_speakers.save_snapshot(bronze, job_id, state, time.time())
                 metadata = self.storage._read_bronze_metadata(slug) or {
                     "slug": slug, "title": title, "recorded_at": job["recorded_at"],
                     "mode": state.get("mode", "dual"), "calendar_event": current_meeting,
@@ -626,10 +649,18 @@ class CastanhaEngine:
         for record in records:
             record.setdefault("transcription_provider", legacy_provider)
             record.setdefault("id", record.get("filename"))
+        from castanha import meet_speakers
+        meet_on = meet_speakers.enabled(self.config)
+        attributions = {}
         for _, job in jobs:
             if (job.get("transcript") and job.get("provider") not in (None, "mock", "failed")
                     and job.get("stage") in ("transcribed", "done")):
-                parts.append(job["transcript"])
+                # Nome do participante só com a linha do tempo do Meet desta
+                # gravação; sem ela (ou sem certeza) fica o rótulo do canal.
+                attribution = meet_speakers.attribution_for_job(bronze, job) if meet_on else None
+                if attribution:
+                    attributions[job["id"]] = attribution
+                parts.append(attribution["text"] if attribution else job["transcript"])
             source = Path(job["audio_path"])
             record = {"id": source.name, "filename": source.name, "path": str(source),
                       "job_id": job["id"], "sha256": job.get("sha256"), "recorded_at": job["recorded_at"],
@@ -662,7 +693,8 @@ class CastanhaEngine:
                  "channel_provenance": job.get("channel_provenance") is True,
                  "channels": job.get("channels", []),
                  "utterance_count": len(job.get("utterances", [])),
-                 "utterances": job.get("utterances", [])}
+                 "utterances": (meet_speakers.annotate(job.get("utterances", []), attributions[job["id"]])
+                                if job["id"] in attributions else job.get("utterances", []))}
                 for _, job in jobs if job.get("provider") not in ("mock", "failed")
                 and job.get("stage") in ("transcribed", "done")
             ],
@@ -698,6 +730,7 @@ class CastanhaEngine:
                         transcription_pending_reason="; ".join(pending_messages) or None,
                         audio_diagnostico=audio_status_message(audio_status),
                         audio_levels=last_job.get("audio_levels", []),
+                        speaker_attribution=_speaker_summary(attributions),
                         processing_status="pending" if errors or pending_jobs else "complete")
         if metadata.get("exclusion_id"):
             metadata.update(remaining_count=len(records), can_reprocess=bool(records))

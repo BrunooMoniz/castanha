@@ -107,6 +107,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # cruzada fechar sem achado: ligue aqui para usar; "Vincular" não depende disto.
         "move_enabled": False,
     },
+    "meet": {
+        # Quem fala no Google Meet (extensão browser/meet-speakers + host
+        # nativo). Desligado por padrão: `castanha meet install` liga.
+        "speakers_enabled": False,
+    },
     "zinom": {
         "enabled": False,
         "endpoint": "https://zinom.ai/mcp",
