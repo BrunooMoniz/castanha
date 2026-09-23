@@ -28,16 +28,22 @@ inteiro, e qualquer falha deixa a transcrição com o rótulo do canal.
   Castanha grava; fora disso guarda o mapa em memória e descarta os níveis.
   Arquivos com mais de 7 dias são apagados.
 - No stop, o trecho da chamada que cobre a gravação vai para
-  `bronze/<reunião>/.speakers/<job>.json`. A atribuição fica em
-  `.speakers/<job>.result.json`; o checkpoint da transcrição não muda.
+  `bronze/<reunião>/.speakers/<sha do áudio>.json`. A atribuição fica em
+  `.speakers/<sha>.result.json`; o checkpoint da transcrição não muda. Excluir
+  a gravação leva os dois junto (e restaurar traz de volta); mover copia o recorte.
 
 ## Atribuição
 
-Cada fala do canal do sistema recebe o participante que dominou o intervalo
-(cobertura mínima de 30% e o dobro do segundo colocado). Pausas da gravação são
-descontadas e o atraso entre gravação e Meet é achado por correlação com o
-canal do sistema; correlação fraca (sessão errada, áudio de outro app) cancela
-a atribuição inteira. O microfone nunca recebe nome. Falas que cruzam a troca
+Cada fala do canal do sistema recebe o participante que dominou o intervalo:
+cobertura mínima de 30%, e as outras vozes somadas (inclusive participante
+ainda sem nome) em no máximo 15% do intervalo. A fonte de mistura do Meet, que
+não pertence a ninguém, é ignorada. Fonte reatribuída no meio da chamada vale
+para quem era dono dela em cada instante.
+
+Pausas da gravação são descontadas; fala que atravessa uma pausa fica sem nome,
+e a voz de quem falou durante a pausa não conta. O atraso entre gravação e Meet
+é achado por correlação com o canal do sistema, em cada trecho entre pausas;
+correlação fraca (sessão errada, áudio de outro app) cancela aquele trecho. O microfone nunca recebe nome. Falas que cruzam a troca
 de pessoa ficam com o rótulo do canal.
 
 No texto: `[12.30s–15.10s] Ana Souza (Meet): ...`. Nos segmentos:

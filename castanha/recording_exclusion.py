@@ -114,7 +114,7 @@ def _snapshots(fd, storage, slug, archive):
         files.append({'root': root, 'parts': list(parts), 'backup': name,
                       'sha256': _sha(text) if text is not None else None})
     for name in ROOT_DOCUMENTS: keep('bronze', (name,), _read(fd, name))
-    for name in ('.jobs', '.brain-ingest'):
+    for name in ('.jobs', '.brain-ingest', '.speakers'):
         try:
             with _child(fd, name) as child:
                 for parts, text in _walk(child): keep('bronze', (name,) + parts, text)
@@ -283,7 +283,9 @@ def _apply(fd, storage, op):
         for item in op['files']:
             root, parts = item['root'], item['parts']
             delete = (root in ('silver', 'gold') or parts[0] in ('transcript_raw.txt', 'transcript_segments.json', '.annotations-regeneration.json')
-                      or parts[0] == '.brain-ingest' or parts == ['.jobs', op['removed_job_file']])
+                      or parts[0] == '.brain-ingest' or parts == ['.jobs', op['removed_job_file']]
+                      # Quem falou quando e o texto com nomes saem junto com a gravação.
+                      or (parts[0] == '.speakers' and parts[-1].split('.')[0] == op['audio_sha256']))
             if not delete or item['sha256'] is None: continue
             out = fd if root == 'bronze' else os.open(getattr(storage, root + '_dir').resolve(), os.O_RDONLY | os.O_DIRECTORY)
             try:

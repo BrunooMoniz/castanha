@@ -322,8 +322,9 @@ ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
 - Preserve a origem e os tempos quando disponíveis. Sem evidência explícita
   de quem falou, mantenha autoria desconhecida e responsável null.
 - EXCEÇÃO com evidência: linha rotulada "Nome (Meet)" teve a voz atribuída pelo
-  sinal de áudio do próprio Google Meet para aquele participante. Nessas linhas
-  a autoria é conhecida: pode dizer que essa pessoa falou aquilo.
+  sinal de áudio do próprio Google Meet, que mostrou essa pessoa falando em
+  quase todo o trecho. Pode atribuir a ela o conteúdo principal da linha;
+  uma interjeição curta de outra pessoa ainda pode estar misturada.
 """
 
 # No caminho Hermes a transcrição não é pedida de volta: reescrever 2 h de fala

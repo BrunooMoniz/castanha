@@ -49,7 +49,9 @@ SNAPSHOT_MARGIN = 5.0
 # dominar o intervalo; empate ou cobertura rala mantém o rótulo do canal.
 EDGE_TOLERANCE = 0.3
 MIN_COVERAGE = 0.3
-DOMINANCE = 2.0
+DOMINANCE = 3.0
+# Soma das outras vozes (com ou sem nome) no intervalo, como fração dele.
+MAX_OTHER_SHARE = 0.15
 # Ajuste fino do relógio: a correlação entre o canal do sistema e os níveis
 # do Meet acha o atraso da gravação. Correlação fraca = sessão errada ou
 # áudio de outra fonte, e aí nada é atribuído.
@@ -222,7 +224,9 @@ def prune(now: Optional[float] = None, days: int = RETENTION_DAYS) -> None:
 class Session:
     """Uma aba do Meet. Guarda o mapa sempre; escreve só com gravação ativa."""
 
-    def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None):
+    def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None,
+                 check_interval: float = 2.0):
+        self.check_interval = check_interval
         self.recording_active = recording_active
         self.clock = clock
         self.root = root
@@ -237,7 +241,7 @@ class Session:
 
     def _is_active(self) -> bool:
         now = self.clock()
-        if now - self._checked_at >= 2.0:
+        if now - self._checked_at >= self.check_interval:
             self._active = self.recording_active() is not None
             self._checked_at = now
         return self._active
@@ -281,6 +285,9 @@ class Session:
             except (ValueError, zlib.error, TypeError):
                 self.errors += 1
                 return
+            active = self._is_active()
+            if not active:
+                self.close()
             for event in events:
                 if event["type"] == "device":
                     changed = self.devices.get(event["device"]) != event["name"]
@@ -288,11 +295,16 @@ class Session:
                 else:
                     changed = self.sources.get(event["ssrc"]) != event["device"]
                     self.sources[event["ssrc"]] = event["device"]
-                if changed and self.file is not None:
+                if changed and active and self.file is not None:
                     self._write({**event, "t": now})
         elif kind == "levels":
             frames = msg.get("frames")
-            if not isinstance(frames, list) or not frames or not self._is_active():
+            if not isinstance(frames, list) or not frames:
+                return
+            if not self._is_active():
+                # Gravação acabou: o arquivo fecha e a próxima abre outro,
+                # com o mapa daquele momento.
+                self.close()
                 return
             clean = []
             for frame in frames[:5000]:
@@ -315,13 +327,24 @@ class Session:
                 self.file = None
 
 
+class _Oversized(Exception):
+    pass
+
+
 def _read_message(stream) -> Optional[Any]:
     header = stream.read(4)
     if len(header) < 4:
         return None
     (size,) = struct.unpack("=I", header)
     if size > MAX_MESSAGE_BYTES:
-        raise ValueError("mensagem do navegador grande demais")
+        # Consumir o corpo mantém o protocolo alinhado para a próxima mensagem.
+        left = size
+        while left:
+            chunk = stream.read(min(left, 1 << 16))
+            if not chunk:
+                return None
+            left -= len(chunk)
+        raise _Oversized()
     body = stream.read(size)
     if len(body) < size:
         return None
@@ -339,7 +362,7 @@ def run_host(stdin=None, session: Optional[Session] = None) -> int:
         while True:
             try:
                 msg = _read_message(stdin)
-            except ValueError:
+            except (_Oversized, ValueError):
                 session.errors += 1
                 continue
             if msg is None:
@@ -392,9 +415,16 @@ def _load_session(path: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """O trecho das sessões do Meet que cobre esta gravação, para ir ao Bronze.
 
+    Fonte→dispositivo guarda o histórico com o instante de cada mudança: se o
+    Meet reatribuir uma fonte no meio da chamada, as falas anteriores seguem
+    com quem era dono dela naquela hora. Nada posterior ao fim da janela entra.
     Sem sessão, com sessão ambígua (duas chamadas ao mesmo tempo sem o código
     do evento para desempatar) ou sem fala, devolve None.
     """
@@ -407,12 +437,9 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     for path in sorted(root.glob("*.jsonl")) if root.is_dir() else []:
         records = _load_session(path)
         header = next((r for r in records if r.get("type") == "session"), None)
-        levels = [r for r in records if r.get("type") == "levels"]
-        if not header or not levels:
-            continue
-        first = min(f[0] for r in levels for f in r.get("frames", []) or [[math.inf]])
-        last = max(f[0] for r in levels for f in r.get("frames", []) or [[-math.inf]])
-        if last < lo or first > hi:
+        stamps = [f[0] for r in records if r.get("type") == "levels"
+                  for f in r.get("frames") or [] if isinstance(f, list) and f and _number(f[0])]
+        if not header or not stamps or max(stamps) < lo or min(stamps) > hi:
             continue
         candidates.setdefault(header.get("code"), []).append(records)
     if not candidates:
@@ -424,33 +451,68 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
         code = next(iter(candidates))
     else:
         return None
-    devices, sources, frames = {}, {}, []
+    devices, sources, frames, late = {}, {}, [], set()
     for records in candidates[code]:
         for record in records:
-            kind = record.get("type")
+            kind, t = record.get("type"), record.get("t")
+            if kind in ("device", "source") and _number(t) and t > hi:
+                if kind == "source" and isinstance(record.get("ssrc"), int):
+                    late.add(str(record["ssrc"]))
+                continue
             if kind == "device" and isinstance(record.get("name"), str):
                 devices[record.get("device")] = record["name"]
-            elif kind == "source" and isinstance(record.get("ssrc"), int):
-                sources[str(record["ssrc"])] = record.get("device")
+            elif kind == "source" and isinstance(record.get("ssrc"), int) and _number(t):
+                sources.setdefault(str(record["ssrc"]), []).append([t, record.get("device")])
             elif kind == "levels":
-                frames.extend(f for f in record.get("frames", []) if lo <= f[0] <= hi)
+                frames.extend(f for f in record.get("frames") or []
+                              if isinstance(f, list) and len(f) == 3 and all(_number(x) for x in f)
+                              and lo <= f[0] <= hi)
+    for history in sources.values():
+        history.sort(key=lambda item: item[0])
     frames.sort()
     if not frames:
         return None
-    return {"version": 1, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
-            "window": [lo, hi], "devices": devices, "sources": sources, "frames": frames}
+    # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
+    return {"version": 2, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
+            "window": [lo, hi], "devices": devices, "sources": sources,
+            "late_sources": sorted(late - set(sources)), "frames": frames}
 
 
-def speaking_intervals(snap: Dict[str, Any]) -> List[Tuple[float, float, str]]:
-    """Intervalos (início, fim, nome) em relógio de parede, a partir dos níveis."""
-    per_name: Dict[str, List[float]] = {}
+def _owner(history, ts: float):
+    """Dono da fonte no instante do pacote; antes do primeiro registro, o primeiro."""
+    owner = history[0][1]
+    for t, device in history:
+        if t > ts:
+            break
+        owner = device
+    return owner
+
+
+def _pause_windows(start: float, pauses) -> List[Tuple[float, float]]:
+    return [(p["paused_at"], p["resumed_at"]) for p in pauses or []
+            if _number(p.get("paused_at")) and _number(p.get("resumed_at")) and p["resumed_at"] >= p["paused_at"]]
+
+
+def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = ()) -> List[Tuple[float, float, Optional[str]]]:
+    """Intervalos (início, fim, nome) em relógio de parede, a partir dos níveis.
+
+    Fonte de participante sem nome conhecido (dispositivo sem nome, ou dono só
+    anunciado depois) vira nome None: não identifica ninguém, mas concorre com
+    quem tem nome. Fonte que nunca pertence a um dispositivo, como a mistura
+    que o Meet manda junto (CSRC 42 na chamada de teste), não é pessoa e sai.
+    """
+    per_name: Dict[Optional[str], List[float]] = {}
     devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
+    late = set(snap.get("late_sources") or [])
+    exclude = list(exclude)
     for ts, ssrc, level in snap.get("frames") or []:
-        if level < SPEAKING_LEVEL:
+        if level < SPEAKING_LEVEL or any(a <= ts <= b for a, b in exclude):
             continue
-        name = devices.get(sources.get(str(ssrc)))
-        if name:
-            per_name.setdefault(name, []).append(ts)
+        history = sources.get(str(ssrc))
+        if not history and str(ssrc) not in late:
+            continue
+        name = devices.get(_owner(history, ts)) if history else None
+        per_name.setdefault(name, []).append(ts)
     intervals = []
     for name, stamps in per_name.items():
         stamps.sort()
@@ -461,22 +523,37 @@ def speaking_intervals(snap: Dict[str, Any]) -> List[Tuple[float, float, str]]:
                 begin = ts
             end = ts
         intervals.append((begin - FRAME_SPAN, end + FRAME_SPAN, name))
-    intervals.sort()
+    intervals.sort(key=lambda item: (item[0], item[1]))
     return intervals
 
 
+def audio_segments(start: float, pauses=None) -> List[Tuple[float, float, float]]:
+    """Trechos contínuos do arquivo: (deslocamento inicial, final, soma das pausas antes).
+
+    Pausa (SIGSTOP no ffmpeg) não entra no arquivo; o relógio de parede anda.
+    """
+    segments, begin, paused = [], 0.0, 0.0
+    for at, until in sorted(_pause_windows(start, pauses)):
+        offset = at - start - paused
+        if offset < begin:
+            offset = begin
+        segments.append((begin, offset, paused))
+        begin, paused = offset, paused + (until - at)
+    segments.append((begin, math.inf, paused))
+    return segments
+
+
+def _segment_index(segments, offset: float) -> int:
+    for index, (a, b, _) in enumerate(segments):
+        if a <= offset < b:
+            return index
+    return len(segments) - 1
+
+
 def wall_clock(offset: float, start: float, pauses: Optional[List[Dict[str, Any]]] = None) -> float:
-    """Deslocamento no áudio → relógio de parede. Pausa (SIGSTOP no ffmpeg) não entra no arquivo."""
-    wall = start + offset
-    elapsed_paused = 0.0
-    for pause in sorted(pauses or [], key=lambda p: p.get("paused_at") or 0):
-        at, until = pause.get("paused_at"), pause.get("resumed_at")
-        if not isinstance(at, (int, float)) or not isinstance(until, (int, float)) or until < at:
-            continue
-        if at - start - elapsed_paused <= offset:
-            wall += until - at
-            elapsed_paused += until - at
-    return wall
+    """Deslocamento no áudio → relógio de parede."""
+    segments = audio_segments(start, pauses)
+    return start + offset + segments[_segment_index(segments, offset)][2]
 
 
 def channel_envelope(audio_path: Path, channel: int = 1, step: float = LAG_STEP) -> Optional[List[float]]:
@@ -517,51 +594,79 @@ def _pearson(a: List[float], b: List[float]) -> float:
 
 def estimate_lag(envelope: List[float], snap: Dict[str, Any], start: float,
                  pauses=None, step: float = LAG_STEP) -> Tuple[float, float]:
-    """(atraso em s, correlação). Atraso positivo: o som chega à gravação depois do sinal do Meet."""
+    """(atraso em s, correlação) de um trecho. Positivo: o som chega à gravação depois do sinal do Meet."""
+    return estimate_lags(envelope, snap, start, pauses, step)[0]
+
+
+def estimate_lags(envelope: List[float], snap: Dict[str, Any], start: float,
+                  pauses=None, step: float = LAG_STEP) -> List[Tuple[float, float]]:
+    """Um (atraso, correlação) por trecho entre pausas.
+
+    Ao voltar do SIGSTOP o PipeWire pode entregar o áudio acumulado e deslocar
+    o resto do arquivo; cada trecho acha o próprio atraso.
+    """
     level_at: Dict[int, float] = {}
     for ts, _, level in snap.get("frames") or []:
         key = int(math.floor(ts / step))
         level_at[key] = level_at.get(key, 0.0) + level
-    walls = [wall_clock(i * step, start, pauses) for i in range(len(envelope))]
-    best = (0.0, -1.0)
+    out = []
     steps = int(round(LAG_WINDOW / step))
-    for k in range(-steps, steps + 1):
-        lag = k * step
-        meet = [level_at.get(int(math.floor((w - lag) / step)), 0.0) for w in walls]
-        r = _pearson(envelope, meet)
-        if r > best[1] + 1e-9 or (abs(r - best[1]) <= 1e-9 and abs(lag) < abs(best[0])):
-            best = (round(lag, 3), r)
-    return best
+    for a, b, paused in audio_segments(start, pauses):
+        lo, hi = int(math.ceil(a / step)), min(len(envelope), int(b / step) if math.isfinite(b) else len(envelope))
+        piece = envelope[lo:hi]
+        walls = [start + i * step + paused for i in range(lo, hi)]
+        best = (0.0, -1.0)
+        for k in range(-steps, steps + 1):
+            lag = k * step
+            meet = [level_at.get(int(math.floor((w - lag) / step)), 0.0) for w in walls]
+            r = _pearson(piece, meet)
+            if r > best[1] + 1e-9 or (abs(r - best[1]) <= 1e-9 and abs(lag) < abs(best[0])):
+                best = (round(lag, 3), r)
+        out.append(best)
+    return out
 
 
 def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: float,
-              pauses=None, lag: float = 0.0) -> Dict[int, Dict[str, Any]]:
-    """Índice da fala → {nome, cobertura}. Só o canal do sistema; o microfone nunca."""
-    intervals = speaking_intervals(snap)
+              pauses=None, lags: Optional[List[Tuple[float, float]]] = None) -> Dict[int, Dict[str, Any]]:
+    """Índice da fala → {nome, cobertura}. Só o canal do sistema; o microfone nunca.
+
+    Fala que atravessa uma pausa, trecho com correlação fraca, fonte sem nome
+    dominante ou outra voz relevante no mesmo intervalo: fica sem nome.
+    """
+    segments = audio_segments(start, pauses)
+    pause_walls = _pause_windows(start, pauses)
+    intervals = speaking_intervals(snap, exclude=pause_walls)
     result = {}
     for index, utterance in enumerate(utterances):
         if utterance.get("origin") != REMOTE_ORIGIN:
             continue
         try:
-            begin = wall_clock(float(utterance["start"]), start, pauses) - lag
-            end = wall_clock(float(utterance["end"]), start, pauses) - lag
+            u_start, u_end = float(utterance["start"]), float(utterance["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if end <= begin:
+        if not (math.isfinite(u_start) and math.isfinite(u_end)) or u_end <= u_start:
             continue
-        lo, hi = begin - EDGE_TOLERANCE, end + EDGE_TOLERANCE
-        overlap: Dict[str, float] = {}
+        segment = _segment_index(segments, u_start)
+        if _segment_index(segments, max(u_start, u_end - 1e-6)) != segment:
+            continue
+        lag, correlation = (lags[segment] if lags and segment < len(lags) else (0.0, 1.0))
+        if correlation < MIN_CORRELATION:
+            continue
+        shift = start + segments[segment][2] - lag
+        lo, hi = u_start + shift - EDGE_TOLERANCE, u_end + shift + EDGE_TOLERANCE
+        overlap: Dict[Optional[str], float] = {}
         for a, b, name in intervals:
             if b <= lo or a >= hi:
                 continue
             overlap[name] = overlap.get(name, 0.0) + min(b, hi) - max(a, lo)
-        if not overlap:
+        named = sorted(((n, v) for n, v in overlap.items() if n is not None), key=lambda kv: -kv[1])
+        if not named:
             continue
-        ranked = sorted(overlap.items(), key=lambda kv: -kv[1])
-        name, covered = ranked[0]
-        runner = ranked[1][1] if len(ranked) > 1 else 0.0
-        coverage = covered / (hi - lo)
-        if coverage < MIN_COVERAGE or (runner and covered < DOMINANCE * runner):
+        name, covered = named[0]
+        others = sum(v for n, v in overlap.items() if n != name)
+        width = hi - lo
+        coverage = covered / width
+        if coverage < MIN_COVERAGE or others > MAX_OTHER_SHARE * width or (others and covered < DOMINANCE * others):
             continue
         result[index] = {"name": name, "coverage": round(coverage, 3)}
     return result
@@ -590,38 +695,49 @@ def _render(utterances: List[Dict[str, Any]], names: Dict[int, Dict[str, Any]]) 
     return "\n".join(lines)
 
 
-def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=channel_envelope) -> Optional[Dict[str, Any]]:
-    """Resultado cacheado por job: nomes por fala, texto reescrito e evidência.
+def _speakers_dir(bronze: Path) -> Path:
+    return bronze / ".speakers"
+
+
+def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> Optional[Dict[str, Any]]:
+    """Resultado cacheado por gravação: nomes por fala, texto reescrito e evidência.
 
     O checkpoint da transcrição não muda: a atribuição é uma camada à parte em
-    `.speakers/`, refeita só quando o recorte, as falas ou o algoritmo mudam.
+    `.speakers/<sha do áudio>`, refeita só quando o recorte, as falas ou o
+    algoritmo mudam. Sem medição do canal, nada é atribuído nem cacheado.
     """
-    snap_path = bronze / ".speakers" / f"{job['id']}.json"
+    sha = job.get("sha256")
     utterances = job.get("utterances") or []
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+        return None
+    snap_path = _speakers_dir(bronze) / f"{sha}.json"
     if not snap_path.exists() or not job.get("channel_provenance") or not utterances:
         return None
     try:
         snap = json.loads(snap_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if snap.get("version") != 2:
+        return None
     ordered = sorted(utterances, key=lambda s: (s.get("start", 0), s.get("end", 0), s.get("channel", 0)))
-    key = hashlib.sha256(json.dumps([ALGORITHM_VERSION, snap, ordered], sort_keys=True,
-                                    ensure_ascii=False).encode()).hexdigest()
-    cache = bronze / ".speakers" / f"{job['id']}.result.json"
+    state = job.get("state") or {}
+    pauses = state.get("pauses") or []
+    key = hashlib.sha256(json.dumps([ALGORITHM_VERSION, snap, ordered, pauses, job.get("recorded_at")],
+                                    sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    cache = _speakers_dir(bronze) / f"{sha}.result.json"
     try:
         cached = json.loads(cache.read_text(encoding="utf-8"))
         if cached.get("key") == key:
             return cached if cached.get("attributed") else None
     except (OSError, ValueError):
         pass
-    state = job.get("state") or {}
     start = _epoch(job.get("recorded_at") or state.get("started_at"))
-    if start is None:
-        return None
-    pauses = state.get("pauses") or []
+    envelope_fn = envelope_fn or channel_envelope
     envelope = envelope_fn(Path(job["audio_path"])) if job.get("audio_path") else None
-    lag, correlation = estimate_lag(envelope, snap, start, pauses) if envelope else (0.0, 0.0)
-    names = attribute(ordered, snap, start, pauses, lag) if correlation >= MIN_CORRELATION else {}
+    if start is None or not envelope:
+        return None
+    lags = estimate_lags(envelope, snap, start, pauses)
+    names = attribute(ordered, snap, start, pauses, lags)
     remote = sum(1 for s in ordered if s.get("origin") == REMOTE_ORIGIN)
     spoken: Dict[str, int] = {}
     for item in names.values():
@@ -629,7 +745,8 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=channel_e
     roster = sorted(set((snap.get("devices") or {}).values()))
     result = {
         "key": key, "version": ALGORITHM_VERSION, "source": EVIDENCE_SOURCE, "decoder": snap.get("decoder"),
-        "meeting_code": snap.get("meeting_code"), "lag_seconds": lag, "correlation": round(correlation, 3),
+        "meeting_code": snap.get("meeting_code"),
+        "segments": [{"lag_seconds": lag, "correlation": round(r, 3)} for lag, r in lags],
         "remote_utterances": remote, "attributed": len(names),
         "participants": [{"name": n, "utterances": spoken.get(n, 0)} for n in roster],
         "names": {str(i): v for i, v in names.items()},
@@ -643,14 +760,16 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=channel_e
     return result if names else None
 
 
-def save_snapshot(bronze: Path, job_id: str, state: Dict[str, Any], stopped_at: float) -> Optional[Path]:
+def save_snapshot(bronze: Path, audio_sha256: str, state: Dict[str, Any], stopped_at: float) -> Optional[Path]:
     """Copia para o Bronze o trecho do Meet desta gravação. Falha nunca derruba o stop."""
     try:
+        if not re.fullmatch(r"[0-9a-f]{64}", audio_sha256 or ""):
+            return None
         snap = snapshot(state, stopped_at)
         if not snap:
             return None
         from castanha.durability import write_json
-        path = bronze / ".speakers" / f"{job_id}.json"
+        path = _speakers_dir(bronze) / f"{audio_sha256}.json"
         write_json(path, snap)
         return path
     except Exception as exc:  # noqa: BLE001 - evidência opcional, gravação é o que importa

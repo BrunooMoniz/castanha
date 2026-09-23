@@ -391,7 +391,7 @@ class CastanhaEngine:
                 write_json(job_file, job)
                 from castanha import meet_speakers
                 if meet_speakers.enabled(self.config):
-                    meet_speakers.save_snapshot(bronze, job_id, state, time.time())
+                    meet_speakers.save_snapshot(bronze, job["sha256"], state, time.time())
                 metadata = self.storage._read_bronze_metadata(slug) or {
                     "slug": slug, "title": title, "recorded_at": job["recorded_at"],
                     "mode": state.get("mode", "dual"), "calendar_event": current_meeting,

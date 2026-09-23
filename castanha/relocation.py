@@ -488,7 +488,8 @@ def _attach(storage, dest_slug: str, dest_title: str, bronze_b: Path, quarantine
         write_json(job_file, new_job)
     # Artefatos por hash do áudio (canais já transcritos, escolha de provedor):
     # com eles o destino não precisa voltar ao ASR nem à VPS.
-    for relative in (Path(".channels") / sha, Path(".providers") / f"{sha}.json"):
+    for relative in (Path(".channels") / sha, Path(".providers") / f"{sha}.json",
+                     Path(".speakers") / f"{sha}.json"):
         source, target = bronze_a / relative, bronze_b / relative
         if source.exists() and not target.exists():
             target.parent.mkdir(exist_ok=True)
