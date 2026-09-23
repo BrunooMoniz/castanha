@@ -86,6 +86,10 @@ class DecoderTest(unittest.TestCase):
         with self.assertRaises(Exception):
             ms.decode_collections(b"nem gzip")
 
+    def test_truncated_message_is_an_error_not_an_empty_update(self):
+        with self.assertRaises(ValueError):
+            ms.decode_collections(source_message(BETO, 111)[:-12])
+
     def test_decompression_bomb_is_refused(self):
         with self.assertRaises(ValueError):
             ms.decode_collections(gzip.compress(b"\0" * (ms.MAX_INFLATED_BYTES + 10)))
@@ -182,6 +186,12 @@ class SessionTest(unittest.TestCase):
         self.assertEqual([r["t"] for r in records if r["type"] == "source"], [learned])
         self.assertEqual([r["reason"] for r in records if r["type"] == "error"], ["decode"])
 
+    def test_incomplete_replay_is_recorded_as_error(self):
+        self.active = True
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.send(type="replay_incomplete")
+        self.assertIn('"reason": "replay"', next(self.root.glob("*.jsonl")).read_text())
+
     def test_other_call_in_the_same_tab_is_ignored(self):
         self.active = True
         self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
@@ -237,6 +247,17 @@ class TimelineTest(unittest.TestCase):
     def test_voice_before_the_source_was_bound_belongs_to_nobody(self):
         snap = dict(self.snap(), sources={"111": [[self.start + 9, ANA]], "222": [[0, BETO]]})
         self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+
+    def test_source_bound_late_competes_even_with_someone_named_talking(self):
+        snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 333))
+        snap["sources"]["333"] = [[self.start + 9, f"{SPACE}/devices/206"]]
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+
+    def test_renaming_a_device_does_not_rewrite_the_past(self):
+        snap = dict(self.snap(), devices={ANA: [[0, "Ana Teste"], [self.start + 10, "Outro Nome"]],
+                                          BETO: [[0, "Beto Teste"]]})
+        names = attribute([self.utt(1.1, 3.9)], snap, self.start)
+        self.assertEqual(names[0]["name"], "Ana Teste")
 
     def test_unbound_voice_alone_competes_with_a_named_one(self):
         # Host reiniciado: a fonte 777 não tem dono no mapa e fala sozinha 6 s.
@@ -346,7 +367,7 @@ class SnapshotTest(unittest.TestCase):
     def session(self, code, begin, end, name="Ana Teste"):
         path = self.root / f"{code}-{int(begin)}.jsonl"
         records = [{"type": "session", "code": code, "t": begin},
-                   {"type": "device", "device": ANA, "name": name},
+                   {"type": "device", "t": begin, "device": ANA, "name": name},
                    {"type": "source", "t": begin, "device": ANA, "ssrc": 111},
                    {"type": "levels", "frames": frames(begin, end, 111, step=0.5)}]
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n{cortada")
@@ -358,7 +379,7 @@ class SnapshotTest(unittest.TestCase):
         self.session(CODE, self.t0 - 600, self.t0 + 60)
         snap = ms.snapshot(self.state(), self.t0 + 30, root=self.root)
         self.assertEqual(snap["meeting_code"], CODE)
-        self.assertEqual(snap["devices"], {ANA: "Ana Teste"})
+        self.assertEqual(snap["devices"], {ANA: [[self.t0 - 600, "Ana Teste"]]})
         self.assertGreaterEqual(snap["frames"][0][0], self.t0 - ms.SNAPSHOT_MARGIN)
         self.assertLessEqual(snap["frames"][-1][0], self.t0 + 30 + ms.SNAPSHOT_MARGIN)
 
@@ -381,6 +402,10 @@ class SnapshotTest(unittest.TestCase):
         snap = ms.snapshot(state, self.t0 + 30, root=self.root)
         self.assertFalse(any(self.t0 + 10 <= f[0] <= self.t0 + 20 for f in snap["frames"]))
         self.assertEqual(snap["errors"], 1)
+        # Parou pausado: da pausa ao stop nada entra.
+        stopped = dict(self.state(), pauses=[{"paused_at": self.t0 + 25, "resumed_at": None}])
+        snap = ms.snapshot(stopped, self.t0 + 30, root=self.root)
+        self.assertFalse(any(self.t0 + 25 <= f[0] <= self.t0 + 30 for f in snap["frames"]))
 
     def test_no_overlap_means_no_snapshot(self):
         self.session(CODE, self.t0 - 7200, self.t0 - 3600)
@@ -486,8 +511,8 @@ class EngineIntegrationTest(unittest.TestCase):
         meet = self.root / "state/castanha/meet"
         meet.mkdir(parents=True)
         records = [{"type": "session", "code": CODE, "t": t0 - 60},
-                   {"type": "device", "device": ANA, "name": "Ana Teste"},
-                   {"type": "device", "device": BETO, "name": "Beto Teste"},
+                   {"type": "device", "t": t0 - 60, "device": ANA, "name": "Ana Teste"},
+                   {"type": "device", "t": t0 - 60, "device": BETO, "name": "Beto Teste"},
                    {"type": "source", "t": t0 - 60, "device": ANA, "ssrc": 111},
                    {"type": "source", "t": t0 - 60, "device": BETO, "ssrc": 222},
                    {"type": "levels", "frames": frames(t0 + 1, t0 + 4, 111) + frames(t0 + 5, t0 + 8, 222)}]
@@ -551,9 +576,26 @@ class EngineIntegrationTest(unittest.TestCase):
         from castanha.recording_exclusion import exclude_recording
         result = exclude_recording(slug, name, engine.storage)
         self.assertEqual(sorted(p.name for p in (bronze / ".speakers").iterdir()), [], result)
+        self.assertIsNone(engine.storage._read_bronze_metadata(slug).get("speaker_attribution"))
         identity = engine.storage._read_bronze_metadata(slug)["exclusion_id"]
         restore_recording(slug, identity, engine.storage)
         self.assertEqual(sorted(p.name for p in (bronze / ".speakers").iterdir()), before)
+
+    def test_voice_only_in_the_snapshot_margin_is_not_presence(self):
+        # Carla fala 3 s antes do início (dentro da margem de 5 s) e nunca mais.
+        meet = self.root / "state/castanha/meet"
+        path = next(meet.glob("*.jsonl"))
+        t0 = self.started.timestamp()
+        carla = f"{SPACE}/devices/207"
+        with open(path, "a") as handle:
+            for record in ({"type": "device", "t": t0 - 60, "device": carla, "name": "Carla Teste"},
+                           {"type": "source", "t": t0 - 60, "device": carla, "ssrc": 333},
+                           {"type": "levels", "frames": frames(t0 - 4, t0 - 3, 333)}):
+                handle.write(json.dumps(record) + "\n")
+        engine = self.engine()
+        slug = self.stop(engine)["result"]["slug"]
+        names = [p["name"] for p in engine.storage._read_bronze_metadata(slug)["speaker_attribution"]["participants"]]
+        self.assertEqual(names, ["Ana Teste", "Beto Teste"])
 
     def test_unmeasured_channel_is_not_cached_as_no_names(self):
         engine = self.engine()

@@ -16,9 +16,12 @@
   // O mapa só chega quando alguém entra ou muda. Se o host nativo reiniciar,
   // ele precisa receber tudo de novo: guardamos as mensagens e reenviamos.
   const history = [];
+  let overflow = false;
   window.addEventListener("message", (ev) => {
     if (ev.source !== window || !ev.data || ev.data[TAG + "-replay"] !== true) return;
     for (const msg of history) post({ ...msg, replay: true });
+    // Histórico cortado: o host marca a janela e não atribui com mapa velho.
+    if (overflow) post({ type: "replay_incomplete", code: code(), t: Date.now() });
   });
   const watch = (channel) => {
     if (channel.label !== "collections") return;
@@ -27,7 +30,7 @@
       const t = Date.now();
       const send = (buf) => {
         const msg = { type: "collections", code: code(), t, b64: toB64(buf) };
-        if (history.length < 2000) history.push(msg);
+        if (history.length < 20000) history.push(msg); else overflow = true;
         post(msg);
       };
       if (ev.data instanceof ArrayBuffer) send(ev.data);

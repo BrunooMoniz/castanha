@@ -240,6 +240,8 @@ def _exclude_locked(fd, storage, slug, filename, expected_revision=None):
             'processing_status': 'invalidated' if remaining else 'empty', 'summary_status': 'invalidated' if remaining else 'unavailable',
             'transcription_status': 'pending' if remaining else 'unavailable', 'transcription_pending': False,
             'summary_error': '', 'transcription_error': None, 'transcription_pending_reason': None,
+            # Quem falou (Meet) é derivado das gravações; volta no reprocessamento.
+            'speaker_attribution': None,
             'recordings': [r for r in metadata.get('recordings', []) if r.get('filename') != filename],
             'recordings_count': len(remaining), 'bronze_audio_file': remaining[0]['path'] if remaining else None,
             'duration_seconds': sum(r.get('duration_seconds', 0) for r in remaining),

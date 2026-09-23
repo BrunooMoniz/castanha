@@ -153,6 +153,8 @@ def inflate(raw: bytes) -> bytes:
     out = inflater.decompress(raw, MAX_INFLATED_BYTES)
     if inflater.unconsumed_tail:
         raise ValueError("mensagem do Meet grande demais")
+    if not inflater.eof:
+        raise ValueError("mensagem do Meet truncada")
     return out
 
 
@@ -231,7 +233,7 @@ class Session:
     """
 
     def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None,
-                 check_interval: float = 2.0):
+                 check_interval: float = 0.5):
         self.check_interval = check_interval
         self.recording_active = recording_active
         self.clock = clock
@@ -332,6 +334,9 @@ class Session:
                         clean.append([round(ts / 1000.0, 3), int(ssrc), round(float(level), 3)])
             if clean:
                 self._write({"type": "levels", "t": now, "frames": clean})
+        elif kind == "replay_incomplete":
+            # A página não guardou o histórico inteiro: o mapa reenviado pode estar velho.
+            self.note_error("replay")
         elif kind == "bye":
             self.close()
 
@@ -467,7 +472,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
         code = next(iter(candidates))
     else:
         return None
-    pauses = _pause_windows(start, state.get("pauses"))
+    pauses = _pause_windows(start, state.get("pauses"), end=stopped_at)
     devices, sources, frames, late, errors = {}, {}, [], set(), 0
     for records in candidates[code]:
         for record in records:
@@ -476,8 +481,8 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
                 if kind == "source" and isinstance(record.get("ssrc"), int):
                     late.add(str(record["ssrc"]))
                 continue
-            if kind == "device" and isinstance(record.get("name"), str):
-                devices[record.get("device")] = record["name"]
+            if kind == "device" and isinstance(record.get("name"), str) and _number(t):
+                devices.setdefault(record.get("device"), []).append([t, record["name"]])
             elif kind == "source" and isinstance(record.get("ssrc"), int) and _number(t):
                 sources.setdefault(str(record["ssrc"]), []).append([t, record.get("device")])
             elif kind == "levels":
@@ -489,14 +494,14 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
                 errors += 1
             elif kind == "session" and record.get("errors_before"):
                 errors += 1
-    for history in sources.values():
+    for history in list(sources.values()) + list(devices.values()):
         history.sort(key=lambda item: item[0])
     frames.sort()
     if not frames:
         return None
     # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
     return {"version": 2, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
-            "window": [lo, hi], "devices": devices, "sources": sources,
+            "window": [lo, hi], "recording": [start, stopped_at], "devices": devices, "sources": sources,
             "late_sources": sorted(late - set(sources)), "errors": errors, "frames": frames}
 
 
@@ -510,9 +515,29 @@ def _owner(history, ts: float):
     return owner
 
 
-def _pause_windows(start: float, pauses) -> List[Tuple[float, float]]:
-    return [(p["paused_at"], p["resumed_at"]) for p in pauses or []
-            if _number(p.get("paused_at")) and _number(p.get("resumed_at")) and p["resumed_at"] >= p["paused_at"]]
+def _pause_windows(start: float, pauses, end: Optional[float] = None) -> List[Tuple[float, float]]:
+    """Janelas de pausa em relógio de parede. Sem retomada, a pausa vai até `end` (o stop)."""
+    windows = []
+    for p in pauses or []:
+        at, until = p.get("paused_at"), p.get("resumed_at")
+        if until is None and end is not None:
+            until = end
+        if _number(at) and _number(until) and until >= at:
+            windows.append((at, until))
+    return windows
+
+
+def _name_at(devices: Dict[str, Any], device: Optional[str], ts: float) -> Optional[str]:
+    """Nome do dispositivo no instante; renomear não reescreve o passado."""
+    history = devices.get(device) if device else None
+    if isinstance(history, str):
+        return history
+    name = None
+    for t, value in history or []:
+        if t > ts:
+            break
+        name = value
+    return name
 
 
 def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = ()) -> List[Tuple[float, float, Optional[str]]]:
@@ -537,12 +562,12 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
 
     for ts, ssrc in active:
         history = sources.get(ssrc)
-        device = _owner(history, ts) if history else None
-        if device is None and ssrc not in late and someone_owned_near(ts):
-            # Fonte sem dono junto de quem tem dono: a mistura do Meet. Sozinha,
-            # é alguém que o host não mapeou (reinício, mensagem perdida).
+        if not history and ssrc not in late and someone_owned_near(ts):
+            # Fonte que nunca teve dono, junto de quem tem: a mistura do Meet.
+            # Sozinha, é alguém que o host não mapeou (reinício, mensagem perdida).
             continue
-        per_name.setdefault(devices.get(device) if device else None, []).append(ts)
+        device = _owner(history, ts) if history else None
+        per_name.setdefault(_name_at(devices, device, ts), []).append(ts)
     intervals = []
     for name, stamps in per_name.items():
         stamps.sort()
@@ -773,8 +798,11 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     spoken: Dict[str, int] = {}
     for item in names.values():
         spoken[item["name"]] = spoken.get(item["name"], 0) + 1
-    # Presença observada = teve voz dentro da gravação; quem só estava no mapa fica de fora.
-    roster = sorted({name for _, _, name in speaking_intervals(snap, exclude=_pause_windows(start, pauses)) if name})
+    # Presença observada = teve voz dentro da gravação (sem a margem do recorte);
+    # quem só estava no mapa fica de fora.
+    rec_lo, rec_hi = snap.get("recording") or [start, math.inf]
+    roster = sorted({name for a, b, name in speaking_intervals(snap, exclude=_pause_windows(start, pauses, end=rec_hi))
+                     if name and b > rec_lo and a < rec_hi})
     result = {
         "key": key, "version": ALGORITHM_VERSION, "source": EVIDENCE_SOURCE, "decoder": snap.get("decoder"),
         "meeting_code": snap.get("meeting_code"),
