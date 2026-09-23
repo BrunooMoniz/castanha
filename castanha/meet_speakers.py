@@ -34,8 +34,24 @@ EXTENSION_ID = "fmiffekiigfbnmidnclnpfhndjbnlegj"
 DECODER_VERSION = "meet-collections-v1"
 ALGORITHM_VERSION = "meet-speakers-v1"
 EVIDENCE_SOURCE = "google_meet_webrtc"
+TEAMS_EVIDENCE_SOURCE = "microsoft_teams_webrtc"
+EVIDENCE_SOURCES = (EVIDENCE_SOURCE, TEAMS_EVIDENCE_SOURCE)
 
-MEET_CODE_RE = re.compile(r"^[a-z]{3,}-[a-z]{3,}-[a-z]{3,}$")
+# Meet: código da sala. Teams: "teams-" + hash do thread da reunião (feito na página).
+MEET_CODE_RE = re.compile(r"^(?:[a-z]{3,}-[a-z]{3,}-[a-z]{3,}|teams-[0-9a-f]{8})$")
+TEAMS_ID_RE = re.compile(r"^[\w:.@-]{1,200}$")
+
+
+def platform(code: Optional[str]) -> str:
+    return "teams" if isinstance(code, str) and code.startswith("teams-") else "meet"
+
+
+def evidence_source(code: Optional[str]) -> str:
+    return TEAMS_EVIDENCE_SOURCE if platform(code) == "teams" else EVIDENCE_SOURCE
+
+
+def label(code: Optional[str]) -> str:
+    return "Teams" if platform(code) == "teams" else "Meet"
 DEVICE_RE = re.compile(r"^spaces/[\w-]+/devices/\d+$")
 MAX_MESSAGE_BYTES = 1 << 20
 # A extensão manda níveis a cada 1 s: o recorte espera o último lote.
@@ -301,6 +317,19 @@ class Session:
         self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.file.flush()
 
+    def _apply_mapping(self, events, learned: float, status) -> None:
+        for event in events:
+            if event["type"] == "device":
+                changed = (self.devices.get(event["device"]) or (None,))[0] != event["name"]
+                if changed:
+                    self.devices[event["device"]] = (event["name"], learned)
+            else:
+                changed = (self.sources.get(event["ssrc"]) or (None,))[0] != event["device"]
+                if changed:
+                    self.sources[event["ssrc"]] = (event["device"], learned)
+            if changed and status is not None and self.file is not None:
+                self._write({**event, "t": learned})
+
     def note_error(self, reason: str) -> None:
         """Mapa possivelmente incompleto: fica registrado para o recorte recusar a janela."""
         self.errors += 1
@@ -337,17 +366,7 @@ class Session:
             # reenvio depois de um reinício do host.
             sent = msg.get("t")
             learned = sent / 1000.0 if _number(sent) and abs(sent / 1000.0 - now) < 86400 else now
-            for event in events:
-                if event["type"] == "device":
-                    changed = (self.devices.get(event["device"]) or (None,))[0] != event["name"]
-                    if changed:
-                        self.devices[event["device"]] = (event["name"], learned)
-                else:
-                    changed = (self.sources.get(event["ssrc"]) or (None,))[0] != event["device"]
-                    if changed:
-                        self.sources[event["ssrc"]] = (event["device"], learned)
-                if changed and status is not None and self.file is not None:
-                    self._write({**event, "t": learned})
+            self._apply_mapping(events, learned, status)
         elif kind == "levels":
             frames = msg.get("frames") if isinstance(msg.get("frames"), list) else []
             gaps = [g for g in (msg.get("gaps") if isinstance(msg.get("gaps"), list) else [])[:100]
@@ -376,6 +395,22 @@ class Session:
                         clean.append([round(ts / 1000.0, 3), int(ssrc), round(float(level), 3)])
             if clean:
                 self._write({"type": "levels", "t": now, "frames": clean})
+        elif kind == "mapping":
+            # Teams: a página já entrega dispositivo→nome e fonte→dispositivo.
+            if platform(self.code) != "teams":
+                return
+            sent = msg.get("t")
+            learned = sent / 1000.0 if _number(sent) and abs(sent / 1000.0 - now) < 86400 else now
+            events = []
+            for pair in (msg.get("devices") if isinstance(msg.get("devices"), list) else [])[:500]:
+                if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and TEAMS_ID_RE.match(pair[0])
+                        and isinstance(pair[1], str) and pair[1].strip() and pair[1].isprintable()):
+                    events.append({"type": "device", "device": pair[0], "name": pair[1].strip()[:200]})
+            for pair in (msg.get("sources") if isinstance(msg.get("sources"), list) else [])[:500]:
+                if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], int) and not isinstance(pair[0], bool)
+                        and 0 < pair[0] < 2 ** 32 and isinstance(pair[1], str) and TEAMS_ID_RE.match(pair[1])):
+                    events.append({"type": "source", "device": pair[1], "ssrc": pair[0]})
+            self._apply_mapping(events, learned, status)
         elif kind == "replay_incomplete":
             # A página não guardou o histórico inteiro: o mapa reenviado pode estar velho.
             self.note_error("replay")
@@ -544,7 +579,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
     if not frames:
         return None
     # Fonte que só ganhou dono depois da gravação era um participante: concorre sem nome.
-    return {"version": 2, "decoder": DECODER_VERSION, "source": EVIDENCE_SOURCE, "meeting_code": code,
+    return {"version": 2, "decoder": DECODER_VERSION, "source": evidence_source(code), "meeting_code": code,
             "window": [lo, hi], "recording": [start, stopped_at], "devices": devices, "sources": sources,
             "late_sources": sorted(late - set(sources)), "errors": errors, "gaps": sorted(gaps), "frames": frames}
 
@@ -828,16 +863,16 @@ def annotate(utterances: List[Dict[str, Any]], result: Optional[Dict[str, Any]])
         item = dict(utterance)
         hit = names.get(str(index))
         if hit:
-            item.update(attributed_name=hit["name"], attribution_source=EVIDENCE_SOURCE,
+            item.update(attributed_name=hit["name"], attribution_source=(result or {}).get("source", EVIDENCE_SOURCE),
                         attribution_coverage=hit["coverage"])
         out.append(item)
     return out
 
 
-def _render(utterances: List[Dict[str, Any]], names: Dict[int, Dict[str, Any]]) -> str:
+def _render(utterances: List[Dict[str, Any]], names: Dict[int, Dict[str, Any]], tag: str = "Meet") -> str:
     lines = []
     for index, s in enumerate(utterances):
-        speaker = f"{names[index]['name']} (Meet)" if index in names else s.get("speaker")
+        speaker = f"{names[index]['name']} ({tag})" if index in names else s.get("speaker")
         lines.append(f"[{float(s['start']):.2f}s–{float(s['end']):.2f}s] {speaker}: {s.get('text', '')}")
     return "\n".join(lines)
 
@@ -896,13 +931,14 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     roster = sorted({name for a, b, name in speaking_intervals(snap, exclude=_pause_windows(start, pauses, end=rec_hi))
                      if name and b > rec_lo and a < rec_hi})
     result = {
-        "key": key, "version": ALGORITHM_VERSION, "source": EVIDENCE_SOURCE, "decoder": snap.get("decoder"),
+        "key": key, "version": ALGORITHM_VERSION, "source": evidence_source(snap.get("meeting_code")),
+        "decoder": snap.get("decoder"),
         "meeting_code": snap.get("meeting_code"),
         "segments": [{"lag_seconds": lag, "correlation": round(r, 3)} for lag, r in lags],
         "remote_utterances": remote, "attributed": len(names),
         "participants": [{"name": n, "utterances": spoken.get(n, 0)} for n in roster],
         "names": {str(i): v for i, v in names.items()},
-        "text": _render(ordered, names) if names else None,
+        "text": _render(ordered, names, label(snap.get("meeting_code"))) if names else None,
     }
     try:
         from castanha.durability import write_json

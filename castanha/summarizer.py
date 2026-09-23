@@ -321,8 +321,8 @@ ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
   na fala também não prova que essa pessoa foi quem falou.
 - Preserve a origem e os tempos quando disponíveis. Sem evidência explícita
   de quem falou, mantenha autoria desconhecida e responsável null.
-- EXCEÇÃO com evidência: linha rotulada "Nome (Meet)" teve a voz atribuída pelo
-  sinal de áudio do próprio Google Meet, que mostrou essa pessoa falando em
+- EXCEÇÃO com evidência: linha rotulada "Nome (Meet)" ou "Nome (Teams)" teve a voz
+  atribuída pelo sinal de áudio da própria chamada, que mostrou essa pessoa falando em
   quase todo o trecho. Pode atribuir a ela o conteúdo principal da linha;
   uma interjeição curta de outra pessoa ainda pode estar misturada.
 """

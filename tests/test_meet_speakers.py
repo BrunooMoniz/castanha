@@ -776,3 +776,89 @@ class RelocationTest(RelocationFixture):
         self.assertEqual(json.loads(moved.read_text()), snap)
         self.assertFalse((self.storage.bronze_dir / self.a / ".speakers" / f"{sha}.json").exists())
         self.assertNotIn("__speakers", json.dumps(self.jobs(self.b)))
+
+
+class TeamsTest(unittest.TestCase):
+    """Teams: a página entrega o mapa pronto; o resto do caminho é o mesmo do Meet."""
+
+    TEAMS = "teams-0a1b2c3d"
+    ANA_ID, BETO_ID = "8:orgid:0000-ana", "8:orgid:0000-beto"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "meet"
+        self.now = 1_790_000_000.0
+        self.session = ms.Session(recording_active=lambda: {"status": "recording"},
+                                  clock=lambda: self.now, root=self.root, check_interval=0)
+
+    def test_mapping_message_feeds_the_same_timeline(self):
+        self.session.handle({"code": self.TEAMS, "type": "mapping", "t": self.now * 1000,
+                             "devices": [[self.ANA_ID, "Ana Teste"], [self.BETO_ID, "Beto Teste"], ["x y", "inválido"]],
+                             "sources": [[414, self.ANA_ID], [415, self.BETO_ID], [True, self.ANA_ID], [0, self.ANA_ID]]})
+        self.session.handle({"code": self.TEAMS, "type": "levels",
+                             "frames": [[(self.now + t) * 1000, 414, 0.2] for t in (1.0, 1.1)]})
+        self.session.close()
+        records = [json.loads(line) for line in next(self.root.glob("*.jsonl")).read_text().splitlines()]
+        self.assertEqual(sorted(r["device"] for r in records if r["type"] == "device"), [self.ANA_ID, self.BETO_ID])
+        self.assertEqual(sorted(r["ssrc"] for r in records if r["type"] == "source"), [414, 415])
+
+    def test_mapping_is_ignored_on_a_meet_session(self):
+        self.session.handle({"code": CODE, "type": "mapping", "t": self.now * 1000,
+                             "devices": [[self.ANA_ID, "Ana Teste"]], "sources": [[414, self.ANA_ID]]})
+        self.assertEqual(self.session.devices, {})
+
+    def test_codes_and_labels(self):
+        self.assertTrue(ms.MEET_CODE_RE.match(self.TEAMS))
+        self.assertFalse(ms.MEET_CODE_RE.match("teams-xyz"))
+        self.assertEqual((ms.label(self.TEAMS), ms.label(CODE)), ("Teams", "Meet"))
+        self.assertEqual(ms.evidence_source(self.TEAMS), "microsoft_teams_webrtc")
+
+    def test_teams_names_are_rendered_with_their_own_tag(self):
+        from castanha.durability import write_json
+        bronze = Path(self.temp.name) / "bronze"
+        start = self.now
+        snap = {"version": 2, "meeting_code": self.TEAMS, "decoder": ms.DECODER_VERSION,
+                "devices": {self.ANA_ID: [[0, "Ana Teste"]]}, "sources": {"414": [[0, self.ANA_ID]]},
+                "frames": frames(start + 1, start + 4, 414), "recording": [start, start + 10]}
+        sha = "a" * 64
+        write_json(bronze / ".speakers" / f"{sha}.json", snap)
+        job = {"id": "j", "sha256": sha, "channel_provenance": True, "recorded_at": start, "audio_path": "x",
+               "utterances": [{"speaker": "Áudio do sistema", "text": "oi", "start": 1.1, "end": 3.9,
+                               "channel": 1, "origin": "audio_sistema"}]}
+        envelope = [0.3 if 1 <= i * 0.1 < 4 else 0.0 for i in range(100)]
+        result = ms.attribution_for_job(bronze, job, envelope_fn=lambda _: envelope)
+        self.assertIn("Ana Teste (Teams): oi", result["text"])
+        self.assertEqual(result["source"], "microsoft_teams_webrtc")
+        self.assertEqual(ms.annotate(job["utterances"], result)[0]["attribution_source"], "microsoft_teams_webrtc")
+
+
+class TeamsPageScriptTest(unittest.TestCase):
+    """page.js num Teams simulado: mapa pronto e níveis por presença da fonte."""
+
+    def test_page_script_sends_teams_mapping_and_levels(self):
+        harness = Path(__file__).resolve().parent / "meet_page_harness.js"
+        out = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30, check=True)
+        posted = json.loads(out.stdout)
+        codes = {m.get("code") for m in posted}
+        self.assertEqual(len(codes), 1)
+        code = codes.pop()
+        self.assertTrue(ms.MEET_CODE_RE.match(code) and code.startswith("teams-"))
+        mappings = [m for m in posted if m["type"] == "mapping"]
+        devices = {d for m in mappings for d, _ in m["devices"]}
+        owners = {s: o for m in mappings for s, o in m["sources"]}
+        self.assertEqual(devices, {"8:orgid:ana", "8:orgid:beto"})
+        self.assertEqual(owners, {414: "8:orgid:ana", 415: "8:orgid:beto"})
+        frames_ = [f for m in posted if m["type"] == "levels" for f in m["frames"]]
+        self.assertEqual({f[1] for f in frames_}, {414, 415})
+        self.assertTrue(all(f[2] == 0.2 for f in frames_))
+        # O que a página manda o host aceita e transforma na mesma linha do tempo.
+        with tempfile.TemporaryDirectory() as tmp:
+            session = ms.Session(recording_active=lambda: {"status": "recording"}, clock=lambda: 1790000003.0,
+                                 root=Path(tmp), check_interval=0)
+            for message in posted:
+                session.handle(message)
+            session.close()
+            text = next(Path(tmp).glob("*.jsonl")).read_text()
+            self.assertIn("Beto Teste", text)
+            self.assertIn('"ssrc": 415', text)

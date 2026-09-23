@@ -316,7 +316,7 @@ class MeetingLibrary:
                 proven = source.get('channel_provenance') is True
                 label = ('Microfone local' if channel == 0 else 'Áudio remoto' if channel == 1 else 'Canal não identificado') if proven else 'Origem não identificada'
                 named = utterance.get('attributed_name')
-                if proven and channel == 1 and utterance.get('attribution_source') == 'google_meet_webrtc' and _text(named):
+                if proven and channel == 1 and utterance.get('attribution_source') in ('google_meet_webrtc', 'microsoft_teams_webrtc') and _text(named):
                     label = _text(named)
                 segments.append({'text': utterance['text'], 'start': start if valid_time else None,
                     'end': end if valid_time else None, 'channel': label, 'audio_index': index,

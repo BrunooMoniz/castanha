@@ -5,7 +5,27 @@
   if (window.__castanhaMeet) return;
   window.__castanhaMeet = true;
   const TAG = "castanha-meet-v1";
-  const code = () => (location.pathname.match(/^\/([a-z]{3,}-[a-z]{3,}-[a-z]{3,})/) || [])[1] || null;
+  const TEAMS = /(^|\.)teams\.(microsoft\.com|live\.com|cloud\.microsoft)$/.test(location.hostname);
+  // Teams: a reunião é o thread "19:meeting_...@thread.v2", na URL ou na chamada ativa.
+  const hash = (text) => { let h = 5381; for (const ch of text) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0; return h.toString(16).padStart(8, "0"); };
+  const teamsCall = () => {
+    try {
+      if (window.callingDebug && window.callingDebug.observableCall) return window.callingDebug.observableCall;
+      const calling = window.msteamscalling && window.msteamscalling.deref && window.msteamscalling.deref();
+      return calling && calling.callingService && calling.callingService.getActiveCall && calling.callingService.getActiveCall();
+    } catch (e) { return null; }
+  };
+  const teamsThread = () => {
+    const call = teamsCall();
+    if (call && typeof call.threadId === "string") return call.threadId;
+    const m = decodeURIComponent(location.href).match(/19:meeting_[A-Za-z0-9_-]+@thread\.v2/);
+    return m ? m[0] : null;
+  };
+  const code = () => {
+    if (!TEAMS) return (location.pathname.match(/^\/([a-z]{3,}-[a-z]{3,}-[a-z]{3,})/) || [])[1] || null;
+    const thread = teamsThread();
+    return thread && teamsCall() ? "teams-" + hash(thread) : null;
+  };
   const post = (msg) => window.postMessage({ [TAG]: msg }, location.origin);
   const toB64 = (buf) => {
     const u = new Uint8Array(buf); let s = "";
@@ -52,6 +72,35 @@
   // Cada fonte contribuinte (CSRC) traz o nível do último pacote e o instante
   // em que ele chegou. O instante do pacote vale mais que o da consulta.
   const seen = new Map();
+  const PRESENT_LEVEL = 0.2;
+  const teamsSources = new Set();
+  // Teams não tem o canal "collections": a própria página mantém a lista de
+  // participantes, e cada um responde se uma fonte de áudio (CSRC) é dele.
+  const teamsKnown = new Map();
+  const teamsOwner = new Map();
+  if (TEAMS) setInterval(() => {
+    const c = code();
+    const call = teamsCall();
+    if (!c || !call) return;
+    const people = [];
+    try {
+      for (const p of call.participants || []) if (p && p.id && p.displayName) people.push(p);
+    } catch (e) { return; }
+    const devices = [], sources = [];
+    for (const p of people) {
+      if (teamsKnown.get(p.id) !== p.displayName) { teamsKnown.set(p.id, p.displayName); devices.push([p.id, String(p.displayName)]); }
+    }
+    for (const csrc of teamsSources) {
+      let owner = null;
+      for (const p of people) { try { if (p.hasAudioSource && p.hasAudioSource(csrc)) { owner = p.id; break; } } catch (e) {} }
+      if (owner && teamsOwner.get(csrc) !== owner) { teamsOwner.set(csrc, owner); sources.push([csrc, owner]); }
+    }
+    if (devices.length || sources.length) {
+      const msg = { type: "mapping", code: c, t: Date.now(), devices, sources };
+      if (history.length < 20000) history.push(msg); else overflow = true;
+      post(msg);
+    }
+  }, 500);
   let frames = [];
   // Travada da página: sem consulta, falas de outra pessoa podem sumir. O
   // host recebe o buraco e não atribui nome às falas que caem nele. Acima de
@@ -73,11 +122,14 @@
         let sources = [];
         try { sources = r.getContributingSources(); } catch (e) { continue; }
         for (const s of sources) {
-          if (typeof s.audioLevel !== "number" || s.audioLevel < 0.01) continue;
+          // Teams pode não mandar o nível: fonte presente no pacote = falando.
+          const level = typeof s.audioLevel === "number" ? s.audioLevel : (TEAMS ? PRESENT_LEVEL : -1);
+          if (level < 0.01) continue;
           const ts = Math.round(epoch(s.timestamp));
           if (seen.get(s.source) === ts) continue;
           seen.set(s.source, ts);
-          frames.push([ts, s.source, Math.round(s.audioLevel * 1000) / 1000]);
+          if (TEAMS) teamsSources.add(s.source);
+          frames.push([ts, s.source, Math.round(level * 1000) / 1000]);
         }
       }
     }

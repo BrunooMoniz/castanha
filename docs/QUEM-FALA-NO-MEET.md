@@ -1,4 +1,4 @@
-# Quem fala no Google Meet
+# Quem fala no Google Meet e no Microsoft Teams
 
 O canal do sistema junta todos os participantes remotos. Numa chamada do Google
 Meet, o próprio navegador sabe quem está falando: o Castanha passa a usar isso
@@ -51,6 +51,20 @@ No texto: `[12.30s–15.10s] Ana Souza (Meet): ...`. Nos segmentos:
 sem alterar `speaker` e `origin`. O Silver ganha o bloco `speakers` com
 presença observada. O filtro do Gold (`_ground_gold`) continua igual.
 
+## Microsoft Teams (no navegador)
+
+A mesma extensão roda em `teams.microsoft.com`, `teams.live.com` e
+`teams.cloud.microsoft`. O Teams não tem o canal `collections`: a própria página
+mantém a chamada ativa (`msteamscalling` / `callingDebug.observableCall`) com os
+participantes, e cada participante responde `hasAudioSource(csrc)` para as
+fontes de áudio vistas nos pacotes. A página manda esse mapa pronto
+(`type: mapping`) e o host grava no mesmo formato do Meet. Se o Teams não mandar
+o nível de áudio, a presença da fonte no pacote conta como fala (nível 0,2).
+O código da sessão é `teams-` + hash do thread da reunião. No texto aparece
+`Nome (Teams)` e a evidência é `microsoft_teams_webrtc`. Os objetos internos do
+Teams não são documentados: se sumirem, a página não manda mapa e a transcrição
+fica com o rótulo do canal.
+
 ## Ligar, conferir, desligar
 
 ```
@@ -70,6 +84,6 @@ A extensão só carrega quando o Chromium é aberto de novo. `install` guarda o
 2. Reuniões já processadas: `castanha retry <slug>` refaz a transcrição com os
    rótulos do canal (a flag desligada ignora `.speakers/`).
 
-Limites: só Google Meet no Chromium; a própria voz não passa pela rede do Meet
+Limites: só Google Meet e Teams no navegador, no Chromium; o app desktop do Teams não é coberto; a própria voz não passa pela rede do Meet
 (fica no microfone); duas pessoas na mesma sala e no mesmo dispositivo saem com
 o nome do dispositivo.
