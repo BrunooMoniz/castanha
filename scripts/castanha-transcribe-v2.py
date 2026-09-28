@@ -237,8 +237,11 @@ def transcribe(request, audio_path, model_factory=None, lock_path=None, inherite
                     or not 0 <= start <= end):
                 raise ValueError("Segmento ASR inválido")
             # Com VAD, o último segmento termina no fim da janela de 30 s, além
-            # do áudio. Recusar travava a reunião inteira para sempre.
-            start, end = min(start, duration), min(end, duration)
+            # do áudio. Recusar travava a reunião inteira para sempre. Segmento
+            # que começa depois do áudio não tem som por trás: é descartado.
+            if start >= duration:
+                continue
+            end = min(end, duration)
             if text.strip():
                 result.append({"start": start, "end": end, "text": text.strip()})
             if progress is not None:

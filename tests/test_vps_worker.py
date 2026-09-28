@@ -120,6 +120,17 @@ class VpsWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(result["segments"][-1]["end"], 2.0, places=2)
         self.assertEqual(result["segments"][-1]["start"], 1.5)
 
+    def test_segment_starting_after_the_audio_is_dropped(self):
+        class Model:
+            def __init__(self, *args, **kwargs):
+                pass
+            def transcribe(self, *args, **kwargs):
+                return iter([SimpleNamespace(start=0.0, end=1.0, text="Bom dia."),
+                             SimpleNamespace(start=2.5, end=30.0, text="Obrigado por assistir.")]), None
+        result = worker.transcribe(self.request, self.audio, Model, self.root / "global.lock")
+        self.assertEqual(result["text"], "Bom dia.")
+        self.assertEqual(len(result["segments"]), 1)
+
     def test_inverted_or_negative_segment_is_still_refused(self):
         for start, end in ((1.0, 0.5), (-0.1, 0.5), (float("nan"), 1.0)):
             class Model:
