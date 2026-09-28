@@ -232,6 +232,15 @@ class VpsChannelTransportTests(unittest.TestCase):
         VpsSshTranscriber('fixture', TEST_CONTRACT).transcribe(path, mode='mic_only')
         self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 1)
 
+    def test_retry_reuses_the_16k_transport_instead_of_resampling_again(self):
+        path = self.flac('high.flac', rate=48000)
+        self.submit(path)
+        target = path.parent / '.vps-transport' / 'high.vps-16k.flac'
+        stamp = target.stat().st_mtime_ns
+        self.submit(path)
+        self.assertEqual(target.stat().st_mtime_ns, stamp)
+        self.assertEqual(sum(args[0] == 'scp' for args, _ in self.remote.calls), 1)
+
     def test_invalid_mode_stereo_corruption_and_disguised_container_never_send(self):
         stereo = self.flac('stereo.flac', channels=2)
         corrupt = self.root / 'corrupt.flac'

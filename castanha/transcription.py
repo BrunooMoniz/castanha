@@ -423,6 +423,11 @@ def _vps_mono_flac(audio_path: Path) -> Path:
     # Capturas de 44,1/48 kHz são preservadas. Só o derivado de transporte é
     # reamostrado para o contrato de entrada do Whisper, sem codec com perda.
     target = audio_path.parent / ".vps-transport" / (audio_path.stem + ".vps-16k.flac")
+    # Publicado só por rename atômico; se é mais novo que a fonte, é derivado dela.
+    if target.exists() and target.stat().st_mtime_ns >= audio_path.stat().st_mtime_ns:
+        old_rate, old_duration = inspect(target)
+        if old_rate == 16000 and abs(old_duration - duration) <= 0.05:
+            return target
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.stem}-{uuid.uuid4().hex}.flac")
     try:

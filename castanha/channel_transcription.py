@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -96,14 +97,27 @@ def prepare_channels(source: Path, directory: Path, capture_mode: str = "dual") 
     canais = []
     for channel in range(total):
         target = directory / f"channel-{channel}.flac"
-        # Recriar o derivado é seguro: nunca é a fonte e o conteúdo é determinista.
-        subprocess.run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source),
-             "-map", "0:a:0", "-af", f"pan=mono|c0=c{channel}",
-             "-c:a", "flac", str(target)],
-            capture_output=True, check=True, timeout=600,
-        )
-        _check_derived(target, duration)
+        # O diretório é chaveado pelo SHA da fonte e a publicação é atômica com
+        # marcador, então um derivado marcado já é o conteúdo certo. Recriá-lo
+        # a cada retomada custava minutos de CPU por passada.
+        done = target.with_name(target.name + ".done")
+        if not (done.exists() and target.exists()):
+            done.unlink(missing_ok=True)
+            temporary = target.with_name(f".{target.stem}-{uuid.uuid4().hex}.flac")
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source),
+                     "-map", "0:a:0", "-af", f"pan=mono|c0=c{channel}",
+                     "-c:a", "flac", str(temporary)],
+                    capture_output=True, check=True, timeout=600,
+                )
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            _check_derived(target, duration)
+            done.touch()
+        else:
+            _check_derived(target, duration)
         canais.append({"channel": channel, "path": target,
                        "label": (LABELS[channel] if capture_mode == "dual" else f"Áudio da gravação (canal {channel})") if total == 2 else MONO_LABEL,
                        "origin": (ORIGINS[channel] if capture_mode == "dual" else "gravacao_microfone") if total == 2 else MONO_ORIGIN,

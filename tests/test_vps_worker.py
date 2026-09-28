@@ -107,6 +107,29 @@ class VpsWorkerTests(unittest.TestCase):
         self.assertIs(result["no_speech"], True)
         self.assertEqual(result["request_sha256"], self.request["request_sha256"])
 
+    def test_last_segment_past_the_audio_end_is_clamped_instead_of_blocking(self):
+        # Medido em reunião real: VPS devolveu 1243,07-1273,05 s num áudio de 1249,15 s.
+        class Model:
+            def __init__(self, *args, **kwargs):
+                pass
+            def transcribe(self, *args, **kwargs):
+                return iter([SimpleNamespace(start=0.0, end=1.0, text="Bom dia."),
+                             SimpleNamespace(start=1.5, end=31.5, text="Tchau.")]), None
+        result = worker.transcribe(self.request, self.audio, Model, self.root / "global.lock")
+        self.assertEqual(result["text"], "Bom dia. Tchau.")
+        self.assertAlmostEqual(result["segments"][-1]["end"], 2.0, places=2)
+        self.assertEqual(result["segments"][-1]["start"], 1.5)
+
+    def test_inverted_or_negative_segment_is_still_refused(self):
+        for start, end in ((1.0, 0.5), (-0.1, 0.5), (float("nan"), 1.0)):
+            class Model:
+                def __init__(self, *args, **kwargs):
+                    pass
+                def transcribe(self, *args, s=start, e=end, **kwargs):
+                    return iter([SimpleNamespace(start=s, end=e, text="x")]), None
+            with self.assertRaises(ValueError):
+                worker.transcribe(self.request, self.audio, Model, self.root / "global.lock")
+
     def test_describe_without_model_dependency(self):
         result = subprocess.run(["python3", str(Path(worker.__file__)), "--describe-contract"],
                                 check=True, text=True, capture_output=True)

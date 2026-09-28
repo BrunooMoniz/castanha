@@ -39,6 +39,17 @@ class TestRetryQueue(unittest.TestCase):
             drain_queue(self.storage, now=161)
             self.assertEqual(sync.call_count, 2)
 
+    def test_pending_that_never_advances_backs_off_to_one_hour(self):
+        from castanha.retry import drain_queue
+        directory = self.meeting("a")
+        with patch("castanha.retry.sync_meeting", return_value={"status": "pending"}):
+            now = 0
+            for _ in range(25):
+                drain_queue(self.storage, now=now)
+                receipt = json.loads((directory / ".sync-retry.json").read_text())
+                now = receipt["next_attempt_at"]
+        self.assertEqual(receipt["next_attempt_at"] - receipt["last_attempt_at"], 3600)
+
     def test_crash_keeps_retry_lease_on_disk(self):
         from castanha.retry import drain_queue
         self.meeting("a")

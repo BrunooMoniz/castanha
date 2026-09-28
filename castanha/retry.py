@@ -63,7 +63,9 @@ def drain_queue(storage=None, now=None, limit=5):
                 if float(receipt.get("next_attempt_at", 0)) > now:
                     continue
                 attempts = min(max(int(receipt.get("attempts", 0)), 0) + 1, 20)
-                delay = min(60 * 2 ** (attempts - 1), 900)
+                # Teto de 1 h: pendência que não avança não pode custar uma
+                # passada completa a cada 15 min para sempre.
+                delay = min(60 * 2 ** (attempts - 1), 3600)
                 receipt = {"attempts": attempts, "last_attempt_at": now,
                            "next_attempt_at": now + delay, "status": "running"}
                 write_json(receipt_path, receipt)

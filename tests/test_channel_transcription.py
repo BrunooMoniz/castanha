@@ -71,6 +71,23 @@ class ChannelTranscriptionTests(unittest.TestCase):
     def checkpoints(self):
         return sorted(p.name for p in (self.root / "checkpoints").rglob("*.json"))
 
+    def test_retry_reuses_published_channels_instead_of_decoding_the_source_again(self):
+        primeiro = prepare_channels(self.source, self.root / "derived")
+        antes = [(c["path"].read_bytes(), c["path"].stat().st_mtime_ns) for c in primeiro]
+        with patch("castanha.channel_transcription.subprocess.run", wraps=subprocess.run) as run:
+            segundo = prepare_channels(self.source, self.root / "derived")
+        self.assertFalse([a for a, _ in run.call_args_list if a[0][0] == "ffmpeg"])
+        self.assertEqual([(c["path"].read_bytes(), c["path"].stat().st_mtime_ns) for c in segundo], antes)
+
+    def test_channel_without_completion_marker_is_regenerated(self):
+        primeiro = prepare_channels(self.source, self.root / "derived")
+        alvo = primeiro[0]["path"]
+        esperado = alvo.read_bytes()
+        alvo.write_bytes(esperado[: len(esperado) // 3])
+        alvo.with_name(alvo.name + ".done").unlink()
+        prepare_channels(self.source, self.root / "derived")
+        self.assertEqual(alvo.read_bytes(), esperado)
+
     def test_real_split_preserves_exact_pcm_and_original(self):
         canais = prepare_channels(self.source, self.root / "derived")
         for entrada in canais:
