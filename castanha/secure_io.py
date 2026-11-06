@@ -128,6 +128,62 @@ def read_private_json(path: Path, max_bytes: int = 4 * 1024 * 1024) -> Optional[
     return json.loads(raw)
 
 
+def read_secret_file(path: Path, key: str = "", max_bytes: int = 64 * 1024) -> str:
+    """Lê uma credencial de um arquivo que não é do Castanha.
+
+    Dois formatos: o arquivo inteiro é o segredo (`key` vazio), ou linhas
+    `CHAVE=valor` no estilo .env (`key` diz qual). O arquivo precisa ser comum,
+    do próprio usuário e sem leitura para grupo/outros: aqui não se corrige o
+    modo, porque o arquivo pertence a outra ferramenta. Nenhuma mensagem de erro
+    carrega conteúdo do arquivo.
+    """
+    path = Path(path).expanduser()
+    try:
+        fd = _open_no_follow(path)
+    except FileNotFoundError:
+        raise InsecureConfigError(f"{path} não existe") from None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise InsecureConfigError(f"{path} é um symlink; recusado") from None
+        raise InsecureConfigError(f"{path} não abriu ({exc.__class__.__name__})") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise InsecureConfigError(f"{path} não é um arquivo comum")
+        if info.st_uid != os.geteuid():
+            raise InsecureConfigError(f"{path} pertence a outro usuário (uid {info.st_uid})")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise InsecureConfigError(f"{path} pode ser lido por outros; use chmod 600")
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as handle:
+            raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise InsecureConfigError(f"{path} passou de {max_bytes} bytes")
+    finally:
+        os.close(fd)
+
+    if not key:
+        valor = raw.strip()
+    else:
+        valor = ""
+        for linha in raw.splitlines():
+            linha = linha.strip()
+            if not linha or linha.startswith("#"):
+                continue
+            if linha.startswith("export "):
+                linha = linha[len("export "):].lstrip()
+            nome, sep, resto = linha.partition("=")
+            if sep and nome.strip() == key:
+                valor = resto.strip()
+                if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in "'\"":
+                    valor = valor[1:-1]
+                break
+        else:
+            raise InsecureConfigError(f"chave {key} ausente em {path}")
+    if not valor or any(c in valor for c in "\r\n"):
+        raise InsecureConfigError(f"credencial vazia ou inválida em {path}")
+    return valor
+
+
 def write_private_json(path: Path, data: Dict[str, Any]) -> Path:
     """Publica um JSON de credencial atomicamente como `0600` do dono.
 

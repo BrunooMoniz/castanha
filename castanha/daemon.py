@@ -13,7 +13,7 @@ from typing import Set
 
 from castanha.config import get_state_dir
 
-from castanha.agenda import agenda_warning, collect_upcoming, next_timed
+from castanha.agenda import agenda_data_time, agenda_warning, collect_upcoming, next_timed
 from castanha.config import load_config
 from castanha.engine import CastanhaEngine, notify
 from castanha.audio import read_audio_peak, capture_channel_peaks
@@ -84,6 +84,8 @@ class CastanhaDaemon:
         self._agenda_lock = threading.Lock()
         self.retry_scheduler = RetryScheduler(
             enabled=self.config.get("sync", {}).get("auto_retry_enabled", False))
+        self._heartbeat_thread = None
+        self._next_heartbeat = 0.0
 
     def stop(self, *args):
         self.running = False
@@ -125,7 +127,9 @@ class CastanhaDaemon:
             self.state_mgr.write({
                 "next_meeting": proxima.to_dict() if proxima else None,
                 "upcoming_meetings": [m.to_dict() for m in proximas],
-                "agenda_updated_at": time.time(),
+                # Hora em que a agenda foi COLETADA (o snapshot compartilhado
+                # pode ter minutos), não a hora em que o daemon a leu.
+                "agenda_updated_at": agenda_data_time(self.config) or time.time(),
                 "agenda_error": agenda_warning(self.config, error),
             })
             # O aviso é de cada reunião prestes a começar, não só da primeira
@@ -149,6 +153,44 @@ class CastanhaDaemon:
         except Exception as error:
             print(t("daemon.calendar_error", error=error))
             self.state_mgr.write({"agenda_error": agenda_warning(self.config, error)})
+
+    def _heartbeat_due(self, now: float) -> bool:
+        z = self.config.get("zinom", {}) or {}
+        try:
+            intervalo = int(z.get("heartbeat_sec") or 0)
+        except (TypeError, ValueError):
+            intervalo = 0
+        if intervalo <= 0 or not z.get("enabled") or not z.get("token"):
+            return False
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return False
+        return now >= self._next_heartbeat
+
+    def _start_heartbeat(self, now: float) -> None:
+        """Uma chamada leve (brain_status) para provar conexão e credencial.
+
+        Sem isto, com a agenda lida do disco, o Castanha só fala com o Zinom
+        quando há reunião para entregar: um token revogado ou um daemon parado
+        só apareceriam na próxima reunião. Roda fora do laço, como a agenda.
+        """
+        z = self.config.get("zinom", {}) or {}
+        intervalo = int(z.get("heartbeat_sec") or 0)
+        # Falha tenta de novo em até 15 min; sucesso espera o intervalo inteiro.
+        self._next_heartbeat = now + min(intervalo, 900)
+
+        def worker():
+            from castanha.zinom_adapter import ZinomMcpClient
+            from castanha.zinom_calendar import motivo_curto
+            try:
+                client = ZinomMcpClient(z.get("endpoint", "https://zinom.ai/mcp"), z["token"])
+                client.connect()
+                client.call_tool("brain_status", {})
+                self._next_heartbeat = time.time() + intervalo
+            except Exception as error:  # noqa: BLE001 - o daemon segue
+                print(f"[Castanha] Conferência com o Zinom falhou: {motivo_curto(error)}", file=sys.stderr)
+
+        self._heartbeat_thread = threading.Thread(target=worker, name="castanha-heartbeat", daemon=True)
+        self._heartbeat_thread.start()
 
     def run(self):
         signal.signal(signal.SIGINT, self.stop)
@@ -195,6 +237,10 @@ class CastanhaDaemon:
                 # Pause, processing e idle nunca deixam a última barra presa.
                 self.state_mgr.write({"audio_peak": 0.0, "audio_peak_updated_at": 0.0,
                                       **capture_channel_peaks(state)})
+
+            # Conferência com o Zinom (desligada por padrão).
+            if self._heartbeat_due(now):
+                self._start_heartbeat(now)
 
             # 2. Verificação periódica de calendário (iCal + contas Google do Zinom)
             if agenda_ligada and (now - last_calendar_check > poll_interval):

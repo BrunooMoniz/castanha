@@ -22,7 +22,12 @@
         "name": "Google Calendar Privado",
         "url": "https://calendar.google.com/calendar/ical/SEU_EMAIL/private-CHAVE/basic.ics"
       }
-    ]
+    ],
+    "shared_snapshot": {
+      "path": "",
+      "max_age_sec": 43200,
+      "refresh_command": []
+    }
   },
   "transcription": {
     "provider": "vps_ssh",
@@ -68,6 +73,9 @@
   "zinom": {
     "enabled": false,
     "endpoint": "https://zinom.ai/mcp",
-    "token": ""
+    "token": "",
+    "token_file": "",
+    "token_key": "",
+    "heartbeat_sec": 0
   }
 }

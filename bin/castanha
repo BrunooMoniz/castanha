@@ -204,7 +204,8 @@ def cmd_daemon(args):
 
 def cmd_config(args):
     if args.action == "show":
-        print(json.dumps(load_config(), indent=2, ensure_ascii=False))
+        from castanha.config import redact_secrets
+        print(json.dumps(redact_secrets(load_config()), indent=2, ensure_ascii=False))
     elif args.action == "path":
         print(get_config_file())
 
@@ -633,7 +634,7 @@ def cmd_agenda_dia(args):
 
 def cmd_agenda_refresh(args):
     """Bate manualmente nas agendas (feeds iCal + contas Zinom) e atualiza o estado imediatamente."""
-    from castanha.agenda import agenda_warning, collect_upcoming
+    from castanha.agenda import agenda_data_time, agenda_warning, collect_upcoming
     from castanha.config import load_config
     from castanha.state import StateManager
 
@@ -659,7 +660,7 @@ def cmd_agenda_refresh(args):
             "next_meeting": _proxima_com_hora(proximas_dicts),
             "upcoming_meetings": proximas_dicts,
             "agenda_error": None,
-            "agenda_updated_at": time.time(),
+            "agenda_updated_at": agenda_data_time(cfg) or time.time(),
         })
         if getattr(args, "json", False):
             print(json.dumps({

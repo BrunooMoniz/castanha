@@ -159,6 +159,12 @@ def next_meeting(config: Optional[Dict[str, Any]] = None) -> Optional[MeetingEve
     return next_timed(collect_upcoming(config, window_minutes=720))
 
 
+def agenda_data_time(config: Optional[Dict[str, Any]] = None) -> Optional[float]:
+    """Quando a agenda mostrada foi coletada (snapshot compartilhado ou última
+    consulta boa). None quando não há fonte do Zinom; aí vale a hora local."""
+    return _zinom_source(config or load_config()).stale_since
+
+
 def agenda_warning(config: Optional[Dict[str, Any]] = None, erro: Optional[BaseException] = None) -> Optional[str]:
     """O aviso que vai para o painel, ou None quando o último ciclo foi inteiro bom.
 

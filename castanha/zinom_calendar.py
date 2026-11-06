@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from castanha.calendar import Attendee, MeetingEvent, extract_conference_url
 from castanha.config import load_config
 from castanha.zinom_adapter import ZinomError, ZinomMcpClient, tool_json
+from castanha.shared_agenda import MOTIVO_COLETOR, SharedSnapshot, calendar_selected, raw_event
 
 # A lista de agendas quase não muda; os eventos mudam.
 CALENDARS_TTL_SEC = 3600
@@ -119,7 +120,13 @@ class ZinomCalendar:
 
         self.endpoint = z_cfg.get("endpoint", "https://zinom.ai/mcp")
         self.token = z_cfg.get("token", "")
-        self.enabled = bool(c_cfg.get("enabled", True)) and bool(self.token)
+        s_cfg = (cfg.get("calendar", {}) or {}).get("shared_snapshot") or {}
+        # Agenda já coletada por outro programa da máquina: lida do disco, sem
+        # ir ao hub (ver shared_agenda.py). None = consulta direta, como antes.
+        self.shared: Optional[SharedSnapshot] = (
+            SharedSnapshot(s_cfg) if isinstance(s_cfg, dict) and str(s_cfg.get("path") or "").strip() else None)
+        self._shared_aviso: Optional[str] = None
+        self.enabled = bool(c_cfg.get("enabled", True)) and (bool(self.token) or self.shared is not None)
         # Horizonte de BUSCA, maior do que as 12 h que o painel mostra: com a
         # máquina suspensa à noite, a última lista boa precisa alcançar a
         # reunião da manhã seguinte (em 11/09/2026 parou 5 min antes dela).
@@ -203,6 +210,18 @@ class ZinomCalendar:
     def upcoming(self, window_hours: Optional[int] = None, force: bool = False) -> List[MeetingEvent]:
         if not self.enabled:
             return []
+        if self.shared is not None:
+            # "Atualizar" pede coleta nova ao coletor; sem comando configurado,
+            # o pedido explícito vai direto ao hub (abaixo), como antes.
+            if force and self.shared.refresh_command:
+                self.shared.refresh()
+            if not force or self.shared.refresh_command:
+                lidos = self._from_shared(max(window_hours or 0, self.window_hours))
+                if lidos is not None:
+                    return lidos
+            if not self.token:
+                self.last_error = self.shared.problema or "agenda compartilhada desatualizada"
+                return self._cache
         if not force and time.time() < self._proxima_tentativa:
             return self._cache
 
@@ -260,6 +279,57 @@ class ZinomCalendar:
         eventos.sort(key=lambda e: e.start)
         self._cache = eventos
         self._good_at = agora_ts
+        return eventos
+
+    def _from_shared(self, horas: int) -> Optional[List[MeetingEvent]]:
+        """Eventos do snapshot compartilhado, ou None se ele não serve (aí: consulta direta)."""
+        assert self.shared is not None
+        doc = self.shared.load()
+        quando = SharedSnapshot.data_time(doc) if doc is not None else None
+        agora_ts = time.time()
+        if doc is None or quando is None or agora_ts - quando > self.shared.max_age_sec:
+            aviso = self.shared.problema if doc is None else "agenda compartilhada velha demais"
+            if aviso != self._shared_aviso:
+                print(f"[Castanha] {aviso}; consultando o Zinom direto", file=sys.stderr)
+                self._shared_aviso = aviso
+            return None
+        if self._shared_aviso is not None:
+            print("[Castanha] Agenda compartilhada de volta", file=sys.stderr)
+            self._shared_aviso = None
+
+        agora = datetime.datetime.now().astimezone()
+        t_min = agora - datetime.timedelta(minutes=15)
+        t_max = agora + datetime.timedelta(hours=horas)
+        agendas = {c.get("ref"): c for c in doc.get("calendars") or [] if isinstance(c, dict) and c.get("ref")}
+        eventos: List[MeetingEvent] = []
+        vistos = set()
+        for ev in doc.get("events") or []:
+            if not isinstance(ev, dict):
+                continue
+            cal = agendas.get(ev.get("calendar_ref"))
+            if cal is None or not calendar_selected(cal, self.wanted, _normalize):
+                continue
+            if self.skip_all_day and ev.get("all_day"):
+                continue
+            evento = self._to_meeting(raw_event(ev), {
+                "summary": ev.get("calendar") or cal.get("summary"),
+                "email": ev.get("account") or cal.get("email"),
+                "calendar_ref": cal.get("ref"),
+            })
+            if evento is None or evento.uid in vistos:
+                continue
+            inicio = evento.start if evento.start.tzinfo else evento.start.astimezone()
+            fim = evento.end if evento.end.tzinfo else evento.end.astimezone()
+            # Mesma janela da consulta direta: o hub filtra pelo FIM do evento.
+            if fim <= t_min or inicio >= t_max:
+                continue
+            vistos.add(evento.uid)
+            eventos.append(evento)
+        eventos.sort(key=lambda e: e.start)
+        self._cache = eventos
+        self._good_at = quando
+        self._falhas_seguidas = 0
+        self.last_error = MOTIVO_COLETOR if SharedSnapshot.events_stale(doc) else None
         return eventos
 
     def events_between(self, inicio: datetime.datetime, fim: datetime.datetime) -> Tuple[List[MeetingEvent], List[str]]:

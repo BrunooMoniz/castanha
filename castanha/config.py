@@ -10,6 +10,7 @@ from typing import Any, Dict
 from castanha.secure_io import (
     InsecureConfigError,
     read_private_json,
+    read_secret_file,
     write_private_json,
 )
 
@@ -48,6 +49,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             # Dia inteiro entra: lembrete também é agenda. O que não for
             # reunião, ele esconde no painel (série inteira).
             "skip_all_day": False,
+        },
+        # Agenda que OUTRO coletor da máquina já grava em disco (JSON com
+        # `generated_at`, `calendars[]` e `events[]`). Com `path` preenchido o
+        # daemon lê o arquivo em vez de consultar o Zinom de tempos em tempos;
+        # só volta a consultar sozinho se o arquivo sumir ou passar de
+        # `max_age_sec` (aí na cadência de `calendar.zinom.poll_interval_sec`).
+        # `refresh_command` (lista de argumentos) é o que o botão "atualizar"
+        # roda para pedir uma coleta nova a esse coletor; vazio = consulta direta.
+        "shared_snapshot": {
+            "path": "",
+            "max_age_sec": 43200,
+            "refresh_command": [],
         },
     },
     "transcription": {
@@ -116,8 +129,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "endpoint": "https://zinom.ai/mcp",
         "token": "",
+        # Alternativa ao token literal: arquivo 0600 do usuário. Com
+        # `token_key`, linhas CHAVE=valor (estilo .env); sem, o arquivo inteiro
+        # é o token. Token literal preenchido continua valendo primeiro.
+        "token_file": "",
+        "token_key": "",
+        # Confere a conexão com o Zinom a cada N segundos (brain_status), para
+        # quem monitora ver que o Castanha está vivo mesmo sem reunião. 0 desliga.
+        "heartbeat_sec": 0,
     },
 }
+
+# Chaves cujo valor é segredo: `castanha config show` nunca as mostra.
+SECRET_KEYS = ("token", "api_key", "auth_token", "groq_api_key", "deepgram_api_key",
+               "vps_auth_token", "secret", "password")
 
 def get_config_dir() -> Path:
     xdg_config = os.environ.get("XDG_CONFIG_HOME")
@@ -163,7 +188,39 @@ def load_config() -> Dict[str, Any]:
                 config[section].update(vals)
             else:
                 config[section] = vals
+    _resolve_zinom_token(config)
     return config
+
+
+def _resolve_zinom_token(config: Dict[str, Any]) -> None:
+    """Preenche `zinom.token` a partir de `zinom.token_file` quando não há literal.
+
+    O valor só existe em memória: `save_config` não é chamado com isto, e
+    `castanha config show` oculta segredos. Falha vira aviso sem o conteúdo e
+    deixa o token vazio (a conexão com o Zinom fica desligada, não errada).
+    """
+    zinom = config.get("zinom")
+    if not isinstance(zinom, dict) or str(zinom.get("token") or "").strip():
+        return
+    arquivo = str(zinom.get("token_file") or "").strip()
+    if not arquivo:
+        return
+    try:
+        zinom["token"] = read_secret_file(Path(arquivo), str(zinom.get("token_key") or "").strip())
+    except InsecureConfigError as e:
+        print(f"[Castanha] Token do Zinom não lido de token_file: {e}", file=sys.stderr)
+    except OSError as e:
+        print(f"[Castanha] Token do Zinom não lido de token_file: {e.__class__.__name__}", file=sys.stderr)
+
+
+def redact_secrets(value: Any) -> Any:
+    """Cópia da config com todo segredo trocado por um marcador."""
+    if isinstance(value, dict):
+        return {k: ("<oculto>" if k in SECRET_KEYS and isinstance(v, str) and v else redact_secrets(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(v) for v in value]
+    return value
 
 def save_config(config_data: Dict[str, Any]) -> None:
     # Publicação atômica como arquivo comum `0600` dentro de um diretório
