@@ -101,6 +101,20 @@ trecho sai da trilha em que a voz chegou.
 - **Ainda não feito**: transcrever por trilha e montar a transcrição a partir delas. Por ora
   as trilhas só ficam guardadas para análise; a transcrição segue vindo do canal do sistema.
 
+## Lembrete de gravação (`meet.record_reminder`, ligado por padrão)
+
+Ao entrar numa chamada do Meet ou do Teams sem o Castanha gravando, sai uma notificação "Você entrou numa chamada"
+com o botão **Gravar**, que roda o mesmo `castanha start` do painel (se houver evento da agenda naquela hora, a
+gravação se liga a ele; sem evento, grava do mesmo jeito).
+
+- **Quando dispara:** no primeiro sinal de chamada conectada (o canal de participantes ou voz chegando), não na sala
+  de espera: ali a página só manda lotes vazios. O sinal que disparou fica em `meet/.reminded-<código>`.
+- **Uma vez por chamada:** não repete na mesma aba nem, por 10 minutos, na mesma chamada reaberta.
+- **Sem insistir:** entrou já gravando, não aparece; some sozinha em 1 minuto; começou a gravar antes do clique, o
+  botão não inicia outra gravação.
+- **Onde roda:** num processo à parte do host nativo, para a gravação continuar depois que a aba fechar.
+- **Desligar:** `"meet": {"record_reminder": false}` na config. Abas já abertas seguem com o host antigo até recarregar.
+
 ## Microsoft Teams (no navegador)
 
 A mesma extensão roda em `teams.microsoft.com`, `teams.live.com` e

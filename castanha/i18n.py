@@ -95,6 +95,18 @@ STRINGS = {
         "en": "The Meet call was recorded, but the browser extension sent no signal. Run `castanha meet status` and reopen Chromium.",
         "pt": "A chamada do Meet foi gravada, mas a extensão do navegador não mandou sinal. Rode `castanha meet status` e reabra o Chromium.",
     },
+    "notify.meet_reminder_title": {
+        "en": "You joined a {app} call",
+        "pt": "Você entrou numa chamada do {app}",
+    },
+    "notify.meet_reminder_body": {
+        "en": "Castanha is not recording.",
+        "pt": "O Castanha não está gravando.",
+    },
+    "notify.meet_reminder_action": {
+        "en": "Record",
+        "pt": "Gravar",
+    },
     "notify.preserved_title": {
         "en": "Recording preserved, processing pending",
         "pt": "Gravação preservada, processamento pendente",

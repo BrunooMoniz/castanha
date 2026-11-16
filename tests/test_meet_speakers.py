@@ -9,6 +9,7 @@ import gzip
 import io
 import json
 import os
+import stat
 import struct
 import subprocess
 import tempfile
@@ -1216,3 +1217,138 @@ class TrackAudioTest(unittest.TestCase):
         with patch.object(ms, "sessions_dir", return_value=self.root):
             ms.prune(now=time.time() + 8 * 86400)
         self.assertFalse(folder.exists())
+
+
+class RecordReminderTest(unittest.TestCase):
+    """Lembrete de gravação: uma vez por chamada, só depois de entrar e só sem gravação."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "meet"
+        self.now = 1_790_000_000.0
+        self.status = None
+        self.calls = []
+        self.session = ms.Session(recording_active=lambda: {"status": self.status} if self.status else None,
+                                  clock=lambda: self.now, root=self.root, check_interval=0,
+                                  remind=lambda code, signal: self.calls.append((code, signal)))
+
+    def send(self, **message):
+        self.session.handle({"code": CODE, **message})
+
+    def test_lobby_and_left_page_messages_are_not_a_join(self):
+        # A página manda `levels` vazio a cada segundo em qualquer URL com código: sala de espera e "você saiu".
+        for message in ({"type": "levels", "frames": []}, {"type": "levels"}, {"type": "screen", "devices": []},
+                        {"type": "bye"}, {"type": "replay_incomplete"}, {"type": "audio"}, {"type": "mapping", "devices": []}):
+            self.send(**message)
+        self.session.handle("lixo")
+        fresh = ms.Session(recording_active=lambda: None, clock=lambda: self.now, root=self.root, check_interval=0,
+                           remind=lambda code, signal: self.calls.append((code, signal)))
+        fresh.handle({"type": "collections", "b64": ""})  # sem código de chamada não há sessão
+        fresh.handle({"code": "https://meet.google.com", "type": "levels", "frames": [[1, 1, 0.2]]})
+        self.assertEqual(self.calls, [])
+
+    def test_first_join_signal_reminds_once_per_tab(self):
+        self.send(type="levels", frames=[])
+        self.send(type="collections", t=self.now * 1000, b64=base64.b64encode(device_message(ANA, "Ana Teste")).decode())
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.send(type="collections", b64="!!!")
+        self.assertEqual(self.calls, [(CODE, "collections")])
+
+    def test_voice_arriving_or_a_broken_participant_message_also_count_as_joined(self):
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.assertEqual(self.calls, [(CODE, "levels")])
+        other = ms.Session(recording_active=lambda: None, clock=lambda: self.now, root=self.root, check_interval=0,
+                           remind=lambda code, signal: self.calls.append((code, signal)))
+        other.handle({"code": CODE, "type": "collections", "b64": "!!!"})
+        self.assertEqual(self.calls[1:], [(CODE, "collections")])
+
+    def test_joining_while_recording_or_paused_never_reminds_even_after_the_stop(self):
+        for status in ("recording", "paused"):
+            self.status = status
+            session = ms.Session(recording_active=lambda: {"status": self.status}, clock=lambda: self.now,
+                                 root=self.root, check_interval=0, remind=lambda code, signal: self.calls.append(code))
+            session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 111, 0.2]]})
+            self.status = None
+            session.handle({"code": CODE, "type": "levels", "frames": [[self.now * 1000, 111, 0.2]]})
+        self.assertEqual(self.calls, [])
+
+    def test_previous_recording_still_processing_is_not_recording(self):
+        self.status = "processing"
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.assertEqual(self.calls, [(CODE, "levels")])
+
+    def test_failing_reminder_never_breaks_the_capture(self):
+        def boom(code, signal):
+            raise RuntimeError("sem notificação")
+        session = ms.Session(recording_active=lambda: {"status": "recording"} if self.status else None,
+                             clock=lambda: self.now, root=self.root, check_interval=0, remind=boom)
+        session.handle({"code": CODE, "type": "collections", "t": self.now * 1000,
+                        "b64": base64.b64encode(device_message(ANA, "Ana Teste")).decode()})
+        self.assertEqual({d: v[0] for d, v in session.devices.items()}, {ANA: "Ana Teste"})
+
+    def test_reminder_rechecks_recording_before_notifying_and_before_starting(self):
+        started, shown, slept = [], [], []
+        state = {"status": None}
+        active = lambda: {"status": state["status"]} if state["status"] else None  # noqa: E731
+
+        def run(answer, during=None):
+            def notification(code):
+                shown.append(code)
+                if during:
+                    state["status"] = during
+                return answer
+            return ms.remind(CODE, notification=notification, start=lambda: started.append(1),
+                             recording_active=active, sleep=slept.append)
+
+        self.assertEqual((run("record"), started, shown), ("started", [1], [CODE]))
+        self.assertEqual(slept, [ms.REMINDER_WAIT])
+        for answer in ("", "Wait timeout expired", "other"):
+            self.assertEqual(run(answer), "dismissed")
+        self.assertEqual(run("record", during="recording"), "recording")  # começou a gravar pelo painel antes do clique
+        self.assertEqual(started, [1])
+        state["status"] = "paused"
+        before = len(shown)
+        self.assertEqual((run("record"), len(shown)), ("recording", before))  # já gravando: nem aparece
+        state["status"] = "processing"
+        self.assertEqual(run(""), "dismissed")  # gravação anterior fechando: o lembrete aparece
+
+    def test_spawn_skips_a_second_reminder_for_the_same_call_and_never_shares_stdio(self):
+        spawned = []
+        with patch.object(ms, "sessions_dir", return_value=self.root), \
+             patch.object(ms.subprocess, "Popen", side_effect=lambda *a, **k: spawned.append((a[0], k))):
+            ms.spawn_reminder(CODE, "collections")
+            ms.spawn_reminder(CODE, "levels")           # aba recarregada no meio da chamada
+            ms.spawn_reminder("zzz-zzzz-zzz", "levels")  # outra chamada
+            marker = self.root / f".reminded-{CODE}"
+            os.utime(marker, (time.time() - ms.REMINDER_GAP - 5,) * 2)
+            ms.spawn_reminder(CODE, "levels")           # a mesma daily, outro dia
+        self.assertEqual([call[0][-2:] for call in spawned], [["remind", CODE], ["remind", "zzz-zzzz-zzz"], ["remind", CODE]])
+        for _command, options in spawned:
+            self.assertEqual((options["stdin"], options["stdout"], options["stderr"], options["start_new_session"]),
+                             (subprocess.DEVNULL, subprocess.DEVNULL, subprocess.DEVNULL, True))
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
+        ms.prune(now=time.time() + (ms.RETENTION_DAYS + 1) * 86400)
+
+    def test_host_arguments_from_the_browser_never_reach_the_reminder(self):
+        with patch.object(ms, "remind") as remind, patch.object(ms, "run_host", return_value=0) as host:
+            for argv in (["chrome-extension://fmiffekiigfbnmidnclnpfhndjbnlegj/"], [], ["remind"], ["remind", "../x"],
+                         ["remind", CODE, "extra"], ["chrome-extension://x/", "--parent-window=0"]):
+                self.assertEqual(ms.main(argv), 0)
+            self.assertEqual((remind.call_count, host.call_count), (0, 6))
+            self.assertEqual(ms.main(["remind", CODE]), 0)
+            remind.assert_called_once_with(CODE)
+
+    def test_record_button_runs_the_same_start_command_as_the_panel(self):
+        with patch.object(ms.subprocess, "run") as run:
+            ms._start_recording()
+        command, options = run.call_args[0][0], run.call_args[1]
+        self.assertEqual((command[1], command[3:]), ("-B", ["start"]))
+        self.assertTrue(Path(command[2]).is_file() and Path(command[2]).name == "castanha")
+        self.assertEqual((options["stdin"], options["stdout"], options["stderr"]), (subprocess.DEVNULL,) * 3)
+
+    def test_config_switch_and_default(self):
+        self.assertTrue(ms.reminder_enabled({"meet": {}}))
+        self.assertTrue(ms.reminder_enabled({}))
+        self.assertFalse(ms.reminder_enabled({"meet": {"record_reminder": False}}))
+        self.assertFalse(ms.reminder_enabled({"meet": {"record_reminder": "yes"}}))

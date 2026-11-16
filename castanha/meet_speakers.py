@@ -276,6 +276,76 @@ def decode_collections(raw: bytes) -> List[Dict[str, Any]]:
 
 # ------------------------------------------------------------- host nativo
 
+# Lembrete de gravação: entrou numa chamada sem o Castanha gravando.
+REMINDER_WAIT = 3.0        # quem começa a gravar junto com a entrada não precisa de lembrete
+REMINDER_TIMEOUT_MS = 60000
+REMINDER_GAP = 600         # recarregar a aba no meio da chamada não repete o lembrete (a daily repete o código todo dia)
+
+
+def reminder_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    if config is None:
+        from castanha.config import load_config
+        config = load_config()
+    return (config.get("meet") or {}).get("record_reminder", True) is True
+
+
+def spawn_reminder(code: str, signal: str = "") -> None:
+    """Lembrete num processo à parte: a notificação com botão espera o clique, o host não pode parar de ler o
+    navegador e a gravação iniciada pelo botão tem de continuar depois que a aba fechar."""
+    root = sessions_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    marker = root / f".reminded-{code}"
+    try:
+        if time.time() - marker.stat().st_mtime < REMINDER_GAP:
+            return
+    except OSError:
+        pass
+    # O sinal que disparou fica no marcador: diz, depois, em que momento da chamada o lembrete saiu.
+    marker.write_text(json.dumps({"at": time.time(), "signal": signal}) + "\n", encoding="utf-8")
+    # Sem stdio herdado: o stdout do host é o protocolo com o navegador.
+    subprocess.Popen([sys.executable, "-B", "-m", "castanha.meet_speakers", "remind", code],
+                     cwd=str(Path(__file__).resolve().parent.parent), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def _reminder_notification(code: str) -> str:
+    """Mostra o lembrete e devolve a ação clicada ("record") ou vazio. Nunca espera além do prazo da notificação."""
+    from castanha.engine import MICROPHONE_GLYPH
+    from castanha.i18n import t
+    try:
+        done = subprocess.run(["notify-send", "-a", "Castanha", "-h", f"string:omarchy-glyph:{MICROPHONE_GLYPH}",
+                               "-t", str(REMINDER_TIMEOUT_MS), "-A", "record=" + t("notify.meet_reminder_action"),
+                               t("notify.meet_reminder_title", app=label(code)), t("notify.meet_reminder_body")],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=REMINDER_TIMEOUT_MS / 1000 + 10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip()
+
+
+def _start_recording() -> None:
+    # O mesmo `castanha start` do painel: se houver evento da agenda agora, a gravação se liga a ele.
+    subprocess.run([sys.executable, "-B", str(Path(__file__).resolve().parent.parent / "bin" / "castanha"), "start"],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+
+
+def remind(code: str, notification=_reminder_notification, start=_start_recording, recording_active=None,
+           wait: float = REMINDER_WAIT, sleep=time.sleep) -> str:
+    """Avisa que a chamada começou sem gravação e grava no clique. Confere o estado antes de avisar e antes de gravar."""
+    recording_active = recording_active or _recording_active
+    busy = lambda: (recording_active() or {}).get("status") in ("recording", "paused")  # noqa: E731
+    sleep(wait)
+    if busy():
+        return "recording"
+    if notification(code) != "record":
+        return "dismissed"
+    if busy():
+        return "recording"
+    start()
+    return "started"
+
+
 def _recording_active() -> Optional[Dict[str, Any]]:
     try:
         state = json.loads((_state_dir() / "state.json").read_text(encoding="utf-8"))
@@ -290,6 +360,12 @@ def prune(now: Optional[float] = None, days: int = RETENTION_DAYS) -> None:
     if not root.is_dir():
         return
     for path in root.glob("*.jsonl"):
+        try:
+            if now - path.stat().st_mtime > days * 86400:
+                path.unlink()
+        except OSError:
+            pass
+    for path in root.glob(".reminded-*"):
         try:
             if now - path.stat().st_mtime > days * 86400:
                 path.unlink()
@@ -313,7 +389,10 @@ class Session:
     """
 
     def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None,
-                 check_interval: float = 0.5, track_audio: bool = False, send=None):
+                 check_interval: float = 0.5, track_audio: bool = False, send=None, remind=None):
+        # Lembrete de gravação: chamado uma vez por aba, quando a chamada conecta sem o Castanha gravando.
+        self.remind = remind
+        self._joined = False
         # Trilhas separadas: `send` leva um pedido à página (ligar ou desligar a gravação das trilhas).
         self.track_audio = track_audio
         self.send = send
@@ -417,6 +496,7 @@ class Session:
             # Gravação acabou: o arquivo fecha e a próxima abre outro, com o mapa daquele momento.
             self.close()
         self._sync_capture(status)
+        self._note_join(kind, msg, status)
         if kind == "audio":
             self._audio_chunk(msg, status, now)
             return
@@ -516,6 +596,21 @@ class Session:
             self.note_error("replay")
         elif kind == "bye":
             self.close()
+
+    def _note_join(self, kind, msg: Dict[str, Any], status) -> None:
+        """Entrou na chamada? A página manda `levels` vazio a cada segundo desde a sala de espera: só vale o
+        canal de participantes ou voz chegando. Vale uma vez por aba; gravando, não há o que lembrar."""
+        if self._joined or self.remind is None:
+            return
+        if not (kind == "collections" or (kind in ("levels", "mapping", "screen") and msg.get("frames" if kind == "levels" else "devices"))):
+            return
+        self._joined = True
+        if status in ("recording", "paused"):
+            return
+        try:
+            self.remind(self.code, kind)
+        except Exception:  # noqa: BLE001 - lembrete é cortesia: nunca derruba a captura de quem fala
+            pass
 
     def _sync_capture(self, status) -> None:
         """Diz à página quando gravar as trilhas: só com o Castanha gravando (pausa para) e a opção ligada."""
@@ -623,7 +718,8 @@ def run_host(stdin=None, session: Optional[Session] = None) -> int:
         sys.stdout.buffer.write(struct.pack("=I", len(body)) + body)
         sys.stdout.buffer.flush()
 
-    session = session or Session(track_audio=active and track_audio_enabled(), send=send)
+    session = session or Session(track_audio=active and track_audio_enabled(), send=send,
+                                 remind=spawn_reminder if active and reminder_enabled() else None)
     try:
         while True:
             try:
@@ -1516,6 +1612,11 @@ def status(project_root: Path, flags: Optional[Path] = None, manifest: Optional[
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    # O navegador chama o host com a origem da extensão como argumento; só `remind <código>` é outro caminho.
+    if len(argv) == 2 and argv[0] == "remind" and MEET_CODE_RE.match(argv[1]):
+        remind(argv[1])
+        return 0
     return run_host()
 
 

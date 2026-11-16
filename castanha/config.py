@@ -130,6 +130,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Gravar cada trilha de áudio do Meet em separado (experimental): a página grava as trilhas
         # que recebe e o host guarda em ~/.local/state/castanha/meet/<sessão>.audio/ só durante a gravação.
         "track_audio": False,
+        # Lembrete de gravação: ao entrar numa chamada sem o Castanha gravando, uma notificação com o botão
+        # "Gravar". Uma vez por chamada, com ou sem evento na agenda. Só com `speakers_enabled`.
+        "record_reminder": True,
     },
     # Agentes que podem receber as notas de uma reunião pela biblioteca ("Compartilhar com…"):
     # [{"id": "...", "name": "...", "command": ["/caminho/do/programa"]}]. Protocolo em castanha/agents.py.
