@@ -1116,3 +1116,89 @@ class MissingCaptureTest(unittest.TestCase):
     def test_recording_that_was_not_a_meet_call_does_not_warn(self):
         self.assertEqual(self.save({"title": "Reunião presencial"}), 0)
         self.assertFalse((self.bronze / ".speakers").exists())
+
+
+class TrackAudioTest(unittest.TestCase):
+    """Trilhas de áudio separadas: o host pede a gravação à página e guarda os pedaços na ordem."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "meet"
+        self.now = 1_790_000_000.0
+        self.status = "recording"
+        self.sent = []
+        self.session = self.make(True)
+
+    def make(self, track_audio):
+        return ms.Session(recording_active=lambda: {"status": self.status} if self.status else None, clock=lambda: self.now,
+                          root=self.root, check_interval=0, track_audio=track_audio, send=self.sent.append)
+
+    def audio(self, seq, data, track=0, started=None, session=None):
+        (session or self.session).handle({"code": CODE, "type": "audio", "t": self.now * 1000, "track": track,
+                                          "started": (started or self.now) * 1000, "seq": seq,
+                                          "b64": base64.b64encode(data).decode()})
+
+    def files(self):
+        return sorted(self.root.glob("*.audio/*.webm"))
+
+    def test_page_is_asked_to_record_only_while_castanha_records(self):
+        self.session.handle({"code": CODE, "type": "levels", "frames": []})
+        self.status = "paused"
+        self.session.handle({"code": CODE, "type": "levels", "frames": []})
+        self.status = "recording"
+        self.session.handle({"code": CODE, "type": "levels", "frames": []})
+        self.status = None
+        self.session.handle({"code": CODE, "type": "levels", "frames": []})
+        self.assertEqual(self.sent, [{"type": "capture", "on": True}, {"type": "capture", "on": False},
+                                     {"type": "capture", "on": True}, {"type": "capture", "on": False}])
+
+    def test_option_off_never_asks_and_never_stores(self):
+        self.sent.clear()
+        off = self.make(False)
+        off.handle({"code": CODE, "type": "levels", "frames": []})
+        self.audio(0, b"abc", session=off)
+        self.assertEqual(self.sent, [{"type": "capture", "on": False}])
+        self.assertEqual(self.files(), [])
+
+    def test_chunks_are_stored_in_recording_order_in_a_private_file_per_track(self):
+        self.audio(1, b"BBB")           # chegou antes do primeiro
+        self.audio(0, b"AAA")
+        self.audio(0, b"AAA")           # repetido
+        self.audio(2, b"CCC")
+        self.audio(0, b"xyz", track=1)  # outra trilha, outro arquivo
+        self.session.close()
+        files = self.files()
+        self.assertEqual([f.name for f in files], [f"track0-{int(self.now * 1000)}.webm", f"track1-{int(self.now * 1000)}.webm"])
+        self.assertEqual(files[0].read_bytes(), b"AAABBBCCC")
+        self.assertEqual(files[1].read_bytes(), b"xyz")
+        self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(files[0].parent.stat().st_mode & 0o777, 0o700)
+        records = [json.loads(line) for line in next(self.root.glob("*.jsonl")).read_text().splitlines()]
+        self.assertEqual([(r["track"], r["first_seq"]) for r in records if r["type"] == "audio"], [(0, 1), (1, 0)])
+
+    def test_nothing_is_stored_when_castanha_is_not_recording_and_bad_chunks_are_dropped(self):
+        self.status = None
+        self.audio(0, b"AAA")
+        self.assertEqual(self.files(), [])
+        self.status = "recording"
+        self.session.handle({"code": CODE, "type": "audio", "track": 0, "started": self.now * 1000, "seq": 0, "b64": "!!!"})
+        self.session.handle({"code": CODE, "type": "audio", "track": 99, "started": self.now * 1000, "seq": 0, "b64": "QUFB"})
+        self.session.handle({"code": CODE, "type": "audio", "track": 0, "started": "x", "seq": 0, "b64": "QUFB"})
+        self.assertEqual(self.files(), [])
+
+    def test_levels_by_track_are_recorded_next_to_the_levels(self):
+        ts = self.now * 1000
+        self.session.handle({"code": CODE, "type": "levels", "frames": [[ts, 111, 0.2]],
+                             "tracks": [[ts, 0, 111, 0.2], [ts, 99, 111, 0.2], [ts, 0, 111], "x"]})
+        self.session.close()
+        records = [json.loads(line) for line in next(self.root.glob("*.jsonl")).read_text().splitlines()]
+        self.assertEqual([r["frames"] for r in records if r["type"] == "track_levels"], [[[self.now, 0, 111, 0.2]]])
+
+    def test_old_audio_folders_are_pruned_with_the_sessions(self):
+        self.audio(0, b"AAA")
+        self.session.close()
+        folder = self.files()[0].parent
+        with patch.object(ms, "sessions_dir", return_value=self.root):
+            ms.prune(now=time.time() + 8 * 86400)
+        self.assertFalse(folder.exists())

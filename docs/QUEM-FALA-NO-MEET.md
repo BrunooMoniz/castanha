@@ -79,6 +79,28 @@ do Gold (`_ground_gold`) continua igual. O resultado por gravação
 Bancada usada na calibragem: reexecutar a atribuição sobre `bronze/*/.speakers/*.json` e
 os `.jobs/*.json` de cada reunião, com o envelope do canal 1 do áudio.
 
+## Trilhas de áudio separadas (experimental, `meet.track_audio`)
+
+Objetivo: tirar o alinhamento entre dois relógios da conta. Em vez de casar o som do sistema
+com o sinal do Meet, a própria página grava cada trilha de áudio que recebe, e o dono de cada
+trecho sai da trilha em que a voz chegou.
+
+- `page.js` numera as trilhas de áudio recebidas e manda, junto dos níveis, a mesma medida
+  por trilha (`tracks`: instante, trilha, fonte, nível). O host grava como `track_levels`.
+- Quando o host pede (`capture`, só com o Castanha gravando e a opção ligada; pausa para), a
+  página grava cada trilha com `MediaRecorder` (Opus, 32 kbps, pedaços de 2 s) e manda
+  mensagens `audio`. O host guarda em `~/.local/state/castanha/meet/<sessão>.audio/
+  track<n>-<início>.webm` (0600), na ordem, e apaga com as sessões depois de 7 dias.
+- O Chromium só entrega áudio de trilha remota ao gravador se algum destino a puxar; por
+  isso cada trilha gravada ganha um elemento de áudio mudo, fora da página.
+- Provado em 16/11/2026 num Chromium real com chamada WebRTC em laço: duas trilhas, um
+  arquivo por trilha, áudio íntegro, nada antes de ligar nem depois de desligar.
+- **Ainda não provado numa chamada real do Meet**: quantas trilhas o Meet entrega, se cada
+  uma carrega uma voz por vez e qual o papel da fonte 42. É o que a primeira reunião gravada
+  com a opção ligada vai mostrar (`track_levels` + os arquivos).
+- **Ainda não feito**: transcrever por trilha e montar a transcrição a partir delas. Por ora
+  as trilhas só ficam guardadas para análise; a transcrição segue vindo do canal do sistema.
+
 ## Microsoft Teams (no navegador)
 
 A mesma extensão roda em `teams.microsoft.com`, `teams.live.com` e

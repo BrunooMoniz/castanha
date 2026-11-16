@@ -89,6 +89,7 @@
       history.length = 0; overflow = false;
       teamsKnown.clear(); teamsOwner.clear(); teamsKnownSource.clear(); teamsSources.clear(); seen.clear(); frames = []; gaps = [];
       shown.clear(); lastProbe = "";
+      stopRecorders(); trackIndex.clear(); trackFrames = [];
     }
     currentCode = c;
   };
@@ -181,6 +182,51 @@
     if (devices.length) { if (history.length < 20000) history.push(msg); else overflow = true; }
     post(msg);
   }, 2000);
+  // Trilhas separadas: o Meet entrega poucas trilhas de áudio (as vozes mais
+  // altas), cada uma com uma voz por vez. Gravando cada trilha aqui, com o
+  // relógio da própria página, o dono de cada trecho sai da trilha, sem alinhar
+  // dois relógios. Só grava quando o host pede (Castanha gravando e a opção
+  // `meet.track_audio` ligada) e para assim que ele manda parar.
+  let capture = false;
+  const trackIndex = new Map();   // track.id -> número da trilha nesta chamada
+  const recorders = new Map();    // track.id -> MediaRecorder (ou null se não deu)
+  const sinks = new Map();        // track.id -> elemento de áudio mudo que puxa a trilha
+  let trackFrames = [];
+  const stopRecorders = () => {
+    for (const rec of recorders.values()) { try { if (rec && rec.state !== "inactive") rec.stop(); } catch (e) {} }
+    for (const el of sinks.values()) { try { el.pause(); el.srcObject = null; } catch (e) {} }
+    recorders.clear(); sinks.clear();
+  };
+  const startRecorder = (track, index) => {
+    try {
+      const stream = new MediaStream([track]);
+      // O Chromium só entrega áudio de trilha remota ao gravador se algum destino a estiver puxando
+      // (medido: sem isso o gravador devolve zero bytes). Um elemento mudo, fora da página, basta.
+      if (!sinks.has(track.id) && typeof Audio === "function") {
+        const el = new Audio();
+        el.muted = true; el.srcObject = stream;
+        const playing = el.play();
+        if (playing && playing.catch) playing.catch(() => {});
+        sinks.set(track.id, el);
+      }
+      const rec = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 32000 });
+      const started = Date.now();
+      let seq = 0;
+      rec.ondataavailable = (ev) => {
+        if (!ev.data || !ev.data.size) return;
+        const n = seq++;
+        ev.data.arrayBuffer().then((buf) => post({ type: "audio", code: code(), t: Date.now(), track: index, started, seq: n, b64: toB64(buf) })).catch(() => {});
+      };
+      rec.onerror = () => { recorders.set(track.id, null); };
+      rec.start(2000);
+      recorders.set(track.id, rec);
+    } catch (e) { recorders.set(track.id, null); }  // sem suporte: não insiste nesta trilha
+  };
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window || !ev.data || typeof ev.data[TAG + "-capture"] !== "boolean") return;
+    capture = ev.data[TAG + "-capture"];
+    if (!capture) stopRecorders();
+  });
   let frames = [];
   // Travada da página: sem consulta, falas de outra pessoa podem sumir. O
   // host recebe o buraco e não atribui nome às falas que caem nele. Acima de
@@ -199,6 +245,13 @@
       try { receivers = pc.getReceivers(); } catch (e) { continue; }
       for (const r of receivers) {
         if (!r.track || r.track.kind !== "audio") continue;
+        if (!TEAMS && !trackIndex.has(r.track.id)) trackIndex.set(r.track.id, trackIndex.size);
+        const index = trackIndex.get(r.track.id);
+        if (capture && index !== undefined && r.track.readyState === "live") {
+          const rec = recorders.get(r.track.id);
+          // Trilha nova, ou gravador que parou sozinho (trilha renegociada): começa outro arquivo.
+          if (rec === undefined || (rec && rec.state === "inactive")) startRecorder(r.track, index);
+        }
         let sources = [];
         try { sources = r.getContributingSources(); } catch (e) { continue; }
         for (const s of sources) {
@@ -212,18 +265,21 @@
           seen.set(s.source, ts);
           if (TEAMS) teamsSources.add(s.source);
           frames.push([ts, s.source, Math.round(level * 1000) / 1000]);
+          // A mesma medida, com a trilha em que a voz chegou: é o que liga trilha a pessoa.
+          if (index !== undefined) trackFrames.push([ts, index, s.source, Math.round(level * 1000) / 1000]);
         }
       }
     }
   }, 100);
   setInterval(() => {
     const c = code();
-    if (!c) { frames = []; return; }
+    if (!c) { frames = []; trackFrames = []; return; }
     resetIfNewCall(c);
-    post({ type: "levels", code: c, t: Date.now(), frames, gaps, presence: presenceOnly && frames.length > 0 });
+    post({ type: "levels", code: c, t: Date.now(), frames, gaps, presence: presenceOnly && frames.length > 0, tracks: trackFrames });
     presenceOnly = true;
     frames = [];
+    trackFrames = [];
     gaps = [];
   }, 1000);
-  window.addEventListener("pagehide", () => post({ type: "bye", code: code(), t: Date.now() }));
+  window.addEventListener("pagehide", () => { stopRecorders(); post({ type: "bye", code: code(), t: Date.now() }); });
 })();

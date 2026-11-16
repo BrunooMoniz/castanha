@@ -7,7 +7,9 @@ chrome.runtime.onConnect.addListener((tab) => {
   const open = () => {
     try {
       native = chrome.runtime.connectNative(HOST);
-      native.onDisconnect.addListener(() => { native = null; void chrome.runtime.lastError; });
+      native.onDisconnect.addListener(() => { native = null; void chrome.runtime.lastError; try { tab.postMessage({ type: "capture", on: false }); } catch (e) {} });
+      // Único pedido do host à página: ligar ou desligar a gravação das trilhas de áudio.
+      native.onMessage.addListener((msg) => { if (msg && msg.type === "capture") { try { tab.postMessage({ type: "capture", on: msg.on === true }); } catch (e) {} } });
       // Host novo começa com o mapa vazio: a página reenvia o que já sabe.
       if (opened++) tab.postMessage({ type: "replay" });
     } catch (e) { native = null; }

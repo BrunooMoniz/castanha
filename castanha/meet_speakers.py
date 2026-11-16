@@ -88,6 +88,11 @@ MIX_MARGIN = 0.02
 MIX_MIN_COVERAGE = 0.8
 MIX_MIN_EVIDENCE = 300  # pacotes de 0,1 s com dono: 30 s de fala para concluir
 MAX_SNAPSHOT_BYTES = 16 << 20
+# Trilhas de áudio separadas: pedaços de 2 s em Opus (uns 8 kB cada).
+MAX_AUDIO_CHUNK_BYTES = 512 << 10
+MAX_AUDIO_SESSION_BYTES = 1 << 30   # teto por sessão: muito acima de 3 trilhas por 8 h
+MAX_AUDIO_TRACKS = 16
+MAX_AUDIO_PENDING = 50              # pedaços fora de ordem guardados por arquivo
 # Outras vozes: no máximo 15% do intervalo e nunca mais que 1 s (uma frase
 # curta de outra pessoa já é uma fala dela).
 MAX_OTHER_SECONDS = 1.0
@@ -135,6 +140,15 @@ def enabled(config: Optional[Dict[str, Any]] = None) -> bool:
         from castanha.config import load_config
         config = load_config()
     return (config.get("meet") or {}).get("speakers_enabled") is True
+
+
+def track_audio_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Gravar as trilhas de áudio do Meet separadas (opção `meet.track_audio`, desligada por padrão)."""
+    if config is None:
+        from castanha.config import load_config
+        config = load_config()
+    meet = config.get("meet") or {}
+    return meet.get("speakers_enabled") is True and meet.get("track_audio") is True
 
 
 # ------------------------------------------------------------------ protobuf
@@ -281,6 +295,13 @@ def prune(now: Optional[float] = None, days: int = RETENTION_DAYS) -> None:
                 path.unlink()
         except OSError:
             pass
+    for path in root.glob("*.audio"):
+        try:
+            if path.is_dir() and not path.is_symlink() and now - path.stat().st_mtime > days * 86400:
+                import shutil
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 class Session:
@@ -292,7 +313,13 @@ class Session:
     """
 
     def __init__(self, recording_active=_recording_active, clock=time.time, root: Optional[Path] = None,
-                 check_interval: float = 0.5):
+                 check_interval: float = 0.5, track_audio: bool = False, send=None):
+        # Trilhas separadas: `send` leva um pedido à página (ligar ou desligar a gravação das trilhas).
+        self.track_audio = track_audio
+        self.send = send
+        self._capture: Optional[bool] = None
+        self._audio: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._audio_bytes = 0
         self.check_interval = check_interval
         self.recording_active = recording_active
         self.clock = clock
@@ -389,6 +416,10 @@ class Session:
         if status is None:
             # Gravação acabou: o arquivo fecha e a próxima abre outro, com o mapa daquele momento.
             self.close()
+        self._sync_capture(status)
+        if kind == "audio":
+            self._audio_chunk(msg, status, now)
+            return
         if kind == "collections":
             try:
                 raw = base64.b64decode(msg.get("b64") or "", validate=True)
@@ -432,6 +463,19 @@ class Session:
                 if msg.get("presence") is True and platform(self.code) == "teams":
                     record["presence"] = True  # nível artificial: só diz quem está presente
                 self._write(record)
+            # A mesma medida por trilha (trilha, fonte, nível): liga cada trilha gravada a quem falava nela.
+            by_track = []
+            for frame in (msg.get("tracks") if isinstance(msg.get("tracks"), list) else [])[:5000]:
+                if (self.track_audio and isinstance(frame, list) and len(frame) == 4
+                        and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in frame)
+                        and all(math.isfinite(x) for x in frame)):
+                    ts, track, ssrc, level = frame
+                    if (0 <= track < MAX_AUDIO_TRACKS and track == int(track) and 0 < ssrc < 2 ** 32 and 0 <= level <= 1
+                            and abs(ts / 1000.0 - now) < 3600 and (stopped_at is None or ts / 1000.0 <= stopped_at)
+                            and not any(a <= ts / 1000.0 <= b for a, b in self._pauses)):
+                        by_track.append([round(ts / 1000.0, 3), int(track), int(ssrc), round(float(level), 3)])
+            if by_track:
+                self._write({"type": "track_levels", "t": now, "frames": by_track})
         elif kind == "mapping":
             # Teams: a página já entrega dispositivo→nome e fonte→dispositivo.
             if platform(self.code) != "teams":
@@ -473,7 +517,67 @@ class Session:
         elif kind == "bye":
             self.close()
 
+    def _sync_capture(self, status) -> None:
+        """Diz à página quando gravar as trilhas: só com o Castanha gravando (pausa para) e a opção ligada."""
+        wanted = self.track_audio and status == "recording"
+        if self.send is None or wanted == self._capture:
+            return
+        self._capture = wanted
+        try:
+            self.send({"type": "capture", "on": wanted})
+        except Exception:  # noqa: BLE001 - sem canal de volta a página só não grava as trilhas
+            pass
+
+    def _audio_chunk(self, msg: Dict[str, Any], status, now: float) -> None:
+        """Um pedaço de áudio de uma trilha, na ordem em que a página gravou. Só com gravação ativa."""
+        if not self.track_audio or status not in ("recording", "paused"):
+            return
+        track, started, seq, b64 = msg.get("track"), msg.get("started"), msg.get("seq"), msg.get("b64")
+        if not (isinstance(track, int) and not isinstance(track, bool) and 0 <= track < MAX_AUDIO_TRACKS
+                and _number(started) and abs(started / 1000.0 - now) < 86400
+                and isinstance(seq, int) and not isinstance(seq, bool) and 0 <= seq < 1 << 24
+                and isinstance(b64, str) and 0 < len(b64) <= MAX_AUDIO_CHUNK_BYTES * 4 // 3 + 4):
+            return
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (ValueError, TypeError):
+            self.note_error("audio")
+            return
+        key = (track, int(started))
+        entry = self._audio.get(key)
+        if entry is None:
+            # O registro no arquivo da sessão cria a sessão (se preciso) e diz onde está o áudio.
+            self._write({"type": "audio", "t": now, "track": track, "started": round(started / 1000.0, 3), "first_seq": seq})
+            folder = self.path.parent / (self.path.stem + ".audio")
+            folder.mkdir(mode=0o700, exist_ok=True)
+            path = folder / f"track{track}-{int(started)}.webm"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            # Começa sempre do pedaço 0 (é ele que traz o cabeçalho do arquivo), mesmo que outro chegue antes.
+            entry = self._audio[key] = {"file": os.fdopen(fd, "ab"), "next": 0, "pending": {}}
+        if seq < entry["next"] or seq in entry["pending"]:
+            return  # repetido
+        entry["pending"][seq] = data
+        while entry["next"] in entry["pending"]:
+            piece = entry["pending"].pop(entry["next"])
+            if self._audio_bytes + len(piece) > MAX_AUDIO_SESSION_BYTES:
+                entry["pending"].clear()
+                return
+            entry["file"].write(piece)
+            self._audio_bytes += len(piece)
+            entry["next"] += 1
+        entry["file"].flush()
+        if len(entry["pending"]) > MAX_AUDIO_PENDING:
+            # Um pedaço se perdeu no caminho: o arquivo continua do próximo que chegou.
+            self.note_error("audio_gap")
+            entry["next"] = min(entry["pending"])
+
     def close(self) -> None:
+        for entry in self._audio.values():
+            try:
+                entry["file"].close()
+            except OSError:
+                pass
+        self._audio = {}
         if self.file is not None:
             try:
                 self.file.close()
@@ -511,7 +615,13 @@ def run_host(stdin=None, session: Optional[Session] = None) -> int:
     active = enabled()
     if active:
         prune()
-    session = session or Session()
+
+    def send(message: Dict[str, Any]) -> None:
+        body = json.dumps(message).encode("utf-8")
+        sys.stdout.buffer.write(struct.pack("=I", len(body)) + body)
+        sys.stdout.buffer.flush()
+
+    session = session or Session(track_audio=active and track_audio_enabled(), send=send)
     try:
         while True:
             try:

@@ -7,9 +7,13 @@
   const replay = () => window.postMessage({ [TAG + "-replay"]: true }, location.origin);
   const connect = () => {
     port = chrome.runtime.connect({ name: TAG });
-    port.onDisconnect.addListener(() => { port = null; });
+    port.onDisconnect.addListener(() => { port = null; window.postMessage({ [TAG + "-capture"]: false }, location.origin); });
     // O service worker pede o mapa de novo quando o host nativo reabre.
-    port.onMessage.addListener((msg) => { if (msg && msg.type === "replay") replay(); });
+    port.onMessage.addListener((msg) => {
+      if (msg && msg.type === "replay") replay();
+      // O host diz quando gravar as trilhas de áudio (Castanha gravando e opção ligada).
+      if (msg && msg.type === "capture") window.postMessage({ [TAG + "-capture"]: msg.on === true }, location.origin);
+    });
     replay();
   };
   window.addEventListener("message", (ev) => {

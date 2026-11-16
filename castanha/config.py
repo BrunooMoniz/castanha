@@ -127,6 +127,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Nome de quem grava. Com ele, numa chamada em que o Meet identificou alguém, as falas do
         # microfone desta máquina saem com esse nome em vez de "Microfone local". Vazio: não nomeia.
         "owner_name": "",
+        # Gravar cada trilha de áudio do Meet em separado (experimental): a página grava as trilhas
+        # que recebe e o host guarda em ~/.local/state/castanha/meet/<sessão>.audio/ só durante a gravação.
+        "track_audio": False,
     },
     "zinom": {
         "enabled": False,

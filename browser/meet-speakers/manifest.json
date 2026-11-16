@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Castanha: quem fala no Meet e no Teams",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Entrega ao Castanha, na própria máquina, quem está falando em cada momento de uma chamada do Google Meet ou do Microsoft Teams.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvu8v9LDyLvIr2jvDtSgH+Hy/HLjSNL2kAc4zCgNgXFMVsG/xkSz+Bl7nLMEglO02834KE9quF/W9brYP7KVapajdopGjGj7T94lpMVcB18lBA/PTBJbVE5G31H3BV7pbfjC+tqvfCY1JT+vOy1ntu01prJRZzmjoT7OUlLGFKKeCm57oUoGZA+S7180Y0EKATVVA1oyI5jp0qczr1+Ee9wHRFJhkV2B1vDuKG/SBInJZSoNWNQLv7+hPwHVBjrBzA7DKofOGuzFC6bdAwERTde5uXHqqnUDglGjnqfejqpX4tWGoQe5/awEvP2ZjH1HQY3tgFPimWcUBZStTHkheqQIDAQAB",
   "minimum_chrome_version": "111",
