@@ -34,22 +34,50 @@ inteiro, e qualquer falha deixa a transcrição com o rótulo do canal.
 
 ## Atribuição
 
-Cada fala do canal do sistema recebe o participante que dominou o intervalo:
-cobertura mínima de 30%, e as outras vozes somadas (inclusive participante
-ainda sem nome) em no máximo 15% do intervalo. A fonte de mistura do Meet, que
-não pertence a ninguém, é ignorada. Fonte reatribuída no meio da chamada vale
-para quem era dono dela em cada instante.
+Regra da versão `meet-speakers-v2` (nov/2026), calibrada em 25 reuniões reais de set e
+out/2026 (12.345 falas do canal do sistema). A versão anterior nomeava 9% delas; esta
+nomeia 58% e identifica outros 29% como participante numerado.
 
-Pausas da gravação são descontadas; fala que atravessa uma pausa fica sem nome,
-e a voz de quem falou durante a pausa não conta. O atraso entre gravação e Meet
-é achado por correlação com o canal do sistema, em cada trecho entre pausas;
-correlação fraca (sessão errada, áudio de outro app) cancela aquele trecho. O microfone nunca recebe nome. Falas que cruzam a troca
-de pessoa ficam com o rótulo do canal.
+- **Uma voz por fonte.** Cada fonte de áudio (CSRC) é uma pessoa. A fala vai para a voz
+  que concentrou a energia do intervalo (85% ou mais), desde que nenhuma outra pessoa
+  tenha tido voz por mais de 15% do intervalo ou 1 s. Em 81% das falas reais uma voz só
+  responde por mais de 99% da energia, então o limiar alto custa pouco.
+- **O nome vale para a chamada inteira.** O Meet só anuncia nome e dono da fonte quando
+  alguém entra, sai ou muda; é comum o nome chegar quando a pessoa sai. Fonte que teve um
+  dono só é dele desde o primeiro pacote, e dispositivo que teve um nome só se chama
+  assim o tempo todo. Com mais de um dono ou nome, vale o de cada instante.
+- **Sem nome não é sem dono.** Participante que o Meet nunca nomeou sai como
+  `Participante 1`, `Participante 2`... (sempre a mesma pessoa naquela reunião), com
+  `attribution_named: false` nos segmentos e `named: false` no Silver. Nunca recebe nome
+  do convite nem nome citado na conversa.
+- **Nome da tela.** `page.js` lê, a cada 2 s, o nome mostrado em cada quadro de vídeo e
+  na lista de pessoas (elementos com `data-participant-id`, o mesmo identificador de
+  dispositivo do canal) e manda como mensagem `screen`. Cobre quem já estava na chamada,
+  que o canal nunca anuncia. O nome do canal, quando existe, vale mais. A sonda
+  (`probe`: elementos, dispositivos, com nome) fica no arquivo da sessão para mostrar se
+  a tela do Meet mudou de formato. **Ainda não validado numa chamada real.**
+- **Mistura do Meet.** A fonte 42 sem dono (assim em 23 chamadas) e qualquer fonte sem
+  dono que só espelha as outras não são gente.
+- **Atraso por janela.** O atraso entre gravação e Meet deriva (medido: de -0,3 a -1,1 s
+  em 40 min). Cada janela de 2 min acha o seu por correlação com o canal do sistema;
+  janela sem correlação herda da vizinha, e trecho em que as janelas não concordam fica
+  sem atribuição. Platô de correlação vale pelo meio; dois picos separados, não.
+- **Continua sem dono:** fala que atravessa uma pausa, que cai numa travada da página,
+  dividida entre duas vozes, ou que o canal gravado não acompanhou (Meet mudo, outro som).
+- **Microfone.** Com `meet.owner_name` configurado, numa chamada em que o Meet
+  identificou alguém, as falas do microfone saem como `Nome (microfone)`
+  (`attribution_source: local_microphone_owner`). Sem a opção, seguem `Microfone local`.
+- **Captura ausente.** Chamada do Meet gravada sem nenhum sinal da extensão gera um aviso
+  na tela, uma vez, e o marcador `.speakers/<sha>.missing.json`.
 
 No texto: `[12.30s–15.10s] Ana Souza (Meet): ...`. Nos segmentos:
-`attributed_name`, `attribution_source: google_meet_webrtc` e a cobertura,
-sem alterar `speaker` e `origin`. O Silver ganha o bloco `speakers` com
-presença observada. O filtro do Gold (`_ground_gold`) continua igual.
+`attributed_name`, `attribution_source` e a fatia de energia da voz, sem alterar
+`speaker` e `origin`. O Silver ganha o bloco `speakers` com presença observada. O filtro
+do Gold (`_ground_gold`) continua igual. O resultado por gravação
+(`.speakers/<sha>.result.json`) traz `attributed`, `named` e a lista de participantes.
+
+Bancada usada na calibragem: reexecutar a atribuição sobre `bronze/*/.speakers/*.json` e
+os `.jobs/*.json` de cada reunião, com o envelope do canal 1 do áudio.
 
 ## Microsoft Teams (no navegador)
 

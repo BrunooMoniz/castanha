@@ -89,14 +89,21 @@ def _speaker_summary(attributions: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not attributions:
         return None
     participants: Dict[str, int] = {}
+    unnamed = set()
     for item in attributions.values():
         for p in item.get("participants", []):
             participants[p["name"]] = participants.get(p["name"], 0) + p.get("utterances", 0)
+            if p.get("named") is False:
+                unnamed.add(p["name"])  # "Participante N": pessoa real que o Meet não nomeou
+    owners = sorted({a["owner"] for a in attributions.values() if a.get("owner")})
     return {"source": next(iter(attributions.values()))["source"],
             "meeting_codes": sorted({a.get("meeting_code") for a in attributions.values() if a.get("meeting_code")}),
             "attributed": sum(a["attributed"] for a in attributions.values()),
+            "named": sum(a.get("named", a["attributed"]) for a in attributions.values()),
             "remote_utterances": sum(a["remote_utterances"] for a in attributions.values()),
-            "participants": [{"name": n, "utterances": c} for n, c in sorted(participants.items())]}
+            "owner": owners[0] if len(owners) == 1 else None,
+            "participants": [{"name": n, "utterances": c, "named": n not in unnamed}
+                             for n, c in sorted(participants.items())]}
 
 
 class CastanhaEngine:
@@ -277,7 +284,20 @@ class CastanhaEngine:
             return  # job anterior ao recurso: sem janela confiável
         # O último lote de níveis ainda está a caminho do host.
         time.sleep(max(0.0, min(meet_speakers.FINAL_BATCH_WAIT, stopped_at + meet_speakers.FINAL_BATCH_WAIT - time.time())))
-        meet_speakers.save_snapshot(bronze, job.get("sha256"), job.get("state") or {}, stopped_at)
+        why: list = []
+        saved = meet_speakers.save_snapshot(bronze, job.get("sha256"), job.get("state") or {}, stopped_at, why=why)
+        # Chamada do Meet gravada sem nenhum sinal da extensão: a transcrição vai sair só com o
+        # rótulo do canal. Em nov/2026 isso passou duas semanas sem ninguém notar; agora avisa,
+        # uma vez por gravação, e deixa o motivo no Bronze.
+        state = job.get("state") or {}
+        marker = bronze / ".speakers" / f"{job.get('sha256')}.missing.json"
+        if (saved is None and why == ["no_session"] and not marker.exists()
+                and meet_speakers.meet_code(state.get("current_meeting") or state.get("calendar_event"))):
+            try:
+                write_json(marker, {"reason": "no_session", "at": time.time()})
+                notify(t("notify.meet_missing_title"), t("notify.meet_missing_body"), timeout=15000)
+            except Exception:  # noqa: BLE001 - aviso opcional, a gravação é o que importa
+                pass
 
     def pause_recording(self) -> Dict[str, Any]:
         state = self.state_mgr.read()
@@ -678,7 +698,8 @@ class CastanhaEngine:
                     and job.get("stage") in ("transcribed", "done")):
                 # Nome do participante só com a linha do tempo do Meet desta
                 # gravação; sem ela (ou sem certeza) fica o rótulo do canal.
-                attribution = meet_speakers.attribution_for_job(bronze, job) if meet_on else None
+                attribution = (meet_speakers.attribution_for_job(
+                    bronze, job, owner_name=(self.config.get("meet") or {}).get("owner_name")) if meet_on else None)
                 if attribution:
                     attributions[job["id"]] = attribution
                 parts.append(attribution["text"] if attribution else job["transcript"])

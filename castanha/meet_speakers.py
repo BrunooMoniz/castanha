@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 HOST_NAME = "io.github.brunoomoniz.castanha.meet"
 EXTENSION_ID = "fmiffekiigfbnmidnclnpfhndjbnlegj"
 DECODER_VERSION = "meet-collections-v1"
-ALGORITHM_VERSION = "meet-speakers-v1"
+ALGORITHM_VERSION = "meet-speakers-v2"
 EVIDENCE_SOURCE = "google_meet_webrtc"
 TEAMS_EVIDENCE_SOURCE = "microsoft_teams_webrtc"
 EVIDENCE_SOURCES = (EVIDENCE_SOURCE, TEAMS_EVIDENCE_SOURCE)
@@ -81,6 +81,8 @@ LAG_WINDOW = 3.0
 LAG_STEP = 0.1
 MIN_CORRELATION = 0.2
 REMOTE_ORIGIN = "audio_sistema"
+LOCAL_ORIGIN = "microfone_local"
+OWNER_SOURCE = "local_microphone_owner"
 MIX_MARGIN = 0.02
 # A mistura acompanha TODA a fala com dono (100% nas 3 sessões reais medidas).
 MIX_MIN_COVERAGE = 0.8
@@ -97,6 +99,26 @@ PRESENCE_MIN_RMS = 0.005
 # Dois picos de correlação quase iguais em atrasos distantes: alinhamento ambíguo.
 LAG_AMBIGUITY = 0.05
 LAG_DISTINCT = 0.5
+# Platô de correlação (atraso que deriva na gravação) mais largo que isto não tem meio confiável.
+LAG_PLATEAU_MAX = 2.5
+# Atraso por janela: cada dois minutos acham o seu, a até LAG_TRACK_REACH do atraso do trecho.
+LAG_TRACK_WINDOW = 120.0
+LAG_TRACK_HOP = 60.0
+LAG_TRACK_REACH = 1.5
+LAG_TRACK_AGREE = 1.0     # janela que destoa da mediana das outras não vale
+LAG_TRACK_INHERIT = 150.0  # janela sem correlação herda da vizinha até esta distância (s)
+# A fala vai para a voz que concentrou a energia do intervalo; abaixo disso são duas pessoas.
+# Em 81% das falas reais uma voz só responde por mais de 99% da energia: o limiar alto custa pouco.
+WINNER_SHARE = 0.85
+MIN_VOICE_COVERAGE = 0.25
+# A mistura do Meet quase nunca passa do nível de quem fala (tolerância a pacote fora de ordem).
+MIX_OWN_WAY = 0.01
+# Em 23 chamadas reais do Meet a mistura veio sempre com este identificador, e nunca com dono.
+MEET_MIX_SOURCE = "42"
+# Voz que está praticamente sozinha no intervalo pode cobrir menos dele (fala baixa manda poucos pacotes).
+SOLO_SHARE = 0.9
+SOLO_MIN_COVERAGE = 0.1
+ANONYMOUS = "Participante"
 
 
 def _state_dir() -> Path:
@@ -277,6 +299,8 @@ class Session:
         self.root = root
         self.code: Optional[str] = None
         self.devices: Dict[str, Tuple[str, float]] = {}
+        # Dispositivos cujo nome veio da tela do Meet: o nome do canal, quando chegar, vale mais.
+        self.screen: set = set()
         self.sources: Dict[int, Tuple[str, float]] = {}
         self.file = None
         self.path: Optional[Path] = None
@@ -311,8 +335,10 @@ class Session:
                       "errors_before": self.errors}
             self.file.write(json.dumps(header, ensure_ascii=False) + "\n")
             for device, (name, learned) in self.devices.items():
-                self.file.write(json.dumps({"type": "device", "t": learned, "device": device, "name": name},
-                                           ensure_ascii=False) + "\n")
+                known = {"type": "device", "t": learned, "device": device, "name": name}
+                if device in self.screen:
+                    known["via"] = "screen"
+                self.file.write(json.dumps(known, ensure_ascii=False) + "\n")
             for ssrc, (device, learned) in self.sources.items():
                 self.file.write(json.dumps({"type": "source", "t": learned, "device": device, "ssrc": ssrc}) + "\n")
         self.file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -321,7 +347,14 @@ class Session:
     def _apply_mapping(self, events, learned: float, status) -> None:
         for event in events:
             if event["type"] == "device":
+                via_screen = event.get("via") == "screen"
+                if via_screen and event["device"] in self.devices and event["device"] not in self.screen:
+                    continue  # o canal já disse o nome: a tela não troca
                 changed = (self.devices.get(event["device"]) or (None,))[0] != event["name"]
+                if via_screen:
+                    self.screen.add(event["device"])
+                else:
+                    self.screen.discard(event["device"])
                 if changed:
                     self.devices[event["device"]] = (event["name"], learned)
             else:
@@ -416,6 +449,24 @@ class Session:
                         and 0 < pair[0] < 2 ** 32 and (pair[1] is None or (isinstance(pair[1], str) and TEAMS_ID_RE.match(pair[1])))):
                     events.append({"type": "source", "device": pair[1], "ssrc": pair[0]})
             self._apply_mapping(events, learned, status)
+        elif kind == "screen":
+            # Meet: nome lido da tela (quadro de vídeo ou lista de pessoas), preso ao dispositivo.
+            if platform(self.code) != "meet":
+                return
+            sent = msg.get("t")
+            learned = sent / 1000.0 if _number(sent) and abs(sent / 1000.0 - now) < 86400 else now
+            events = []
+            for pair in (msg.get("devices") if isinstance(msg.get("devices"), list) else [])[:500]:
+                if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and DEVICE_RE.match(pair[0])
+                        and isinstance(pair[1], str) and pair[1].strip() and pair[1].isprintable()):
+                    events.append({"type": "device", "device": pair[0], "name": pair[1].strip()[:200], "via": "screen"})
+            self._apply_mapping(events, learned, status)
+            probe = msg.get("probe")
+            if (status is not None and self.file is not None and isinstance(probe, dict)
+                    and all(isinstance(probe.get(k), int) and not isinstance(probe.get(k), bool) for k in ("nodes", "devices", "named"))):
+                # Diagnóstico: quantos participantes a tela mostrou e quantos com nome legível.
+                self._write({"type": "probe", "t": now, "nodes": min(probe["nodes"], 10000),
+                             "devices": min(probe["devices"], 10000), "named": min(probe["named"], 10000)})
         elif kind == "replay_incomplete":
             # A página não guardou o histórico inteiro: o mapa reenviado pode estar velho.
             self.note_error("replay")
@@ -522,7 +573,8 @@ def _number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = None,
+             why: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """O trecho das sessões do Meet que cobre esta gravação, para ir ao Bronze.
 
     Fonte→dispositivo guarda o histórico com o instante de cada mudança: se o
@@ -546,10 +598,14 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
             continue
         candidates.setdefault(header.get("code"), []).append(records)
     if not candidates:
+        if why is not None:
+            why.append("no_session")  # a extensão não mandou nada durante a gravação
         return None
     # Duas chamadas ao mesmo tempo: o gravador pega o som das duas, e o código
     # do evento não isola o áudio. Sem atribuição.
     if len(candidates) != 1:
+        if why is not None:
+            why.append("two_calls")
         return None
     code = next(iter(candidates))
     pauses = _pause_windows(start, state.get("pauses"), end=stopped_at)
@@ -790,26 +846,222 @@ def estimate_lags(envelope: List[float], snap: Dict[str, Any], start: float,
             lag = k * step
             meet = [level_at.get(int(math.floor((w - lag) / step)), 0.0) for w in walls]
             scores.append((round(lag, 3), _pearson(piece, meet)))
-        best = max(scores, key=lambda item: (item[1], -abs(item[0])))
-        if any(abs(lag - best[0]) > LAG_DISTINCT and r >= best[1] - LAG_AMBIGUITY for lag, r in scores):
-            # Sinal periódico ou pobre: o atraso não é único e o nome poderia ser o do vizinho.
-            best = (best[0], 0.0)
-        out.append(best)
+        out.append(_best_lag(scores, step))
     return out
+
+
+def mix_sources(snap: Dict[str, Any]) -> set:
+    """Fontes que são a mistura do Meet, não gente.
+
+    O Meet manda, junto das vozes, uma fonte que repete o nível de quem fala
+    (CSRC 42 em 23 chamadas reais). Ela nunca tem dono, nunca aparece sozinha
+    nem mais alta que as outras e acompanha quase toda a fala. Sem dono mas
+    falando sozinha ou por cima de alguém é participante. Duas fontes sem dono
+    que se espelham (chamada em que o mapa não chegou): a de menor número é a
+    mistura. O Teams não tem mistura.
+    """
+    if platform(snap.get("meeting_code")) == "teams":
+        return set()
+    sources = snap.get("sources") or {}
+    late = set(snap.get("late_sources") or [])
+    level: Dict[str, Dict[int, float]] = {}
+    for ts, ssrc, value in snap.get("frames") or []:
+        if value >= SPEAKING_LEVEL:
+            bins = level.setdefault(str(ssrc), {})
+            key = int(ts * 10)
+            bins[key] = max(bins.get(key, 0.0), value)
+    candidates = sorted((s for s in level if not sources.get(s) and s not in late),
+                        key=lambda s: (int(s) if s.isdigit() else 1 << 40, s))
+    mix: set = {MEET_MIX_SOURCE} if MEET_MIX_SOURCE in candidates else set()
+    for ssrc in candidates:
+        if ssrc in mix:
+            continue
+        others: Dict[int, float] = {}
+        for other, bins in level.items():
+            if other == ssrc or other in mix:
+                continue
+            for key, value in bins.items():
+                others[key] = max(others.get(key, 0.0), value)
+        mine = level[ssrc]
+        if len(others) < MIX_MIN_EVIDENCE:
+            continue  # pouca fala alheia para concluir: é participante
+        near = lambda bins, key: max(bins.get(key - 1, 0.0), bins.get(key, 0.0), bins.get(key + 1, 0.0))  # noqa: E731
+        covered = sum(1 for key in others if near(mine, key) > 0)
+        own_way = sum(1 for key, value in mine.items() if value > near(others, key) + MIX_MARGIN)
+        if covered >= MIX_MIN_COVERAGE * len(others) and own_way <= MIX_OWN_WAY * len(mine):
+            mix.add(ssrc)
+    return mix
+
+
+def voices(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = ()) -> List[Tuple[float, float, Tuple[str, str]]]:
+    """(instante, nível, quem) de cada pacote de voz, com a mistura do Meet de fora.
+
+    "Quem" é ("name", nome) quando o Meet disse o nome do dispositivo dono da
+    fonte; ("device", dispositivo) quando a fonte tem dono sem nome; e
+    ("source", fonte) quando nem dono tem. Os dois últimos são participantes
+    de verdade, só sem nome: viram "Participante N" na transcrição.
+
+    O Meet só anuncia nome e dono quando alguém entra ou muda, então o vínculo
+    costuma chegar depois de a pessoa já ter falado. Fonte que só teve um dono
+    na chamada inteira é dele desde o primeiro pacote, e dispositivo que só
+    teve um nome se chama assim o tempo todo. Com mais de um dono ou nome, vale
+    o de cada instante (antes do primeiro, o primeiro).
+    """
+    devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
+    mix = mix_sources(snap)
+    exclude = list(exclude)
+    cache: Dict[str, Any] = {}
+
+    def owner(ssrc: str, ts: float) -> Optional[str]:
+        history = sources.get(ssrc)
+        if not history:
+            return None
+        if ssrc not in cache:
+            owners = {device for _, device in history}
+            cache[ssrc] = next(iter(owners)) if len(owners) == 1 else False
+        if cache[ssrc] is not False:
+            return cache[ssrc]
+        return _owner(history, ts) if ts >= history[0][0] else history[0][1]
+
+    def name(device: Optional[str], ts: float) -> Optional[str]:
+        history = devices.get(device) if device else None
+        if not history:
+            return None
+        if isinstance(history, str):
+            return history
+        return _name_at(devices, device, ts) or history[0][1]
+
+    out = []
+    for ts, ssrc, value in snap.get("frames") or []:
+        ssrc = str(ssrc)
+        if value < COMPETING_LEVEL or ssrc in mix or any(a <= ts <= b for a, b in exclude):
+            continue
+        device = owner(ssrc, ts)
+        who = name(device, ts)
+        key = ("name", who) if who else ("device", device) if device else ("source", ssrc)
+        out.append((ts, value, key))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _best_lag(scores: List[Tuple[float, float]], step: float = LAG_STEP) -> Tuple[float, float]:
+    """Atraso de um conjunto (atraso, correlação) em ordem de atraso.
+
+    O pico pode ser um platô (o atraso deriva um pouco ao longo da gravação):
+    vale o meio dele, se não for largo demais. Outro pico quase igual, separado
+    do platô, é alinhamento ambíguo (sinal periódico ou pobre) e zera a
+    correlação: o nome poderia ser o do vizinho.
+    """
+    top = max(range(len(scores)), key=lambda i: (scores[i][1], -abs(scores[i][0])))
+    floor = scores[top][1] - LAG_AMBIGUITY
+    lo = hi = top
+    while lo > 0 and scores[lo - 1][1] >= floor:
+        lo -= 1
+    while hi < len(scores) - 1 and scores[hi + 1][1] >= floor:
+        hi += 1
+    apart = int(round(LAG_DISTINCT / step))
+    rival = any(r >= floor for i, (_, r) in enumerate(scores) if i < lo - apart or i > hi + apart)
+    if rival or scores[hi][0] - scores[lo][0] > LAG_PLATEAU_MAX:
+        return (scores[top][0], 0.0)
+    lag = scores[top][0] if scores[hi][0] - scores[lo][0] <= LAG_DISTINCT else scores[(lo + hi) // 2][0]
+    return (round(lag, 3), scores[top][1])
+
+
+def _lag_scores(piece: List[float], walls: List[float], level_at: Dict[int, float], center: float,
+                reach: float, step: float) -> List[Tuple[float, float]]:
+    steps = int(round(reach / step))
+    scores = []
+    for k in range(-steps, steps + 1):
+        lag = center + k * step
+        meet = [level_at.get(int(math.floor((w - lag) / step)), 0.0) for w in walls]
+        scores.append((round(lag, 3), _pearson(piece, meet)))
+    return scores
+
+
+def lag_track(envelope: List[float], snap: Dict[str, Any], start: float, pauses=None,
+              step: float = LAG_STEP) -> List[List[Tuple[float, float, float, float]]]:
+    """Por trecho entre pausas, janelas (início, fim, atraso, correlação) em deslocamento de áudio.
+
+    O atraso entre o som gravado e o sinal do Meet não é constante numa
+    gravação longa. Cada janela de dois minutos acha o seu, perto do atraso do
+    trecho; janela sem correlação herda o da vizinha mais próxima que tenha, e
+    trecho em que as janelas não concordam entre si fica sem atraso (vazio).
+    """
+    level_at = _level_bins(snap, step)
+    tracks = []
+    span, hop = int(round(LAG_TRACK_WINDOW / step)), int(round(LAG_TRACK_HOP / step))
+    for (a, b, paused), (seg_lag, seg_r) in zip(audio_segments(start, pauses), estimate_lags(envelope, snap, start, pauses, step)):
+        lo, hi = int(math.ceil(a / step)), min(len(envelope), int(b / step) if math.isfinite(b) else len(envelope))
+        anchored = seg_r >= MIN_CORRELATION
+        windows = []
+        for first in range(lo, max(lo + 1, hi - span // 2), hop):
+            last = min(hi, first + span)
+            piece = envelope[first:last]
+            walls = [start + i * step + paused for i in range(first, last)]
+            if anchored:
+                lag, r = _best_lag(_lag_scores(piece, walls, level_at, seg_lag, LAG_TRACK_REACH, step), step)
+            else:
+                lag, r = _best_lag(_lag_scores(piece, walls, level_at, 0.0, LAG_WINDOW, step), step)
+            windows.append([first * step, last * step, lag, r])
+        good = [w for w in windows if w[3] >= MIN_CORRELATION]
+        if good:
+            ordered = sorted(w[2] for w in good)
+            median = ordered[len(ordered) // 2]
+            good = [w for w in good if abs(w[2] - median) <= LAG_TRACK_AGREE]
+        if not good or (not anchored and len(good) < max(2, len(windows) // 2)):
+            tracks.append([(a, b, seg_lag, seg_r)] if anchored else [])
+            continue
+        # Janela recusada (pico rival longe do atraso das outras) tenta de novo só perto da mediana.
+        for w in windows:
+            if w in good:
+                continue
+            piece = envelope[int(round(w[0] / step)):int(round(w[1] / step))]
+            walls = [start + i * step + paused for i in range(int(round(w[0] / step)), int(round(w[1] / step)))]
+            lag, r = _best_lag(_lag_scores(piece, walls, level_at, median, LAG_TRACK_AGREE, step), step)
+            if r >= MIN_CORRELATION:
+                w[2], w[3] = lag, r
+                good.append(w)
+        centers = [((w[0] + w[1]) / 2, w) for w in good]
+        out = []
+        for w in windows:
+            if w in good:
+                out.append(tuple(w))
+                continue
+            middle = (w[0] + w[1]) / 2
+            distance, nearest = min((abs(c - middle), g) for c, g in centers)
+            if distance <= LAG_TRACK_INHERIT:
+                out.append((w[0], w[1], nearest[2], nearest[3]))
+        tracks.append(out)
+    return tracks
+
+
+def _lag_at(track: List[Tuple[float, float, float, float]], offset: float) -> Optional[Tuple[float, float]]:
+    """Atraso da janela cujo meio está mais perto do deslocamento, entre as que o cobrem."""
+    best = None
+    for a, b, lag, r in track:
+        if a <= offset < b or (not math.isfinite(b) and offset >= a):
+            distance = abs((a + (b if math.isfinite(b) else a)) / 2 - offset)
+            if best is None or distance < best[0]:
+                best = (distance, lag, r)
+    return (best[1], best[2]) if best else None
 
 
 def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: float,
               pauses=None, lags: Optional[List[Tuple[float, float]]] = None,
-              envelope: Optional[List[float]] = None, step: float = LAG_STEP) -> Dict[int, Dict[str, Any]]:
-    """Índice da fala → {nome, cobertura}. Só o canal do sistema; o microfone nunca.
+              envelope: Optional[List[float]] = None, step: float = LAG_STEP,
+              track: Optional[List[List[Tuple[float, float, float, float]]]] = None) -> Dict[int, Dict[str, Any]]:
+    """Índice da fala → {key, coverage}: a voz que dominou o intervalo. Só o canal do sistema.
 
-    Fala que atravessa uma pausa, trecho com correlação fraca, fonte sem nome
-    dominante ou outra voz relevante no mesmo intervalo: fica sem nome.
+    Cada fala remota vai para quem concentrou a energia de voz no intervalo
+    dela (WINNER_SHARE), tenha nome ou não: participante sem nome continua
+    sendo uma pessoa só, e a transcrição o chama de "Participante N". Ficam
+    sem dono as falas que atravessam uma pausa, as de trecho sem alinhamento
+    com o Meet, as que caem numa travada da página, as divididas entre duas
+    vozes e as que o canal gravado não acompanhou (Meet mudo, outro som).
     """
     segments = audio_segments(start, pauses)
-    pause_walls = _pause_windows(start, pauses)
-    intervals = speaking_intervals(snap, exclude=pause_walls)
-    competing = speaking_intervals(snap, exclude=pause_walls, min_level=COMPETING_LEVEL)
+    spoken = voices(snap, exclude=_pause_windows(start, pauses))
+    stamps = [ts for ts, _, _ in spoken]
     level_at = _level_bins(snap, step) if envelope is not None else {}
     result = {}
     for index, utterance in enumerate(utterances):
@@ -824,33 +1076,41 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
         segment = _segment_index(segments, u_start)
         if _segment_index(segments, max(u_start, u_end - 1e-6)) != segment:
             continue
-        lag, correlation = (lags[segment] if lags and segment < len(lags) else (0.0, 0.0))
+        if track is not None:
+            found = _lag_at(track[segment], (u_start + u_end) / 2) if segment < len(track) else None
+            lag, correlation = found if found else (0.0, 0.0)
+        else:
+            lag, correlation = (lags[segment] if lags and segment < len(lags) else (0.0, 0.0))
         if correlation < MIN_CORRELATION:
             continue
         shift = start + segments[segment][2] - lag
         lo, hi = u_start + shift - EDGE_TOLERANCE, u_end + shift + EDGE_TOLERANCE
         if any(a < hi and b > lo for a, b in snap.get("gaps") or []):
             continue  # a página travou nesse trecho: a coleta pode ter perdido outra voz
-        def overlaps(source):
-            out: Dict[Optional[str], float] = {}
-            for a, b, who in source:
-                if b > lo and a < hi:
-                    out[who] = out.get(who, 0.0) + min(b, hi) - max(a, lo)
-            return out
-        overlap = overlaps(intervals)
-        named = sorted(((n, v) for n, v in overlap.items() if n is not None), key=lambda kv: -kv[1])
-        if not named:
+        energy: Dict[Tuple[str, str], float] = {}
+        active: Dict[Tuple[str, str], set] = {}
+        for i in range(bisect.bisect_left(stamps, lo), bisect.bisect_right(stamps, hi)):
+            ts, value, key = spoken[i]
+            energy[key] = energy.get(key, 0.0) + value
+            active.setdefault(key, set()).add(int(ts / step))
+        if not energy:
             continue
-        name, covered = named[0]
-        others = sum(v for n, v in overlaps(competing).items() if n != name)
+        key = max(energy, key=lambda k: (energy[k], k))
+        share = energy[key] / sum(energy.values())
         width = hi - lo
-        coverage = covered / width
-        if (coverage < MIN_COVERAGE or others > min(MAX_OTHER_SHARE * width, MAX_OTHER_SECONDS)
-                or (others and covered < DOMINANCE * others)):
+        # Cobertura medida dentro da fala, sem a folga das bordas: o começo da
+        # fala seguinte de outra pessoa não pode dar dono a um trecho mudo.
+        core_lo, core_hi = int((lo + EDGE_TOLERANCE) / step), int((hi - EDGE_TOLERANCE) / step)
+        covered = min(1.0, sum(1 for k in active[key] if core_lo <= k <= core_hi) * step / (u_end - u_start))
+        # Tempo em que outra pessoa (com ou sem nome) teve voz no intervalo: uma
+        # frase curta de outro já é fala dele, mesmo baixa.
+        others = sum(len(bins) for k, bins in active.items() if k != key) * step
+        if (share < WINNER_SHARE or others > min(MAX_OTHER_SHARE * width, MAX_OTHER_SECONDS)
+                or covered < (SOLO_MIN_COVERAGE if share >= SOLO_SHARE else MIN_VOICE_COVERAGE)):
             continue
         if envelope is not None:
-            # A correlação do trecho inteiro não vê um desvio curto (Meet mudo
-            # e outro áudio tocando): a fala precisa bater com o Meet sozinha.
+            # A correlação da janela não vê um desvio curto (Meet mudo e outro
+            # áudio tocando): a fala precisa bater com o Meet sozinha.
             seg_lo, seg_hi = segments[segment][0], segments[segment][1]
             first = max(int(math.ceil(max(u_start - LOCAL_MARGIN, seg_lo) / step)), 0)
             last = min(int((min(u_end + LOCAL_MARGIN, seg_hi)) / step), len(envelope))
@@ -868,8 +1128,23 @@ def attribute(utterances: List[Dict[str, Any]], snap: Dict[str, Any], start: flo
                     continue
             elif _pearson(piece, local) < LOCAL_CORRELATION:
                 continue
-        result[index] = {"name": name, "coverage": round(coverage, 3)}
+        result[index] = {"key": key, "coverage": round(share, 3)}
     return result
+
+
+def label_voices(found: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    """Troca a chave de cada voz pelo nome exibido: o do Meet, ou "Participante N" na ordem em que falaram."""
+    anonymous: Dict[Tuple[str, str], str] = {}
+    out = {}
+    for index in sorted(found):
+        kind, value = found[index]["key"]
+        if kind == "name":
+            shown, named = value, True
+        else:
+            shown = anonymous.setdefault((kind, value), f"{ANONYMOUS} {len(anonymous) + 1}")
+            named = False
+        out[index] = {"name": shown, "coverage": found[index]["coverage"], "named": named}
+    return out
 
 
 def annotate(utterances: List[Dict[str, Any]], result: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -881,8 +1156,10 @@ def annotate(utterances: List[Dict[str, Any]], result: Optional[Dict[str, Any]])
         item = dict(utterance)
         hit = names.get(str(index))
         if hit:
-            item.update(attributed_name=hit["name"], attribution_source=(result or {}).get("source", EVIDENCE_SOURCE),
-                        attribution_coverage=hit["coverage"])
+            item.update(attributed_name=hit["name"], attribution_coverage=hit["coverage"],
+                        attribution_source=(OWNER_SOURCE if hit.get("owner") else (result or {}).get("source", EVIDENCE_SOURCE)))
+            if hit.get("named") is False:
+                item["attribution_named"] = False  # participante real, sem nome: "Participante N"
         out.append(item)
     return out
 
@@ -890,7 +1167,9 @@ def annotate(utterances: List[Dict[str, Any]], result: Optional[Dict[str, Any]])
 def _render(utterances: List[Dict[str, Any]], names: Dict[int, Dict[str, Any]], tag: str = "Meet") -> str:
     lines = []
     for index, s in enumerate(utterances):
-        speaker = f"{names[index]['name']} ({tag})" if index in names else s.get("speaker")
+        hit = names.get(index)
+        speaker = (s.get("speaker") if not hit else f"{hit['name']} (microfone)" if hit.get("owner")
+                   else f"{hit['name']} ({tag})")
         lines.append(f"[{float(s['start']):.2f}s–{float(s['end']):.2f}s] {speaker}: {s.get('text', '')}")
     return "\n".join(lines)
 
@@ -899,7 +1178,8 @@ def _speakers_dir(bronze: Path) -> Path:
     return bronze / ".speakers"
 
 
-def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> Optional[Dict[str, Any]]:
+def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None,
+                        owner_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Resultado cacheado por gravação: nomes por fala, texto reescrito e evidência.
 
     O checkpoint da transcrição não muda: a atribuição é uma camada à parte em
@@ -923,7 +1203,8 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     ordered = sorted(utterances, key=lambda s: (s.get("start", 0), s.get("end", 0), s.get("channel", 0)))
     state = job.get("state") or {}
     pauses = state.get("pauses") or []
-    key = hashlib.sha256(json.dumps([ALGORITHM_VERSION, snap, ordered, pauses, job.get("recorded_at")],
+    owner_name = owner_name.strip()[:200] if isinstance(owner_name, str) and owner_name.strip() else None
+    key = hashlib.sha256(json.dumps([ALGORITHM_VERSION, snap, ordered, pauses, job.get("recorded_at"), owner_name],
                                     sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     cache = _speakers_dir(bronze) / f"{sha}.result.json"
     try:
@@ -938,23 +1219,38 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     if start is None or not envelope:
         return None
     lags = estimate_lags(envelope, snap, start, pauses)
-    names = attribute(ordered, snap, start, pauses, lags, envelope=envelope)
+    track = lag_track(envelope, snap, start, pauses)
+    names = label_voices(attribute(ordered, snap, start, pauses, envelope=envelope, track=track))
     remote = sum(1 for s in ordered if s.get("origin") == REMOTE_ORIGIN)
+    attributed = len(names)
     spoken: Dict[str, int] = {}
+    unnamed = set()
     for item in names.values():
         spoken[item["name"]] = spoken.get(item["name"], 0) + 1
+        if not item["named"]:
+            unnamed.add(item["name"])
     # Presença observada = teve voz dentro da gravação (sem a margem do recorte);
     # quem só estava no mapa fica de fora.
     rec_lo, rec_hi = snap.get("recording") or [start, math.inf]
-    roster = sorted({name for a, b, name in speaking_intervals(snap, exclude=_pause_windows(start, pauses, end=rec_hi))
-                     if name and b > rec_lo and a < rec_hi})
+    heard = {who for ts, value, (kind, who) in voices(snap, exclude=_pause_windows(start, pauses, end=rec_hi))
+             if kind == "name" and value >= SPEAKING_LEVEL and rec_lo <= ts <= rec_hi}
+    roster = sorted(heard | (set(spoken) - unnamed)) + sorted(unnamed, key=lambda n: (len(n), n))
+    if names and owner_name:
+        # Numa chamada gravada nesta máquina, o microfone é de quem a configurou como dona
+        # (`meet.owner_name`). Só entra quando a chamada teve voz identificada pelo Meet.
+        for index, s in enumerate(ordered):
+            if s.get("origin") == LOCAL_ORIGIN:
+                names[index] = {"name": owner_name, "coverage": 1.0, "named": True, "owner": True}
     result = {
         "key": key, "version": ALGORITHM_VERSION, "source": evidence_source(snap.get("meeting_code")),
         "decoder": snap.get("decoder"),
         "meeting_code": snap.get("meeting_code"),
         "segments": [{"lag_seconds": lag, "correlation": round(r, 3)} for lag, r in lags],
-        "remote_utterances": remote, "attributed": len(names),
-        "participants": [{"name": n, "utterances": spoken.get(n, 0)} for n in roster],
+        "lag_windows": sum(len(t) for t in track),
+        "remote_utterances": remote, "attributed": attributed,
+        "named": sum(1 for i, v in names.items() if v["named"] and not v.get("owner")),
+        "participants": [{"name": n, "utterances": spoken.get(n, 0), "named": n not in unnamed} for n in roster],
+        "owner": owner_name if names and owner_name else None,
         "names": {str(i): v for i, v in names.items()},
         "text": _render(ordered, names, label(snap.get("meeting_code"))) if names else None,
     }
@@ -966,12 +1262,13 @@ def attribution_for_job(bronze: Path, job: Dict[str, Any], envelope_fn=None) -> 
     return result if names else None
 
 
-def save_snapshot(bronze: Path, audio_sha256: str, state: Dict[str, Any], stopped_at: float) -> Optional[Path]:
+def save_snapshot(bronze: Path, audio_sha256: str, state: Dict[str, Any], stopped_at: float,
+                  why: Optional[List[str]] = None) -> Optional[Path]:
     """Copia para o Bronze o trecho do Meet desta gravação. Falha nunca derruba o stop."""
     try:
         if not re.fullmatch(r"[0-9a-f]{64}", audio_sha256 or ""):
             return None
-        snap = snapshot(state, stopped_at)
+        snap = snapshot(state, stopped_at, why=why)
         if not snap:
             return None
         from castanha.durability import write_json

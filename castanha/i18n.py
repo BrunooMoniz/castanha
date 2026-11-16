@@ -87,6 +87,14 @@ STRINGS = {
         "en": "Processing transcription and generating notes...",
         "pt": "Processando transcrição e gerando notas...",
     },
+    "notify.meet_missing_title": {
+        "en": "No speaker names for this meeting",
+        "pt": "Reunião sem nome de quem falou",
+    },
+    "notify.meet_missing_body": {
+        "en": "The Meet call was recorded, but the browser extension sent no signal. Run `castanha meet status` and reopen Chromium.",
+        "pt": "A chamada do Meet foi gravada, mas a extensão do navegador não mandou sinal. Rode `castanha meet status` e reabra o Chromium.",
+    },
     "notify.preserved_title": {
         "en": "Recording preserved, processing pending",
         "pt": "Gravação preservada, processamento pendente",

@@ -62,7 +62,7 @@ def source_message(device, ssrc, kind=1):
 
 def attribute(utterances, snap, start, pauses=None, lags=None):
     """Correlação boa em todos os trechos, salvo quando o teste escolhe outra."""
-    return ms.attribute(utterances, snap, start, pauses, [(0.0, 1.0)] * 8 if lags is None else lags)
+    return ms.label_voices(ms.attribute(utterances, snap, start, pauses, [(0.0, 1.0)] * 8 if lags is None else lags))
 
 
 def frames(start, end, ssrc, level=0.2, step=0.02):
@@ -286,9 +286,31 @@ class TimelineTest(unittest.TestCase):
     def test_without_measured_correlation_nothing_is_named(self):
         self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start), {})
 
-    def test_voice_before_the_source_was_bound_belongs_to_nobody(self):
+    def test_voice_before_the_binding_arrived_belongs_to_the_only_owner_the_source_had(self):
+        # O Meet só anuncia o vínculo quando alguém entra ou muda: a fonte que teve
+        # um dono só na chamada inteira era dele desde o primeiro pacote.
         snap = dict(self.snap(), sources={"111": [[self.start + 9, ANA]], "222": [[0, BETO]]})
-        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start), {})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start)[0]["name"], "Ana Teste")
+
+    def test_name_announced_late_names_what_the_person_said_before(self):
+        # Medido em reuniões reais: o nome costuma chegar só quando a pessoa sai da chamada.
+        snap = dict(self.snap(), devices={ANA: [[self.start + 3000, "Ana Teste"]], BETO: [[0, "Beto Teste"]]})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start)[0]["name"], "Ana Teste")
+
+    def test_participant_the_meet_never_named_is_one_numbered_person(self):
+        # Dois dispositivos sem nome: cada um é sempre o mesmo "Participante N", na ordem em que falaram.
+        snap = {"devices": {}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                "frames": frames(self.start + 1, self.start + 4, 111) + frames(self.start + 5, self.start + 8, 222)
+                + frames(self.start + 9, self.start + 12, 111)}
+        names = attribute([self.utt(1.1, 3.9), self.utt(5.2, 7.8), self.utt(9.1, 11.9)], snap, self.start)
+        self.assertEqual([(names[i]["name"], names[i]["named"]) for i in range(3)],
+                         [("Participante 1", False), ("Participante 2", False), ("Participante 1", False)])
+
+    def test_same_person_on_two_devices_is_one_name(self):
+        # Quem cai e volta ganha outro dispositivo com o mesmo nome.
+        snap = {"devices": {ANA: "Ana Teste", BETO: "Ana Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                "frames": frames(self.start + 1, self.start + 2.5, 111) + frames(self.start + 2.5, self.start + 4, 222)}
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start)[0]["name"], "Ana Teste")
 
     def test_source_bound_late_competes_even_with_someone_named_talking(self):
         snap = self.snap(extra_frames=frames(self.start + 1, self.start + 4, 333))
@@ -319,10 +341,14 @@ class TimelineTest(unittest.TestCase):
         # 3.0–6.0 pega Ana e Beto por igual; 9–12 ninguém falava.
         self.assertEqual(attribute([self.utt(3.0, 6.0), self.utt(9, 12)], self.snap(), self.start), {})
 
-    def test_unknown_source_and_quiet_frames_do_not_count(self):
+    def test_unknown_source_alone_is_a_numbered_participant_and_a_quiet_voice_alone_is_named(self):
+        # Fonte sem dono falando sozinha é gente (host reiniciado, mapa perdido): não ganha
+        # nome, mas é uma pessoa. Voz baixa e sozinha no trecho é de quem o Meet diz que é.
         snap = self.snap(extra_frames=frames(self.start + 9, self.start + 12, 999)
                          + frames(self.start + 13, self.start + 16, 111, level=0.01))
-        self.assertEqual(attribute([self.utt(9.1, 11.9), self.utt(13.1, 15.9)], snap, self.start), {})
+        names = attribute([self.utt(9.1, 11.9), self.utt(13.1, 15.9)], snap, self.start)
+        self.assertEqual([(names[0]["name"], names[0]["named"]), (names[1]["name"], names[1]["named"])],
+                         [("Participante 1", False), ("Ana Teste", True)])
 
     def test_utterance_across_a_pause_gets_no_name(self):
         # Ana fala 1–4 no arquivo; a pausa de 60 s cai no meio e Beto só fala durante ela.
@@ -366,7 +392,7 @@ class TimelineTest(unittest.TestCase):
             envelope[i] = 0.3 if (i // 3) % 2 == 0 else 0.0
         self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start, lags=[(0, 1)], envelope=envelope), {})
         following = [0.3 if 1 <= i * 0.1 < 4 or 5 <= i * 0.1 < 8 else 0.0 for i in range(100)]
-        names = ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start, lags=[(0, 1)], envelope=following)
+        names = ms.label_voices(ms.attribute([self.utt(1.1, 3.9)], self.snap(), self.start, lags=[(0, 1)], envelope=following))
         self.assertEqual(names[0]["name"], "Ana Teste")
 
     def test_unknown_voice_louder_than_the_named_one_competes(self):
@@ -577,10 +603,13 @@ class FrontmatterTest(unittest.TestCase):
         from castanha.summarizer import silver_frontmatter
         text = silver_frontmatter({"title": "T", "speaker_attribution": {
             "source": ms.EVIDENCE_SOURCE,
-            "participants": [{"name": "Ana Teste", "utterances": 3}, {"name": "Beto Teste", "utterances": 0}]}})
+            "participants": [{"name": "Ana Teste", "utterances": 3}, {"name": "Beto Teste", "utterances": 0},
+                             {"name": "Participante 1", "utterances": 2, "named": False}]}})
         self.assertIn('speakers:\n  source: "google_meet_webrtc"', text)
-        self.assertIn('- name: "Ana Teste"\n      presence: "observed"\n      speech: "meet_audio_level"', text)
-        self.assertIn('- name: "Beto Teste"\n      presence: "observed"\n      speech: "not_observed"', text)
+        self.assertIn('- name: "Ana Teste"\n      named: true\n      presence: "observed"\n      speech: "meet_audio_level"', text)
+        self.assertIn('- name: "Beto Teste"\n      named: true\n      presence: "observed"\n      speech: "not_observed"', text)
+        # Pessoa real que o Meet não nomeou: fica marcada, para ninguém tratar o rótulo como nome.
+        self.assertIn('- name: "Participante 1"\n      named: false\n      presence: "observed"', text)
         self.assertNotIn("speakers:", silver_frontmatter({"title": "T"}))
 
 
@@ -832,7 +861,7 @@ class TeamsTest(unittest.TestCase):
         measured = dict(snap, presence_only=False)
         self.assertEqual(ms.attribute(utt, measured, start, lags=[(0, 1)], envelope=[0.2 + 0.1 * ((i // 2) % 2) for i in range(200)]), {})
         loud = [0.2 + 0.1 * ((i // 2) % 2) for i in range(200)]
-        self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=loud)[0]["name"], "Ana Teste")
+        self.assertEqual(ms.label_voices(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=loud))[0]["name"], "Ana Teste")
         self.assertEqual(ms.attribute(utt, snap, start, lags=[(0, 1)], envelope=[0.0] * 200), {})
 
     def test_codes_and_labels(self):
@@ -896,3 +925,194 @@ class TeamsPageScriptTest(unittest.TestCase):
             text = next(Path(tmp).glob("*.jsonl")).read_text()
             self.assertIn("Beto Teste", text)
             self.assertIn('"ssrc": 415', text)
+
+
+class ScreenNamesTest(unittest.TestCase):
+    """Nome lido da tela do Meet: cobre quem já estava na chamada, que o canal não anuncia."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "meet"
+        self.now = 1_790_000_000.0
+        self.session = ms.Session(recording_active=lambda: {"status": "recording"}, clock=lambda: self.now,
+                                  root=self.root, check_interval=0)
+
+    def send(self, **message):
+        self.session.handle({"code": CODE, **message})
+
+    def test_page_reads_the_name_shown_on_each_tile_and_skips_the_self_label(self):
+        harness = Path(__file__).resolve().parent / "meet_screen_harness.js"
+        out = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30, check=True)
+        posted = json.loads(out.stdout)
+        self.assertEqual([m["devices"] for m in posted], [[[ANA, "Ana Teste"]], [[f"{SPACE}/devices/206", "Beto Teste"]]])
+        self.assertEqual(posted[-1]["probe"], {"nodes": 4, "devices": 3, "named": 2})
+        # O que a página manda o host aceita.
+        for message in posted:
+            self.session.handle(message | {"code": CODE})
+        self.assertEqual(self.session.devices[ANA][0], "Ana Teste")
+
+    def test_screen_name_fills_a_device_the_channel_never_named(self):
+        self.send(type="collections", t=self.now * 1000, b64=base64.b64encode(source_message(ANA, 111)).decode())
+        self.send(type="screen", t=self.now * 1000, devices=[[ANA, "Ana Teste"]], probe={"nodes": 2, "devices": 1, "named": 1})
+        self.send(type="levels", frames=[[self.now * 1000, 111, 0.2]])
+        self.send(type="bye")
+        records = [json.loads(line) for line in next(self.root.glob("*.jsonl")).read_text().splitlines()]
+        device = next(r for r in records if r["type"] == "device")
+        self.assertEqual((device["name"], device.get("via")), ("Ana Teste", "screen"))
+
+    def test_channel_name_wins_over_the_screen_and_the_screen_never_replaces_it(self):
+        self.send(type="screen", t=self.now * 1000, devices=[[ANA, "Ana da Tela"]])
+        self.send(type="collections", t=self.now * 1000, b64=base64.b64encode(device_message(ANA, "Ana Teste")).decode())
+        self.assertEqual(self.session.devices[ANA][0], "Ana Teste")
+        self.send(type="screen", t=self.now * 1000, devices=[[ANA, "Outra Coisa"]])
+        self.assertEqual(self.session.devices[ANA][0], "Ana Teste")
+
+    def test_screen_message_with_anything_but_a_meet_device_is_dropped(self):
+        self.send(type="screen", t=self.now * 1000,
+                  devices=[["8:orgid:ana", "Ana"], [ANA, ""], [ANA, "linha\nquebrada"], ["x", "y", "z"], 7])
+        self.assertEqual(self.session.devices, {})
+
+
+class CoverageTest(unittest.TestCase):
+    """O que as 25 reuniões reais de set e out/2026 mostraram que derrubava a atribuição."""
+
+    start = 1_790_000_000.0
+
+    def utt(self, start, end, origin="audio_sistema", text="fala"):
+        return {"speaker": "Áudio do sistema" if origin == "audio_sistema" else "Microfone local", "text": text,
+                "start": start, "end": end, "channel": 1 if origin == "audio_sistema" else 0, "origin": origin}
+
+    def test_meet_mix_is_ignored_even_in_a_short_recording(self):
+        # Gravação curta não dá estatística para reconhecer a mistura: a fonte 42 sem dono já basta.
+        talk = frames(self.start + 1, self.start + 4, 111)
+        snap = {"devices": {ANA: "Ana Teste"}, "sources": {"111": [[0, ANA]]},
+                "frames": talk + [[t, 42, level] for t, _, level in talk]}
+        self.assertEqual(ms.mix_sources(snap), {"42"})
+        self.assertEqual(attribute([self.utt(1.1, 3.9)], snap, self.start)[0]["name"], "Ana Teste")
+        # A mesma fonte 42 com dono é participante, não mistura.
+        owned = dict(snap, sources={"111": [[0, ANA]], "42": [[0, BETO]]})
+        self.assertEqual(ms.mix_sources(owned), set())
+
+    def test_unowned_source_that_mirrors_everyone_is_the_mix(self):
+        base = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]}}
+        talk = [f for k in range(0, 80, 8) for f in frames(self.start + k + 1, self.start + k + 4, 111)
+                + frames(self.start + k + 5, self.start + k + 8, 222)]
+        mirror = [[t, 4242, level] for t, _, level in talk]
+        self.assertEqual(ms.mix_sources(dict(base, frames=talk + mirror)), {"4242"})
+
+    def test_lag_that_drifts_along_the_recording_is_followed_window_by_window(self):
+        # Ana e Beto alternam 2 s cada, com silêncio irregular; a gravação começa 0,2 s
+        # atrasada e termina 1,0 s atrasada (medido: de -0,3 a -1,1 s numa reunião de 40 min).
+        total = 600.0
+        fr, turns, t, k = [], [], 2.0, 0
+        while t < total - 5:
+            who = 111 if k % 2 == 0 else 222
+            fr += frames(self.start + t, self.start + t + 2.0, who, step=0.1)
+            turns.append((t, t + 2.0, "Ana Teste" if who == 111 else "Beto Teste"))
+            t += 2.0 + 0.7 + (k * 37 % 11) / 10.0
+            k += 1
+        snap = {"devices": {ANA: "Ana Teste", BETO: "Beto Teste"}, "sources": {"111": [[0, ANA]], "222": [[0, BETO]]}, "frames": fr}
+        delay = lambda offset: 0.2 + 0.8 * offset / total  # noqa: E731
+        envelope = []
+        for i in range(int(total / 0.1)):
+            offset = i * 0.1
+            wall = offset - delay(offset)  # o som deste instante do arquivo saiu do Meet antes
+            envelope.append(0.3 if any(a <= wall < b for a, b, _ in turns) else 0.0)
+        track = ms.lag_track(envelope, snap, self.start)
+        lags = [lag for _, _, lag, _ in track[0]]
+        self.assertAlmostEqual(lags[0], 0.25, delta=0.25)
+        self.assertAlmostEqual(lags[-1], 0.95, delta=0.25)
+        # Fala do fim da gravação: com um atraso só para o arquivo inteiro cairia na pessoa errada.
+        last = [(a, b, who) for a, b, who in turns if a > 560][0]
+        utterance = self.utt(last[0] + delay(last[0]) + 0.1, last[1] + delay(last[1]) - 0.1)
+        named = ms.label_voices(ms.attribute([utterance], snap, self.start, envelope=envelope, track=track))
+        self.assertEqual(named[0]["name"], last[2])
+
+    def test_window_without_alignment_leaves_its_utterances_unnamed(self):
+        snap = {"devices": {ANA: "Ana Teste"}, "sources": {"111": [[0, ANA]]}, "frames": frames(self.start + 1, self.start + 4, 111)}
+        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], snap, self.start, track=[[]]), {})
+        self.assertEqual(ms.attribute([self.utt(1.1, 3.9)], snap, self.start, track=[[(0.0, 10.0, 0.0, 0.1)]]), {})
+
+    def job(self, bronze, snap, utterances):
+        from castanha.durability import write_json
+        sha = "b" * 64
+        write_json(bronze / ".speakers" / f"{sha}.json", snap)
+        return {"id": "j", "sha256": sha, "channel_provenance": True, "recorded_at": self.start, "audio_path": "x",
+                "utterances": utterances}
+
+    def test_result_counts_named_and_numbered_participants_and_names_the_microphone_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bronze = Path(tmp) / "bronze"
+            snap = {"version": 2, "meeting_code": CODE, "decoder": ms.DECODER_VERSION,
+                    "devices": {ANA: [[self.start + 500, "Ana Teste"]]},
+                    "sources": {"111": [[0, ANA]], "222": [[0, BETO]]},
+                    "frames": frames(self.start + 1, self.start + 4, 111) + frames(self.start + 5, self.start + 8, 222),
+                    "recording": [self.start, self.start + 10]}
+            job = self.job(bronze, snap, [self.utt(1.1, 3.9, text="oi"), self.utt(5.2, 7.8, text="tudo bem"),
+                                          self.utt(8.5, 9.5, origin="microfone_local", text="tudo")])
+            envelope = [0.3 if 1 <= i * 0.1 < 4 or 5 <= i * 0.1 < 8 else 0.0 for i in range(100)]
+            result = ms.attribution_for_job(bronze, job, envelope_fn=lambda _: envelope, owner_name="Dona Teste")
+            self.assertEqual((result["remote_utterances"], result["attributed"], result["named"]), (2, 2, 1))
+            self.assertEqual(result["participants"], [{"name": "Ana Teste", "utterances": 1, "named": True},
+                                                      {"name": "Participante 1", "utterances": 1, "named": False}])
+            self.assertIn("Ana Teste (Meet): oi", result["text"])
+            self.assertIn("Participante 1 (Meet): tudo bem", result["text"])
+            self.assertIn("Dona Teste (microfone): tudo", result["text"])
+            annotated = ms.annotate(job["utterances"], result)
+            self.assertEqual([(u.get("attributed_name"), u.get("attribution_source"), u.get("attribution_named")) for u in annotated],
+                             [("Ana Teste", "google_meet_webrtc", None), ("Participante 1", "google_meet_webrtc", False),
+                              ("Dona Teste", "local_microphone_owner", None)])
+            # Sem dono configurado o microfone segue com o rótulo do canal.
+            plain = ms.attribution_for_job(bronze, job, envelope_fn=lambda _: envelope)
+            self.assertIn("Microfone local: tudo", plain["text"])
+
+    def test_microphone_owner_is_not_named_when_the_meet_identified_nobody(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bronze = Path(tmp) / "bronze"
+            snap = {"version": 2, "meeting_code": CODE, "decoder": ms.DECODER_VERSION, "devices": {}, "sources": {},
+                    "frames": frames(self.start + 20, self.start + 21, 111), "recording": [self.start, self.start + 30]}
+            job = self.job(bronze, snap, [self.utt(1.1, 3.9), self.utt(5.0, 6.0, origin="microfone_local")])
+            envelope = [0.3 if 20 <= i * 0.1 < 21 else 0.0 for i in range(300)]
+            self.assertIsNone(ms.attribution_for_job(bronze, job, envelope_fn=lambda _: envelope, owner_name="Dona Teste"))
+
+
+class MissingCaptureTest(unittest.TestCase):
+    """Chamada do Meet gravada sem sinal da extensão: avisa uma vez e deixa o motivo no Bronze."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.bronze = self.root / "bronze"
+        self.bronze.mkdir()
+        self.sha = "c" * 64
+        self.job_file = self.root / "job.json"
+
+    def save(self, meeting):
+        from castanha import engine as eng
+        now = time.time()
+        self.job_file.write_text(json.dumps({"sha256": self.sha, "stopped_at": now - 10,
+                                             "state": {"started_at": now - 600, "current_meeting": meeting}}))
+        instance = eng.CastanhaEngine.__new__(eng.CastanhaEngine)
+        instance.config = {"meet": {"speakers_enabled": True}}
+        with patch.object(ms, "sessions_dir", return_value=self.root / "sem-sessoes"), \
+                patch.object(eng, "notify") as notify:
+            instance._save_meet_snapshot(self.bronze, self.job_file)
+        return notify.call_count
+
+    def test_snapshot_says_why_there_is_nothing(self):
+        why = []
+        self.assertIsNone(ms.snapshot({"started_at": 1_790_000_000.0}, 1_790_000_600.0, root=self.root / "vazio", why=why))
+        self.assertEqual(why, ["no_session"])
+
+    def test_meet_call_without_extension_signal_warns_once(self):
+        meeting = {"conference_url": "https://meet.google.com/abc-defg-hij"}
+        self.assertEqual(self.save(meeting), 1)
+        marker = self.bronze / ".speakers" / f"{self.sha}.missing.json"
+        self.assertEqual(json.loads(marker.read_text())["reason"], "no_session")
+        self.assertEqual(self.save(meeting), 0)  # a retomada chama de novo: não repete o aviso
+
+    def test_recording_that_was_not_a_meet_call_does_not_warn(self):
+        self.assertEqual(self.save({"title": "Reunião presencial"}), 0)
+        self.assertFalse((self.bronze / ".speakers").exists())

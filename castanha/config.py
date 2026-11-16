@@ -124,6 +124,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Quem fala no Google Meet (extensão browser/meet-speakers + host
         # nativo). Desligado por padrão: `castanha meet install` liga.
         "speakers_enabled": False,
+        # Nome de quem grava. Com ele, numa chamada em que o Meet identificou alguém, as falas do
+        # microfone desta máquina saem com esse nome em vez de "Microfone local". Vazio: não nomeia.
+        "owner_name": "",
     },
     "zinom": {
         "enabled": False,

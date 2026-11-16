@@ -88,6 +88,7 @@
     if (currentCode !== null) {
       history.length = 0; overflow = false;
       teamsKnown.clear(); teamsOwner.clear(); teamsKnownSource.clear(); teamsSources.clear(); seen.clear(); frames = []; gaps = [];
+      shown.clear(); lastProbe = "";
     }
     currentCode = c;
   };
@@ -130,6 +131,56 @@
       post(msg);
     }
   }, 500);
+  // Meet: o nome que aparece na tela. O canal "collections" só anuncia o nome
+  // quando alguém entra, sai ou muda, então quem já estava na chamada fica sem
+  // nome. A página mostra o nome em cada quadro de vídeo e na lista de pessoas,
+  // preso ao mesmo identificador de dispositivo que o canal usa.
+  const DEVICE = /^spaces\/[\w-]+\/devices\/\d+$/;
+  const shown = new Map();
+  let lastProbe = "";
+  const screenName = (el) => {
+    // O próprio usuário aparece como "Você"/"You" (valor de data-self-name): não é nome.
+    const self = new Set();
+    for (const n of el.querySelectorAll("[data-self-name]")) self.add((n.getAttribute("data-self-name") || "").trim());
+    const tries = [];
+    if (el.getAttribute("role") === "listitem") tries.push(el.getAttribute("aria-label"));
+    for (const n of el.querySelectorAll("[data-self-name], .notranslate")) tries.push(n.textContent);
+    for (const raw of tries) {
+      const text = (raw || "").replace(/\s+/g, " ").trim();
+      if (text && text.length <= 120 && !self.has(text)) return text;
+    }
+    return null;
+  };
+  if (!TEAMS && typeof document !== "undefined") setInterval(() => {
+    const c = code();
+    if (!c) return;
+    resetIfNewCall(c);
+    let nodes = [];
+    try { nodes = document.querySelectorAll("[data-participant-id]"); } catch (e) { return; }
+    const found = new Map();
+    for (const el of nodes) {
+      const id = el.getAttribute("data-participant-id") || "";
+      if (!DEVICE.test(id) || found.get(id)) continue;
+      let name = null;
+      try { name = screenName(el); } catch (e) {}
+      found.set(id, name);
+    }
+    const devices = [];
+    let named = 0;
+    for (const [id, name] of found) {
+      if (!name) continue;
+      named++;
+      if (shown.get(id) !== name) { shown.set(id, name); devices.push([id, name]); }
+    }
+    // A sonda (quantos elementos, quantos dispositivos, quantos com nome) diz ao
+    // host se a tela do Meet mudou de formato e os nomes pararam de vir.
+    const probe = nodes.length + "/" + found.size + "/" + named;
+    if (!devices.length && probe === lastProbe) return;
+    lastProbe = probe;
+    const msg = { type: "screen", code: c, t: Date.now(), devices, probe: { nodes: nodes.length, devices: found.size, named } };
+    if (devices.length) { if (history.length < 20000) history.push(msg); else overflow = true; }
+    post(msg);
+  }, 2000);
   let frames = [];
   // Travada da página: sem consulta, falas de outra pessoa podem sumir. O
   // host recebe o buraco e não atribui nome às falas que caem nele. Acima de

@@ -70,6 +70,7 @@ attendees:
         for person in speakers["participants"]:
             spoke = person.get("utterances", 0) > 0
             frontmatter += (f'    - name: {json.dumps(person.get("name", ""), ensure_ascii=False)}\n'
+                            f'      named: {"false" if person.get("named") is False else "true"}\n'
                             '      presence: "observed"\n'
                             f'      speech: "{"meet_audio_level" if spoke else "not_observed"}"\n'
                             f'      utterances: {int(person.get("utterances", 0))}\n')
@@ -325,6 +326,11 @@ ORIGEM DE ÁUDIO NÃO É IDENTIDADE:
   atribuída pelo sinal de áudio da própria chamada, que mostrou essa pessoa falando em
   quase todo o trecho. Pode atribuir a ela o conteúdo principal da linha;
   uma interjeição curta de outra pessoa ainda pode estar misturada.
+- "Participante 1 (Meet)", "Participante 2 (Meet)" etc. são pessoas reais da chamada
+  cujo nome o Meet não informou: cada número é sempre a mesma pessoa nesta reunião.
+  Use o rótulo como está. Não troque por um nome do convite nem por um nome citado
+  na conversa, e deixe responsável null quando a tarefa for de um Participante.
+- "Nome (microfone)" é a pessoa que gravou, falando no microfone desta máquina.
 """
 
 # No caminho Hermes a transcrição não é pedida de volta: reescrever 2 h de fala
