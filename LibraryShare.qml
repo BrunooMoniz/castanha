@@ -105,22 +105,28 @@ ColumnLayout {
           textFormat: Text.PlainText; wrapMode: Text.Wrap
           color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body
         }
-        OmarchyUi.Dropdown {
-          objectName: "libraryShareAudience"
+        // Seletor do tamanho do que ele diz, com o botão ao lado: a largura toda da janela fazia parecer um campo de texto.
+        RowLayout {
           Layout.fillWidth: true
-          visible: agentRow.modelData.audiences.length > 1
-          showLabel: false
-          options: agentRow.modelData.audiences.map(function(a) { return {value: a.id, label: a.label} })
-          value: root.audience
-          foreground: root.foreground; background: root.background; accent: root.accent; fontFamily: root.fontFamily
-          onChanged: function(value) { root.audience = String(value) }
-        }
-        LibraryButton {
-          objectName: "libraryShareConfirm"
-          text: "Compartilhar"
-          enabled: !root.busy
-          foreground: root.foreground; accent: root.accent; font.family: root.fontFamily
-          onClicked: root.send(agentRow.modelData, false)
+          spacing: Style.space(8)
+          OmarchyUi.Dropdown {
+            objectName: "libraryShareAudience"
+            Layout.preferredWidth: Style.space(360)
+            visible: agentRow.modelData.audiences.length > 1
+            showLabel: false
+            options: agentRow.modelData.audiences.map(function(a) { return {value: a.id, label: a.label} })
+            value: root.audience
+            foreground: root.foreground; background: root.background; accent: root.accent; fontFamily: root.fontFamily
+            onChanged: function(value) { root.audience = String(value) }
+          }
+          LibraryButton {
+            objectName: "libraryShareConfirm"
+            text: "Compartilhar"
+            enabled: !root.busy
+            foreground: root.foreground; accent: root.accent; font.family: root.fontFamily
+            onClicked: root.send(agentRow.modelData, false)
+          }
+          Item { Layout.fillWidth: true }
         }
       }
     }
