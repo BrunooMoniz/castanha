@@ -55,6 +55,13 @@ ShellRoot {
       eq([L.historyMeta(m[0], agents), L.historyMeta(m[1], agents), L.historyMeta(m[2], []), L.historyMeta(m[3], null)],
          ["08:00 · 46 min · com Um, Três", "07:00 · Pendente", "23:30 · 1 h 12 min", "menos de 1 min"], "history meta")
       eq([L.duration(59 * 60 + 40), L.duration(3600), L.duration(-5)], ["1 h", "1 h", "menos de 1 min"], "duration")
+      // Linhas: 0 Hoje, 1 a, 2 b, 3 Ontem, 4 c, 5 Sem data, 6 d. A seta nunca para num cabeçalho.
+      var rows = L.historyRows(m, now)
+      eq([L.meetingRow(rows, 3, 2), L.meetingRow(rows, 3, 4), L.meetingRow(rows, 0, 1), L.meetingRow(rows, 0, -1), L.meetingRow(rows, 4, 2), L.meetingRow(rows, 9, 6), L.meetingRow([{header: "x", meeting: null}], 0, -1)],
+         [4, 2, 1, 1, 4, 9, 0], "keyboard skips day headers")
+      var doc = L.notesDocument("## Itens\n- um\n* dois\n  - três\n\n```\n- literal\n```", "")
+      eq(doc.blocks.map(function(b) { return b.text }), ["Itens", "• um\n• dois\n  • três", "```\n- literal\n```"], "bullets on screen")
+      eq(L.plainNotes("## Itens\n- um"), "Itens\n- um", "copied text keeps the note's own marker")
       console.log("LIBRARY_LOGIC_OK"); Qt.exit(0)
     } catch (error) { console.error("LIBRARY_LOGIC_FAIL " + error); Qt.exit(1) }
   } }

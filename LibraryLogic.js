@@ -20,7 +20,6 @@ function date(value) {
 }
 function plainNotes(value) {
   return String(value || "").replace(/^#{1,6}\s+/gm, "").replace(/\*\*([^*\n]+)\*\*/g, "$1")
-    .replace(/^(\s*)[-*]\s+(?=\S)/gm, "$1• ")
 }
 function localAudio(value) { return typeof value === "string" && value.indexOf("file:///") === 0 }
 
@@ -31,7 +30,8 @@ function notesDocument(value, title) {
   function flush(literal) {
     if (!paragraph.length) return
     var text = paragraph.join("\n")
-    blocks.push({level: 0, text: literal ? text : plainNotes(text)})
+    // Marcador de lista só na tela: "Copiar texto" segue devolvendo o que está na nota.
+    blocks.push({level: 0, text: literal ? text : plainNotes(text).replace(/^(\s*)[-*]\s+(?=\S)/gm, "$1• ")})
     if (activeSection && !literal) sections[activeSection].push(text)
     paragraph = []
   }
@@ -197,4 +197,13 @@ function talkShares(segments) {
 // Rótulo de canal, não de pessoa: a gravação não soube dizer quem falou.
 function genericSpeaker(name) {
   return ["Microfone local", "Áudio remoto", "Canal não identificado", "Origem não identificada"].indexOf(String(name)) >= 0
+}
+// Linha do histórico em que o cursor do teclado deve parar: cabeçalho de dia não é reunião, então a seta
+// segue no mesmo sentido até a próxima (ou volta, se o cabeçalho era a ponta da lista).
+function meetingRow(rows, index, previous) {
+  if (!rows || !rows[index] || rows[index].meeting) return index
+  var step = index >= previous ? 1 : -1
+  for (var turn = 0; turn < 2; turn++, step = -step)
+    for (var i = index + step; i >= 0 && i < rows.length; i += step) if (rows[i].meeting) return i
+  return index
 }

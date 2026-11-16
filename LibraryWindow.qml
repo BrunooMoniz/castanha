@@ -386,6 +386,11 @@ FloatingWindow {
           activeFocusOnTab: true
           keyNavigationEnabled: true
           function openCurrent() { var row = root.historyRows[currentIndex]; if (row && row.meeting) root.selectMeeting(row.meeting.slug) }
+          property int lastIndex: -1
+          onCurrentIndexChanged: {
+            var target = LibraryLogic.meetingRow(root.historyRows, currentIndex, lastIndex)
+            if (target !== currentIndex) currentIndex = target; else lastIndex = currentIndex
+          }
           Keys.onReturnPressed: openCurrent()
           Keys.onEnterPressed: openCurrent()
           ScrollBar.vertical: ScrollBar {}
