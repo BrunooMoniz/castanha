@@ -1187,6 +1187,20 @@ class TrackAudioTest(unittest.TestCase):
         self.session.handle({"code": CODE, "type": "audio", "track": 0, "started": "x", "seq": 0, "b64": "QUFB"})
         self.assertEqual(self.files(), [])
 
+    def test_last_chunk_right_after_the_stop_still_closes_the_file(self):
+        self.audio(0, b"AAA")
+        state = {"status": "processing", "stopped_at": self.now}
+        stopping = ms.Session(recording_active=lambda: state, clock=lambda: self.now, root=self.root, check_interval=0,
+                              track_audio=True, send=self.sent.append)
+        self.session.close()
+        self.audio(0, b"AAA", session=stopping)
+        self.audio(1, b"FIM", session=stopping)
+        self.now += ms.STOP_GRACE + 1   # passada a folga, mais nada entra
+        self.audio(2, b"tarde", session=stopping)
+        stopping.close()
+        self.assertTrue(any(f.read_bytes().endswith(b"AAAFIM") for f in self.files()))
+        self.assertFalse(any(b"tarde" in f.read_bytes() for f in self.files()))
+
     def test_levels_by_track_are_recorded_next_to_the_levels(self):
         ts = self.now * 1000
         self.session.handle({"code": CODE, "type": "levels", "frames": [[ts, 111, 0.2]],

@@ -530,7 +530,9 @@ class Session:
 
     def _audio_chunk(self, msg: Dict[str, Any], status, now: float) -> None:
         """Um pedaço de áudio de uma trilha, na ordem em que a página gravou. Só com gravação ativa."""
-        if not self.track_audio or status not in ("recording", "paused"):
+        # No stop o gravador da página solta o último pedaço (o fim do arquivo): entra dentro da folga do stop.
+        if not self.track_audio or not (status in ("recording", "paused")
+                                        or (status == "processing" and self._stopped_at is not None)):
             return
         track, started, seq, b64 = msg.get("track"), msg.get("started"), msg.get("seq"), msg.get("b64")
         if not (isinstance(track, int) and not isinstance(track, bool) and 0 <= track < MAX_AUDIO_TRACKS
