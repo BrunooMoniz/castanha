@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Compila o Panel real do Castanha com os componentes reais do shell e
@@ -52,9 +53,9 @@ ShellRoot {
     WlrLayershell.namespace: "castanha-panel-test-bar"
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-    readonly property color foreground: Color.foreground
-    readonly property color barForeground: Color.foreground
-    readonly property color urgent: Color.urgent
+    readonly property color foreground: Commons.Color.foreground
+    readonly property color barForeground: Commons.Color.foreground
+    readonly property color urgent: Commons.Color.urgent
     readonly property string fontFamily: Style.font.family
     readonly property string position: "top"
     readonly property bool vertical: false
