@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "AudioMeter.js" as MeterLogic
 
@@ -7,13 +8,13 @@ Column {
     id: root
     property var stateData: ({})
     property bool micMuted: false
-    property color foreground: Color.foreground
+    property color foreground: Commons.Color.foreground
     property string fontFamily: Style.font.family
     property double nowMs: Date.now()
     readonly property bool recording: stateData.status === "recording"
     readonly property bool paused: stateData.status === "paused"
     readonly property bool dual: stateData.mode !== "mic_only"
-    readonly property bool dark: Color.background.hslLightness < 0.5
+    readonly property bool dark: Commons.Color.background.hslLightness < 0.5
     // Papéis semânticos, adaptados à luminosidade do tema, sempre distintos.
     readonly property color micColor: Qt.hsla(0.52, 0.68, dark ? 0.69 : 0.32, 1)
     readonly property color callColor: Qt.hsla(0.10, 0.83, dark ? 0.71 : 0.33, 1)

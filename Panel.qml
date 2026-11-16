@@ -1,7 +1,7 @@
 // Castanha na barra do Omarchy.
 //
 // Regra da casa, e é o ponto do arquivo: nenhuma cor literal. Tudo sai de
-// Color.* e Style.*, que o omarchy-shell re-avalia quando o tema troca. Um
+// Commons.Color.* e Style.*, que o omarchy-shell re-avalia quando o tema troca. Um
 // "#ff5555" aqui vira uma mancha vermelha no catppuccin-latte e some no
 // vantablack. Os glifos são os mesmos Material Design que o resto do shell
 // usa (󰻂 é o glifo de gravação do próprio Omarchy).
@@ -12,6 +12,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "DeliveryStatus.js" as DeliveryStatus
 import "StageStatus.js" as StageStatus
@@ -27,20 +28,20 @@ Panel {
   readonly property string lang: I18N.resolveLanguage(Quickshell.env("CASTANHA_LANG"))
 
   // ----------------------------------------------------------------- tema
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // Esmaecer por alfa, não por Qt.darker: escurecer some no tema claro.
   readonly property color dim: alpha(foreground, 0.72)
   readonly property color faint: alpha(foreground, 0.05)
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
+  readonly property color track: Style.selectedFillFor(foreground, Commons.Color.accent, urgent)
 
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   // A cor "urgente" de vários temas é um vermelho escuro (#a55555 no padrão):
   // sobre o fundo escuro do painel o microfone mudo quase sumia. Em tema
   // escuro a cor de estado clareia; em tema claro, escurece.
-  readonly property bool darkPanel: (0.2126 * Color.popups.background.r + 0.7152 * Color.popups.background.g
-                                     + 0.0722 * Color.popups.background.b) < 0.5
+  readonly property bool darkPanel: (0.2126 * Commons.Color.popups.background.r + 0.7152 * Commons.Color.popups.background.g
+                                     + 0.0722 * Commons.Color.popups.background.b) < 0.5
   function contrasting(c) { return darkPanel ? Qt.lighter(c, 1.45) : Qt.darker(c, 1.25) }
 
   // ---------------------------------------------------------------- estado

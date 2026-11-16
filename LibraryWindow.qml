@@ -10,6 +10,7 @@ import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui as OmarchyUi
 import "LibraryLogic.js" as LibraryLogic
 
@@ -21,9 +22,9 @@ FloatingWindow {
   implicitHeight: 760
   minimumSize: Qt.size(800, 600)
   color: background
-  property color foreground: Color.popups.text
-  property color background: Color.popups.background
-  property color accent: Color.accent
+  property color foreground: Commons.Color.popups.text
+  property color background: Commons.Color.popups.background
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   property string readingFontFamily: fontFamily
   property var cliCommand: ["castanha"]

@@ -14,6 +14,7 @@ QML = r'''
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 ShellRoot {
   id: test
   property int stage: 0
@@ -95,8 +96,8 @@ class TestLibraryTheme(unittest.TestCase):
     def test_light_dark_palette_font_family_and_user_override_change_live(self):
         self.run_theme(r'''
         if (test.stage === 0) {
-          Color.loadColors('foreground = "#eeeeee"\nbackground = "#101010"\naccent = "#abcdef"')
-          Color.loadShell('[popups]\nbackground = "#202020"\ntext = "#ededed"')
+          Commons.Color.loadColors('foreground = "#eeeeee"\nbackground = "#101010"\naccent = "#abcdef"')
+          Commons.Color.loadShell('[popups]\nbackground = "#202020"\ntext = "#ededed"')
           Style.fontFamily = 'DejaVu Sans Mono'; test.stage = 1
         } else if (test.stage === 1) {
           test.require(test.sameColor(library.color, '#202020') && test.sameColor(library.foreground, '#ededed'), 'dark popup roles ignored')
@@ -104,9 +105,9 @@ class TestLibraryTheme(unittest.TestCase):
           test.require(button.font.family === Style.font.family && notes.fontFamily === Style.font.family
                        && library.readingFontFamily === Style.font.family && meters.fontFamily === Style.font.family, 'font family hardcoded')
           test.saved = {mic: String(meters.micColor), button: String(button.contentItem.color)}
-          Color.loadColors('foreground = "#151515"\nbackground = "#fafafa"\naccent = "#024681"')
-          Color.loadUserShell('[popups]\nbackground = "#f4f2ea"\ntext = "#112233"')
-          Color.loadShell('[popups]\nbackground = "#ffffff"\ntext = "#222222"')
+          Commons.Color.loadColors('foreground = "#151515"\nbackground = "#fafafa"\naccent = "#024681"')
+          Commons.Color.loadUserShell('[popups]\nbackground = "#f4f2ea"\ntext = "#112233"')
+          Commons.Color.loadShell('[popups]\nbackground = "#ffffff"\ntext = "#222222"')
           Style.fontFamily = 'DejaVu Serif'; test.stage = 2
         } else {
           test.require(test.sameColor(library.color, '#f4f2ea') && test.sameColor(library.foreground, '#112233'), 'user popup overrides lost on theme switch')
@@ -122,7 +123,7 @@ class TestLibraryTheme(unittest.TestCase):
     def test_gradient_asymmetric_borders_rounding_and_control_states(self):
         self.run_theme(r'''
         if (test.stage === 0) {
-          Color.loadShell('[controls]\nnormal-border = "#112233 #abcdef 45deg"\nnormal-border-width = "1 2 3 4"\nselected-border-width = 5\nfocus-border-width = 6\nnormal-fill-alpha = 0.1\nselected-fill-alpha = 0.2\nfocus-fill-alpha = 0.3\npressed-fill-alpha = 0.4')
+          Commons.Color.loadShell('[controls]\nnormal-border = "#112233 #abcdef 45deg"\nnormal-border-width = "1 2 3 4"\nselected-border-width = 5\nfocus-border-width = 6\nnormal-fill-alpha = 0.1\nselected-fill-alpha = 0.2\nfocus-fill-alpha = 0.3\npressed-fill-alpha = 0.4')
           Style.applyRoundingJson('{"int": 13}'); neutral.forceActiveFocus(); test.stage = 1
         } else if (test.stage === 1) {
           var surfaces = [button.background, test.find(notes, 'meetingNotesSurface'), test.find(library, 'librarySearchSurface')].concat(test.borders(meters))
@@ -143,7 +144,7 @@ class TestLibraryTheme(unittest.TestCase):
         } else if (test.stage === 4) {
           test.require(test.sameColor(button.background.color, Style.pressedFillFor(button.foreground, button.accent)), 'pressed fill ignores theme')
           button.down = false; button.selected = false; neutral.forceActiveFocus()
-          Color.loadShell('[controls]\nnormal-border = "#234567"\nnormal-border-width = 2')
+          Commons.Color.loadShell('[controls]\nnormal-border = "#234567"\nnormal-border-width = 2')
           Style.applyRoundingJson('{"int": 0}'); test.stage = 5
         } else {
           var surfaces = [button.background, test.find(notes, 'meetingNotesSurface'), test.find(library, 'librarySearchSurface')].concat(test.borders(meters))
@@ -158,12 +159,12 @@ class TestLibraryTheme(unittest.TestCase):
     def test_font_size_configuration_reaches_editor_and_library_body(self):
         self.run_theme(r'''
         if (test.stage === 0) {
-          Color.loadShell('[font]\nbase-size = 12'); test.stage = 1
+          Commons.Color.loadShell('[font]\nbase-size = 12'); test.stage = 1
         } else if (test.stage === 1) {
           test.saved = {editor: test.find(notes, 'meetingNotesEditor').font.pixelSize,
                         body: test.find(library, 'libraryRawTranscript').font.pixelSize,
                         button: button.font.pixelSize}
-          Color.loadShell('[font]\nbase-size = 24\nbody = 27\nheading = 33'); test.stage = 2
+          Commons.Color.loadShell('[font]\nbase-size = 24\nbody = 27\nheading = 33'); test.stage = 2
         } else {
           test.require(button.font.pixelSize === 27 && button.font.pixelSize > test.saved.button, 'button ignores body font token')
           test.require(test.find(notes, 'meetingNotesEditor').font.pixelSize > test.saved.editor, 'editor font ignores larger configured theme')

@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui as OmarchyUi
 import "LibraryLogic.js" as LibraryLogic
 
@@ -18,8 +19,8 @@ ColumnLayout {
   property string lastExclusionId: ""
   readonly property string undoId: Object.prototype.hasOwnProperty.call(undoIds, meetingSlug) ? undoIds[meetingSlug] : lastExclusionId
   property var cliCommand: ["castanha"]
-  property color foreground: Color.popups.text
-  property color accent: Color.accent
+  property color foreground: Commons.Color.popups.text
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   property string armedFile: ""
   // Mover: gravação escolhida, destino ("__new__" = reunião nova) e as reuniões candidatas.

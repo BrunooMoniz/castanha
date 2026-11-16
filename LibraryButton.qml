@@ -1,12 +1,13 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui as OmarchyUi
 
 Button {
   id: control
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property bool selected: false
   font.family: Style.font.family
   font.pixelSize: Style.font.body

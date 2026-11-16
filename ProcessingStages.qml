@@ -1,11 +1,12 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "StageStatus.js" as StageStatus
 
 Row {
     id: root
     property var note: ({})
-    property color foreground: Color.foreground
+    property color foreground: Commons.Color.foreground
     property string fontFamily: Style.font.family
     spacing: Style.space(4)
     Repeater {
@@ -22,7 +23,7 @@ Row {
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: modelData.state === "done" ? "✓" : modelData.state === "error" ? "!" : modelData.state === "removed" ? "−" : "·"
-                    color: modelData.state === "error" ? Color.urgent : root.foreground
+                    color: modelData.state === "error" ? Commons.Color.urgent : root.foreground
                     font.pixelSize: Style.font.body
                 }
                 Text {

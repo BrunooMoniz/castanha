@@ -3,13 +3,14 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui as OmarchyUi
 
 ColumnLayout {
   id: root
   property string meetingSlug: ""
   property var cliCommand: ["castanha"]
-  property color foreground: Color.popups.text
+  property color foreground: Commons.Color.popups.text
   property color accent: foreground
   property string fontFamily: Style.font.family
   property var buffers: ({})
