@@ -57,6 +57,11 @@ FloatingWindow {
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
   readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.07)
   readonly property var filteredMeetings: LibraryLogic.filtered(meetings, query, statusFilter)
+  readonly property var historyRows: LibraryLogic.historyRows(filteredMeetings)
+  property string transcriptQuery: ""
+  readonly property var transcriptTurns: LibraryLogic.turns(current ? current.segments : [], transcriptQuery)
+  readonly property var talkShares: LibraryLogic.talkShares(current ? current.segments : [])
+  readonly property bool namedSpeakers: talkShares.some(function(t) { return !LibraryLogic.genericSpeaker(t.name) })
   readonly property var current: detail && detail.slug === selectedSlug ? detail : null
   readonly property var summaryDocument: LibraryLogic.notesDocument(current ? current.summary : "", current ? current.title : "")
   readonly property var extraDecisions: LibraryLogic.extraFacts(current ? current.decisions : [], summaryDocument, "decisions")
@@ -105,6 +110,7 @@ FloatingWindow {
     selectedSlug = slug
     currentTab = 0
     showRawTranscript = false
+    transcriptSearch.text = ""
     detailError = ""
     linking = false; linkTarget = ""; linkNotice = ""; linkFeedback = ""; dayEvents = []
     if (!detailProcess.running) startDetail()
@@ -311,16 +317,18 @@ FloatingWindow {
     anchors.fill: parent
     spacing: Style.space(0)
     Rectangle {
-      Layout.preferredWidth: root.width < 940 ? 260 : 300
+      Layout.preferredWidth: root.width < 940 ? 270 : 320
       Layout.fillHeight: true
       color: root.faint
       ColumnLayout {
         anchors.fill: parent
         anchors.margins: Style.space(18)
         spacing: Style.space(14)
-        Text { text: "CASTANHA"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; font.letterSpacing: 2 }
-        Text { text: "Suas reuniões"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.display; font.weight: Font.DemiBold }
-        LibraryButton { objectName: "libraryNewNote"; text: "Nova anotação"; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: { root.creatingNote = true; root.creationError = ""; noteTitle.forceActiveFocus() } }
+        RowLayout {
+          Layout.fillWidth: true
+          Text { Layout.fillWidth: true; text: "Reuniões"; textFormat: Text.PlainText; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.display; font.weight: Font.DemiBold }
+          LibraryButton { objectName: "libraryNewNote"; text: "Nova anotação"; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: { root.creatingNote = true; root.creationError = ""; noteTitle.forceActiveFocus() } }
+        }
         ColumnLayout {
           visible: root.creatingNote
           Layout.fillWidth: true
@@ -335,7 +343,7 @@ FloatingWindow {
           id: searchField
           objectName: "librarySearch"
           Layout.fillWidth: true
-          implicitHeight: 42
+          implicitHeight: 38
           placeholderText: "Buscar reunião"
           color: root.foreground
           placeholderTextColor: root.muted
@@ -345,18 +353,18 @@ FloatingWindow {
           onTextChanged: root.query = text
           background: OmarchyUi.BorderSurface { objectName: "librarySearchSurface"; color: Style.controlFill(searchField.activeFocus, searchField.hovered, root.foreground, root.accent); radius: Style.cornerRadius; borderSpec: Border.controlSpec(searchField.activeFocus ? "focus" : "normal", root.foreground, root.accent) }
         }
-        Flow {
+        RowLayout {
           Layout.fillWidth: true
-          Layout.preferredHeight: childrenRect.height
           spacing: Style.space(5)
           Repeater {
             model: [{label: "Todas", value: "all"}, {label: "Pendentes", value: "pending"}, {label: "Concluídas", value: "complete"}]
             LibraryButton {
               required property var modelData
+              Layout.fillWidth: true
               text: modelData.label
               foreground: root.foreground; accent: root.accent
               selected: root.statusFilter === modelData.value
-              font.family: root.readingFontFamily; font.pixelSize: Style.font.body
+              font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall
               onClicked: root.statusFilter = modelData.value
             }
           }
@@ -373,32 +381,41 @@ FloatingWindow {
           Layout.fillWidth: true
           Layout.fillHeight: true
           clip: true
-          spacing: Style.space(5)
-          model: root.filteredMeetings
+          spacing: Style.space(2)
+          model: root.historyRows
           activeFocusOnTab: true
           keyNavigationEnabled: true
-          Keys.onReturnPressed: if (currentIndex >= 0 && currentIndex < count) root.selectMeeting(root.filteredMeetings[currentIndex].slug)
-          Keys.onEnterPressed: if (currentIndex >= 0 && currentIndex < count) root.selectMeeting(root.filteredMeetings[currentIndex].slug)
+          function openCurrent() { var row = root.historyRows[currentIndex]; if (row && row.meeting) root.selectMeeting(row.meeting.slug) }
+          Keys.onReturnPressed: openCurrent()
+          Keys.onEnterPressed: openCurrent()
           ScrollBar.vertical: ScrollBar {}
-          delegate: OmarchyUi.BorderSurface {
-            id: meetingRow
+          // Uma linha por reunião, agrupadas por dia: o cabeçalho do dia é uma linha da própria lista.
+          delegate: Item {
+            id: historyRow
             required property var modelData
             required property int index
+            readonly property var meeting: modelData.meeting
+            readonly property bool chosen: !!meeting && root.selectedSlug === meeting.slug
             width: historyList.width
-            height: rowContent.implicitHeight + 24
-            radius: Style.cornerRadius
-            borderSpec: Border.controlSpec(historyList.activeFocus && historyList.currentIndex === index ? "focus" : rowMouse.containsMouse ? "hover-cursor" : root.selectedSlug === modelData.slug ? "selected" : "normal", root.foreground, root.accent)
-            color: root.selectedSlug === modelData.slug ? Style.selectedFillFor(root.foreground, root.accent) : rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : "transparent"
-            Column {
-              id: rowContent
-              anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-              anchors.margins: Style.space(12)
-              spacing: Style.space(6)
-              Text { width: parent.width; text: meetingRow.modelData.title; textFormat: Text.PlainText; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Math.round(Style.font.body * 1.25); font.weight: Font.DemiBold }
-              Text { width: parent.width; text: LibraryLogic.date(meetingRow.modelData.when); textFormat: Text.PlainText; elide: Text.ElideRight; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall }
-              Text { width: parent.width; wrapMode: Text.Wrap; text: meetingRow.modelData.status_label + " · " + LibraryLogic.clock(meetingRow.modelData.duration_seconds); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+            height: meeting ? rowContent.implicitHeight + Style.space(16) : dayHeader.implicitHeight + Style.space(index ? 16 : 4)
+            Text { id: dayHeader; visible: !historyRow.meeting; anchors.bottom: parent.bottom; anchors.bottomMargin: Style.space(4); x: Style.space(8); text: historyRow.modelData.header; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall; font.weight: Font.DemiBold }
+            Rectangle {
+              visible: !!historyRow.meeting
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: historyRow.chosen ? Style.selectedFillFor(root.foreground, root.accent) : rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : "transparent"
+              border.width: historyList.activeFocus && historyList.currentIndex === historyRow.index ? 1 : 0
+              border.color: root.accent
+              Column {
+                id: rowContent
+                anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                anchors.margins: Style.space(8)
+                spacing: Style.space(3)
+                Text { width: parent.width; text: historyRow.meeting ? historyRow.meeting.title : ""; textFormat: Text.PlainText; elide: Text.ElideRight; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.title; font.weight: historyRow.chosen ? Font.DemiBold : Font.Normal }
+                Text { width: parent.width; text: historyRow.meeting ? LibraryLogic.historyMeta(historyRow.meeting, root.agents) : ""; textFormat: Text.PlainText; elide: Text.ElideRight; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall }
+              }
+              MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: { historyList.currentIndex = historyRow.index; historyList.forceActiveFocus(); root.selectMeeting(historyRow.meeting.slug) } }
             }
-            MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: { historyList.currentIndex = meetingRow.index; historyList.forceActiveFocus(); root.selectMeeting(meetingRow.modelData.slug) } }
           }
           Text { anchors.centerIn: parent; width: parent.width - 20; visible: !root.historyLoading && root.filteredMeetings.length === 0; text: root.meetings.length ? "Nenhuma reunião encontrada.\nTente outro filtro." : "Suas gravações aparecerão aqui."; textFormat: Text.PlainText; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.title }
         }
@@ -412,7 +429,7 @@ FloatingWindow {
       spacing: Style.space(18)
       RowLayout {
         Layout.fillWidth: true
-        Text { Layout.fillWidth: true; text: root.current ? LibraryLogic.date(root.current.when) : "BIBLIOTECA LOCAL"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+        Text { Layout.fillWidth: true; text: root.current ? LibraryLogic.date(root.current.when) + (root.current.duration_seconds > 0 ? " · " + LibraryLogic.duration(root.current.duration_seconds) : "") : "BIBLIOTECA LOCAL"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
         LibraryButton { text: "Fechar"; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: root.visible = false }
       }
       Text {
@@ -531,10 +548,50 @@ FloatingWindow {
         }
         ColumnLayout {
           spacing: Style.space(12)
-          Text { Layout.fillWidth: true; text: "Canais de áudio não identificam participantes. Os tempos pertencem à gravação indicada."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+          // Quem falou e quanto da conversa foi de cada um. Fala sem dono entra com o rótulo que tem, não some da conta.
+          ColumnLayout {
+            objectName: "libraryTalkShares"
+            visible: root.talkShares.length > 1
+            Layout.fillWidth: true
+            spacing: Style.space(4)
+            Text { text: "Participação na conversa"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall }
+            Repeater {
+              model: root.talkShares
+              RowLayout {
+                id: shareRow
+                required property var modelData
+                Layout.fillWidth: true
+                spacing: Style.space(10)
+                Text { Layout.preferredWidth: Style.space(250); text: shareRow.modelData.name; textFormat: Text.PlainText; elide: Text.ElideRight; color: LibraryLogic.genericSpeaker(shareRow.modelData.name) ? root.muted : root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+                Rectangle {
+                  Layout.fillWidth: true; Layout.preferredHeight: Style.space(6)
+                  radius: height / 2; color: root.faint
+                  Rectangle { width: parent.width * shareRow.modelData.share; height: parent.height; radius: parent.radius; color: LibraryLogic.genericSpeaker(shareRow.modelData.name) ? root.muted : root.accent }
+                }
+                Text { Layout.preferredWidth: Style.space(44); horizontalAlignment: Text.AlignRight; text: Math.round(shareRow.modelData.share * 100) + "%"; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+              }
+            }
+          }
+          Text { Layout.fillWidth: true; visible: !!root.current && root.current.segments.length > 0 && !root.namedSpeakers; text: "Canais de áudio não identificam participantes. Os tempos pertencem à gravação indicada."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
           RowLayout {
-            visible: root.current && root.current.segments.length > 0
-            LibraryButton { objectName: "libraryTimedTranscript"; text: "Com tempos"; selected: !root.showRawTranscript; foreground: root.foreground; accent: root.accent; font.family: root.readingFontFamily; onClicked: root.showRawTranscript = false }
+            visible: !!root.current && root.current.segments.length > 0
+            Layout.fillWidth: true
+            spacing: Style.space(5)
+            TextField {
+              id: transcriptSearch
+              objectName: "libraryTranscriptSearch"
+              Layout.fillWidth: true
+              implicitHeight: 36
+              enabled: !root.showRawTranscript
+              placeholderText: "Buscar na transcrição"
+              color: root.foreground; placeholderTextColor: root.muted
+              font.family: root.readingFontFamily; font.pixelSize: Style.font.body
+              selectByMouse: true
+              onTextChanged: root.transcriptQuery = text
+              background: OmarchyUi.BorderSurface { color: Style.controlFill(transcriptSearch.activeFocus, transcriptSearch.hovered, root.foreground, root.accent); radius: Style.cornerRadius; borderSpec: Border.controlSpec(transcriptSearch.activeFocus ? "focus" : "normal", root.foreground, root.accent) }
+            }
+            Text { visible: root.transcriptQuery.trim() !== "" && !root.showRawTranscript; text: root.transcriptTurns.length + (root.transcriptTurns.length === 1 ? " fala" : " falas"); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+            LibraryButton { objectName: "libraryTimedTranscript"; text: "Por fala"; selected: !root.showRawTranscript; foreground: root.foreground; accent: root.accent; font.family: root.readingFontFamily; onClicked: root.showRawTranscript = false }
             LibraryButton { objectName: "libraryFullTranscript"; text: "Texto completo"; selected: root.showRawTranscript; foreground: root.foreground; accent: root.accent; font.family: root.readingFontFamily; onClicked: root.showRawTranscript = true }
           }
           ListView {
@@ -542,21 +599,25 @@ FloatingWindow {
             objectName: "librarySegments"
             visible: root.current && root.current.segments.length > 0 && !root.showRawTranscript
             Layout.fillWidth: true; Layout.fillHeight: true
-            clip: true; spacing: Style.space(16)
-            model: root.current ? root.current.segments : []
+            clip: true; spacing: Style.space(18)
+            model: root.transcriptTurns
             ScrollBar.vertical: ScrollBar {}
             delegate: Column {
               id: segmentRow
               required property var modelData
-              width: segmentsList.width
-              spacing: Style.space(5)
+              width: segmentsList.width - Style.space(12)
+              spacing: Style.space(4)
               RowLayout {
                 width: parent.width
-                LibraryButton { visible: segmentRow.modelData.start !== null; text: LibraryLogic.clock(segmentRow.modelData.start); enabled: segmentRow.modelData.can_seek; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; onClicked: root.seekSegment(segmentRow.modelData) }
-                Text { Layout.fillWidth: true; text: segmentRow.modelData.channel + (segmentRow.modelData.can_seek ? " · gravação " + (segmentRow.modelData.audio_index + 1) : " · sem vínculo para reprodução"); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+                spacing: Style.space(8)
+                Text { text: segmentRow.modelData.channel; textFormat: Text.PlainText; elide: Text.ElideRight; Layout.maximumWidth: parent.width - Style.space(140); color: LibraryLogic.genericSpeaker(segmentRow.modelData.channel) ? root.muted : root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; font.weight: Font.DemiBold }
+                LibraryButton { objectName: "librarySegmentTime"; visible: segmentRow.modelData.start !== null; text: LibraryLogic.clock(segmentRow.modelData.start); enabled: segmentRow.modelData.can_seek; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall; implicitHeight: Style.space(24); onClicked: root.seekSegment(segmentRow.modelData) }
+                Text { visible: !segmentRow.modelData.can_seek || root.audioRecords.length > 1; text: segmentRow.modelData.can_seek ? "gravação " + (segmentRow.modelData.audio_index + 1) : "sem vínculo para reprodução"; textFormat: Text.PlainText; elide: Text.ElideRight; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.bodySmall }
+                Item { Layout.fillWidth: true }
               }
-              TextArea { width: parent.width; text: segmentRow.modelData.text; textFormat: TextEdit.PlainText; padding: 0; wrapMode: TextEdit.Wrap; readOnly: true; selectByMouse: true; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Math.round(Style.font.body * 4 / 3); background: null }
+              TextArea { width: parent.width; text: segmentRow.modelData.text; textFormat: TextEdit.PlainText; padding: 0; wrapMode: TextEdit.Wrap; readOnly: true; selectByMouse: true; color: root.foreground; selectionColor: root.accent; font.family: root.readingFontFamily; font.pixelSize: Math.round(Style.font.body * 4 / 3); background: null }
             }
+            Text { anchors.centerIn: parent; visible: root.transcriptQuery.trim() !== "" && root.transcriptTurns.length === 0; text: "Nada encontrado na transcrição."; textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.title }
           }
           ScrollView {
             visible: !root.current || root.current.segments.length === 0 || root.showRawTranscript
@@ -653,6 +714,15 @@ FloatingWindow {
           foreground: root.foreground; accent: root.accent; fontFamily: root.readingFontFamily
           onSummaryUpdated: function(slug) { if (slug === root.selectedSlug) root.startDetail(); root.refreshHistory() }
         }
+      }
+      RowLayout {
+        objectName: "libraryMiniPlayer"
+        visible: root.current !== null && root.audioIndex >= 0 && root.currentTab !== 2
+        Layout.fillWidth: true
+        spacing: Style.space(10)
+        LibraryButton { text: player.playbackState === MediaPlayer.PlayingState ? "Pausar" : "Reproduzir"; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; onClicked: player.playbackState === MediaPlayer.PlayingState ? player.pause() : player.play() }
+        Text { Layout.fillWidth: true; text: LibraryLogic.clock(player.position / 1000) + " de " + LibraryLogic.clock(player.duration / 1000) + (root.audioRecords.length > 1 ? " · gravação " + (root.audioIndex + 1) : ""); textFormat: Text.PlainText; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
+        LibraryButton { text: "Abrir áudio"; foreground: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body; onClicked: root.currentTab = 2 }
       }
       Item { Layout.fillHeight: true; visible: root.current === null }
       Text { visible: root.current === null && !root.detailLoading; Layout.fillWidth: true; text: "Escolha uma reunião no histórico para ler as notas, consultar a transcrição ou ouvir o áudio."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Math.round(Style.font.body * 4 / 3) }

@@ -316,8 +316,12 @@ class MeetingLibrary:
                 proven = source.get('channel_provenance') is True
                 label = ('Microfone local' if channel == 0 else 'Áudio remoto' if channel == 1 else 'Canal não identificado') if proven else 'Origem não identificada'
                 named = utterance.get('attributed_name')
-                if proven and channel == 1 and utterance.get('attribution_source') in ('google_meet_webrtc', 'microsoft_teams_webrtc') and _text(named):
-                    label = _text(named)
+                source_kind = utterance.get('attribution_source')
+                # Nome só com prova: quem a chamada identificou (canal remoto) ou o dono do microfone desta máquina.
+                name = _text(named).strip()
+                if proven and name and ((channel == 1 and source_kind in ('google_meet_webrtc', 'microsoft_teams_webrtc'))
+                                        or (channel == 0 and source_kind == 'local_microphone_owner')):
+                    label = name
                 segments.append({'text': utterance['text'], 'start': start if valid_time else None,
                     'end': end if valid_time else None, 'channel': label, 'audio_index': index,
                     'can_seek': valid_time and index >= 0})

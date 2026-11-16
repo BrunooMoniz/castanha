@@ -67,6 +67,24 @@ class TestLibrary(unittest.TestCase):
         for excluded in ('Resumo completo', 'A proposta', 'file://', 'secret_fixture', 'calendar_event', 'sha256'):
             self.assertNotIn(excluded, encoded)
 
+    def test_segment_is_named_only_by_proven_source_of_its_own_channel(self):
+        slug, bronze = self.meeting()
+        path = bronze / 'transcript_segments.json'
+        timeline = json.loads(path.read_text())
+        base = {'start': 0.2, 'end': 1.5, 'text': 'fala'}
+        timeline['recordings'][0]['utterances'] = [
+            {**base, 'channel': 1, 'attributed_name': 'Remota Provada', 'attribution_source': 'google_meet_webrtc'},
+            {**base, 'channel': 0, 'attributed_name': 'Dona do Microfone', 'attribution_source': 'local_microphone_owner'},
+            {**base, 'channel': 0, 'attributed_name': 'Remota No Microfone', 'attribution_source': 'google_meet_webrtc'},
+            {**base, 'channel': 1, 'attributed_name': 'Dona No Remoto', 'attribution_source': 'local_microphone_owner'},
+            {**base, 'channel': 1, 'attributed_name': 'Sem Fonte'}, {**base, 'channel': 0, 'attributed_name': '  ', 'attribution_source': 'local_microphone_owner'}]
+        path.write_text(json.dumps(timeline))
+        labels = [segment['channel'] for segment in self.library.detail(slug)['meeting']['segments']]
+        self.assertEqual(labels, ['Remota Provada', 'Dona do Microfone', 'Microfone local', 'Áudio remoto', 'Áudio remoto', 'Microfone local'])
+        timeline['recordings'][0]['channel_provenance'] = False
+        path.write_text(json.dumps(timeline))
+        self.assertEqual({segment['channel'] for segment in self.library.detail(slug)['meeting']['segments']}, {'Origem não identificada'})
+
     def test_invalidated_content_hides_stale_derivatives_until_rebuilt(self):
         slug, bronze = self.meeting()
         path = bronze / 'metadata.json'
