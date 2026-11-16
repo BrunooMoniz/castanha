@@ -947,11 +947,24 @@ class ScreenNamesTest(unittest.TestCase):
         out = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30, check=True)
         posted = json.loads(out.stdout)
         self.assertEqual([m["devices"] for m in posted], [[[ANA, "Ana Teste"]], [[f"{SPACE}/devices/206", "Beto Teste"]]])
-        self.assertEqual(posted[-1]["probe"], {"nodes": 4, "devices": 3, "named": 2})
+        self.assertEqual(posted[-1]["probe"], {"nodes": 5, "devices": 4, "named": 2})
         # O que a página manda o host aceita.
         for message in posted:
             self.session.handle(message | {"code": CODE})
         self.assertEqual(self.session.devices[ANA][0], "Ana Teste")
+
+    def test_icon_text_read_from_the_screen_is_never_a_name(self):
+        # 16/11/2026: o alfinete do quadro ("keep_outline") virou o nome de quem mais falou numa reunião.
+        self.send(type="screen", t=self.now * 1000, devices=[[ANA, "Ana Teste"]])
+        self.send(type="screen", t=self.now * 1000 + 5, devices=[[ANA, "keep_outline"], [BETO, "frame_person"], [f"{SPACE}/devices/9", "keep"]])
+        self.assertEqual({d: v[0] for d, v in self.session.devices.items()}, {ANA: "Ana Teste"})
+        for name, icon in (("keep_outline", True), ("frame_person", True), ("more_vert", True), ("keep", True), (" mic ", True),
+                           ("Ana Teste", False), ("ana", False), ("ana_teste2 Silva", False), ("Keep_Outline", False), ("", False), (None, False)):
+            self.assertEqual(ms.icon_text(name), icon, name)
+        # Recorte gravado antes da correção: o histórico traz o ícone alternando com o nome.
+        snap = {"devices": {ANA: [[10, "keep_outline"], [20, "Ana Teste"], [30, "keep_outline"], [40, "Ana Teste"]],
+                            BETO: [[10, "frame_person"]], "x": "Nome Fixo"}}
+        self.assertEqual(ms._named_devices(snap), {ANA: [[20, "Ana Teste"], [40, "Ana Teste"]], BETO: [], "x": "Nome Fixo"})
 
     def test_screen_name_fills_a_device_the_channel_never_named(self):
         self.send(type="collections", t=self.now * 1000, b64=base64.b64encode(source_message(ANA, 111)).decode())

@@ -145,10 +145,12 @@
     for (const n of el.querySelectorAll("[data-self-name]")) self.add((n.getAttribute("data-self-name") || "").trim());
     const tries = [];
     if (el.getAttribute("role") === "listitem") tries.push(el.getAttribute("aria-label"));
-    for (const n of el.querySelectorAll("[data-self-name], .notranslate")) tries.push(n.textContent);
+    // Ícone do quadro também é "notranslate", e o texto dele é o nome do ícone (keep_outline, frame_person).
+    const icon = (n) => n.tagName === "I" || /symbols|icons/i.test(n.getAttribute("class") || "");
+    for (const n of el.querySelectorAll("[data-self-name], .notranslate")) if (!icon(n)) tries.push(n.textContent);
     for (const raw of tries) {
       const text = (raw || "").replace(/\s+/g, " ").trim();
-      if (text && text.length <= 120 && !self.has(text)) return text;
+      if (text && text.length <= 120 && !self.has(text) && !/^[a-z0-9]+(_[a-z0-9]+)+$/.test(text)) return text;
     }
     return null;
   };

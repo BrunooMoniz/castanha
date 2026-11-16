@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 HOST_NAME = "io.github.brunoomoniz.castanha.meet"
 EXTENSION_ID = "fmiffekiigfbnmidnclnpfhndjbnlegj"
 DECODER_VERSION = "meet-collections-v1"
-ALGORITHM_VERSION = "meet-speakers-v2"
+ALGORITHM_VERSION = "meet-speakers-v3"
 EVIDENCE_SOURCE = "google_meet_webrtc"
 TEAMS_EVIDENCE_SOURCE = "microsoft_teams_webrtc"
 EVIDENCE_SOURCES = (EVIDENCE_SOURCE, TEAMS_EVIDENCE_SOURCE)
@@ -582,7 +582,7 @@ class Session:
             events = []
             for pair in (msg.get("devices") if isinstance(msg.get("devices"), list) else [])[:500]:
                 if (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and DEVICE_RE.match(pair[0])
-                        and isinstance(pair[1], str) and pair[1].strip() and pair[1].isprintable()):
+                        and isinstance(pair[1], str) and pair[1].strip() and pair[1].isprintable() and not icon_text(pair[1])):
                     events.append({"type": "device", "device": pair[0], "name": pair[1].strip()[:200], "via": "screen"})
             self._apply_mapping(events, learned, status)
             probe = msg.get("probe")
@@ -751,6 +751,23 @@ def _epoch(value) -> Optional[float]:
         return None
 
 
+# O quadro do Meet mostra ícones cujo texto é o nome do ícone ("keep_outline", o alfinete; "frame_person"). Em
+# 16/11/2026 a leitura da tela pegou um deles e metade de uma reunião saiu com "keep_outline" no lugar da pessoa.
+ICON_TEXT_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)+$")
+ICON_WORDS = frozenset(("keep", "mic", "videocam", "person", "pin", "star", "hand"))
+
+
+def icon_text(name: Any) -> bool:
+    """Texto de ícone, não nome de gente."""
+    return isinstance(name, str) and (bool(ICON_TEXT_RE.match(name.strip())) or name.strip() in ICON_WORDS)
+
+
+def _named_devices(snap: Dict[str, Any]) -> Dict[str, Any]:
+    """Dispositivo → histórico de nomes, sem texto de ícone (recortes gravados antes da correção ainda o trazem)."""
+    return {device: history if isinstance(history, str) else [item for item in history or [] if not icon_text(item[1])]
+            for device, history in (snap.get("devices") or {}).items()}
+
+
 def meet_code(meeting: Optional[Dict[str, Any]]) -> Optional[str]:
     for key in ("conference_url", "hangoutLink", "location", "url", "description"):
         value = (meeting or {}).get(key)
@@ -826,7 +843,7 @@ def snapshot(state: Dict[str, Any], stopped_at: float, root: Optional[Path] = No
                 if kind == "source" and isinstance(record.get("ssrc"), int):
                     late.add(str(record["ssrc"]))
                 continue
-            if kind == "device" and isinstance(record.get("name"), str) and _number(t):
+            if kind == "device" and isinstance(record.get("name"), str) and _number(t) and not icon_text(record["name"]):
                 devices.setdefault(record.get("device"), []).append([t, record["name"]])
             elif kind == "source" and isinstance(record.get("ssrc"), int) and _number(t):
                 sources.setdefault(str(record["ssrc"]), []).append([t, record.get("device")])
@@ -901,7 +918,7 @@ def speaking_intervals(snap: Dict[str, Any], exclude: Iterable[Tuple[float, floa
     que o Meet manda junto (CSRC 42 na chamada de teste), não é pessoa e sai.
     """
     per_name: Dict[Optional[str], List[float]] = {}
-    devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
+    devices, sources = _named_devices(snap), snap.get("sources") or {}
     late = set(snap.get("late_sources") or [])
     exclude = list(exclude)
     active = [(ts, str(ssrc), level) for ts, ssrc, level in snap.get("frames") or []
@@ -1115,7 +1132,7 @@ def voices(snap: Dict[str, Any], exclude: Iterable[Tuple[float, float]] = ()) ->
     teve um nome se chama assim o tempo todo. Com mais de um dono ou nome, vale
     o de cada instante (antes do primeiro, o primeiro).
     """
-    devices, sources = snap.get("devices") or {}, snap.get("sources") or {}
+    devices, sources = _named_devices(snap), snap.get("sources") or {}
     mix = mix_sources(snap)
     exclude = list(exclude)
     cache: Dict[str, Any] = {}

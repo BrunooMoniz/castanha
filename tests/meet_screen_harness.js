@@ -17,18 +17,22 @@ const el = (attrs, children = [], text = "") => ({
     const all = [];
     const walk = (node) => {
       for (const c of node.children) {
-        if (want.some((w) => (w === "[data-self-name]" && "data-self-name" in c.attrs) || (w === ".notranslate" && c.attrs.class === "notranslate"))) all.push(c);
+        if (want.some((w) => (w === "[data-self-name]" && "data-self-name" in c.attrs) || (w === ".notranslate" && (c.attrs.class || "").split(" ").includes("notranslate")))) all.push(c);
         walk(c);
       }
     };
     walk({ children });
     return all;
   },
-  attrs, children,
+  attrs, children, tagName: attrs.tag || "SPAN",
 });
 // Quadro de vídeo: o nome fica num span "notranslate". O próprio usuário aparece como "Você".
 let tiles = [
-  el({ "data-participant-id": DEV(204) }, [el({ class: "notranslate" }, [], "Ana Teste")]),
+  // O ícone do alfinete vem antes do nome e também é "notranslate": o texto dele é o nome do ícone.
+  el({ "data-participant-id": DEV(204) }, [el({ class: "google-symbols notranslate", tag: "I" }, [], "keep_outline"),
+                                           el({ class: "notranslate" }, [], "frame_person"), el({ class: "notranslate" }, [], "Ana Teste")]),
+  // Quadro só com ícones (nome escondido): fica sem nome, não com o nome do ícone.
+  el({ "data-participant-id": DEV(207) }, [el({ class: "notranslate" }, [], "keep_outline"), el({ class: "material-icons notranslate" }, [], "keep")]),
   el({ "data-participant-id": DEV(205) }, [el({ "data-self-name": "Você" }, [], "Você")]),
   el({ "data-participant-id": "nao-e-dispositivo" }, [el({ class: "notranslate" }, [], "Intruso")]),
 ];
