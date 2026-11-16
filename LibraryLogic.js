@@ -109,3 +109,18 @@ function moveTargets(meetings, currentSlug, when, limit) {
     return {slug: m.slug, title: m.title || m.slug, when: m.when || ""}
   })
 }
+
+// O que o agente recebe desta reunião: {audience, auto} ou null.
+function shareState(agent, slug) {
+  var shared = agent && agent.shared
+  return shared && slug && Object.prototype.hasOwnProperty.call(shared, slug) ? shared[slug] : null
+}
+// Linha de estado do compartilhamento: quem recebe, para quem vale e se é por regra do agente.
+function shareLine(agent, state, hasNotes) {
+  var name = String(agent && agent.name || "Agente")
+  if (agent && agent.error) return name + ": " + agent.error
+  if (!state) return hasNotes ? name + " não recebe esta reunião" : name + ": sem notas ainda, nada a compartilhar"
+  var label = ""
+  ;(agent.audiences || []).forEach(function(a) { if (a.id === state.audience) label = a.label })
+  return name + " recebe esta reunião" + (label ? " · " + label : "") + (state.auto ? " · automático" : "")
+}

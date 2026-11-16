@@ -172,6 +172,19 @@ def cmd_library(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def cmd_agents(args):
+    from castanha.agents import share, status
+    from castanha.library import LibraryError
+    try:
+        result = share(args.slug, args.agent, args.audience, args.remove) if args.agents_cmd == "share" else status()
+    except (LibraryError, OSError) as exc:
+        result = {"status": "error", "message": str(exc) if isinstance(exc, LibraryError)
+                  else "Não foi possível falar com o agente."}
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def cmd_daemon(args):
     from castanha.daemon import run_daemon, running_daemon_pid
 
@@ -841,6 +854,18 @@ def main():
     p_library.add_argument("slug", nargs="?", default=None)
     p_library.add_argument("--json", action="store_true", help="Resposta estruturada")
     p_library.set_defaults(func=cmd_library)
+
+    p_agents = subparsers.add_parser("agents", help="Agentes que recebem notas de reunião (config `agents`)")
+    agents_sub = p_agents.add_subparsers(dest="agents_cmd", required=True)
+    p_agents_status = agents_sub.add_parser("status", help="O que cada agente recebe")
+    p_agents_status.add_argument("--json", action="store_true", help="Resposta estruturada")
+    p_agents_share = agents_sub.add_parser("share", help="Compartilhar (ou --remove) as notas de uma reunião")
+    p_agents_share.add_argument("--json", action="store_true", help="Resposta estruturada")
+    p_agents_share.add_argument("--audience", default=None, help="Público, entre os que o agente informa")
+    p_agents_share.add_argument("--remove", action="store_true", help="Deixar de compartilhar")
+    p_agents_share.add_argument("slug")
+    p_agents_share.add_argument("agent")
+    p_agents.set_defaults(func=cmd_agents)
 
     # Delete Recording (atalho direto)
     p_del = subparsers.add_parser("delete-recording", aliases=["del-rec", "delete-audio"], help=t("cli.help.delete_recording"))

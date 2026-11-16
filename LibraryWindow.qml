@@ -50,6 +50,8 @@ FloatingWindow {
   property string linkNotice: ""
   property string linkFeedback: ""
   property bool dayEventsQueued: false
+  // Agentes que recebem notas (config `agents`). Consultado ao abrir e depois de cada pedido, nunca no relógio.
+  property var agents: []
   property real pendingSeek: -1
   property bool playWhenReady: false
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.66)
@@ -79,7 +81,13 @@ FloatingWindow {
       if (window) window.requestActivate()
     })
     refreshHistory()
+    refreshAgents()
     if (slug) selectMeeting(String(slug))
+  }
+  function refreshAgents() {
+    if (agentsProcess.running) return
+    agentsProcess.command = cliCommand.concat(["agents", "status", "--json"])
+    agentsProcess.running = true
   }
   function refreshHistory() {
     if (historyProcess.running) return
@@ -241,6 +249,16 @@ FloatingWindow {
       } catch (error) { if (slug === root.selectedSlug) root.linkNotice = String(error.message || error) }
       if (slug === root.selectedSlug) root.startDetail()
       root.refreshHistory()
+    }
+  }
+  Process {
+    id: agentsProcess
+    objectName: "libraryAgentsProcess"
+    stdout: StdioCollector {}
+    onExited: function(code) {
+      // Sem agente, CLI antigo ou resposta estranha: a biblioteca segue igual, só sem o compartilhamento.
+      try { var result = JSON.parse(stdout.text); root.agents = code === 0 && Array.isArray(result.agents) ? result.agents : [] }
+      catch (error) { root.agents = [] }
     }
   }
   Process {
@@ -433,6 +451,16 @@ FloatingWindow {
           visible: root.dayEvents.length > 0
           LibraryButton { objectName: "libraryConfirmLink"; text: linkProcess.running ? "Vinculando…" : "Vincular"; enabled: !!root.linkTarget && !linkProcess.running; foreground: root.foreground; font.family: root.readingFontFamily; onClicked: root.confirmLink() }
         }
+      }
+      LibraryShare {
+        objectName: "libraryShare"
+        Layout.fillWidth: true
+        agents: root.agents
+        meetingSlug: root.current ? root.selectedSlug : ""
+        hasNotes: root.current ? root.current.has_summary === true : false
+        cliCommand: root.cliCommand
+        foreground: root.foreground; background: root.background; accent: root.accent; fontFamily: root.readingFontFamily
+        onChanged: root.refreshAgents()
       }
       Text { objectName: "libraryLinkFeedback"; Layout.fillWidth: true; visible: !!root.linkFeedback; text: root.linkFeedback; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.foreground; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }
       Text { Layout.fillWidth: true; visible: root.current && root.current.warnings.length > 0; text: root.current ? root.current.warnings.join("\n") : ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.muted; font.family: root.readingFontFamily; font.pixelSize: Style.font.body }

@@ -131,6 +131,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # que recebe e o host guarda em ~/.local/state/castanha/meet/<sessão>.audio/ só durante a gravação.
         "track_audio": False,
     },
+    # Agentes que podem receber as notas de uma reunião pela biblioteca ("Compartilhar com…"):
+    # [{"id": "...", "name": "...", "command": ["/caminho/do/programa"]}]. Protocolo em castanha/agents.py.
+    "agents": [],
     "zinom": {
         "enabled": False,
         "endpoint": "https://zinom.ai/mcp",
