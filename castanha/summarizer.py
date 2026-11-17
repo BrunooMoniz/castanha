@@ -601,6 +601,10 @@ OPENCLAW_ENV_PREFIX = "export HOME=/root; set -a; . /root/.openclaw/gateway.env;
 # transcrição da reunião nunca alcança MCP, canais ou memória do Maestro. É o
 # equivalente do `--safe-mode -t none` do Hermes.
 OPENCLAW_AGENT = "castanha"
+# Na VPS o root chama a CLI pelo wrapper que a roda como o usuário do OpenClaw, num isolamento em que o /root é
+# outro: o prompt gravado na casa do root não existe lá ("Message file not found", todo resumo caía na reserva).
+# A cópia que a CLI lê fica numa pasta do root fora de /root, legível só pelo grupo do OpenClaw, e some ao fim.
+OPENCLAW_STAGE_DIR = "/var/lib/castanha-llm"
 # `openclaw models status` é uma CLI Node: 2,7 s de CPU na VPS. Os 15 s do SSH
 # comum não deixam folga para a rede.
 OPENCLAW_QUOTA_TIMEOUT_SEC = 45
@@ -634,14 +638,21 @@ class OpenclawSshLlm(HermesSshLlm):
         # recebe transcrição de reunião.
         session = "castanha-" + remote.rsplit("/", 1)[-1]
         ref = f"{provider}/{model}"
+        stage_dir = shlex.quote(OPENCLAW_STAGE_DIR)
+        stage = shlex.quote(f"{OPENCLAW_STAGE_DIR}/{remote.rsplit('/', 1)[-1]}.txt")
         script = (f"if test -f {remote}/result.txt || test -f {remote}/exit.txt; then exit 0; fi; "
+                  # Sem o usuário openclaw (gateway rodando como quem chama), o grupo é o de quem chama.
+                  f"g=$(id -gn openclaw 2>/dev/null || id -gn); install -d -m 750 -g \"$g\" {stage_dir} && "
+                  # Cópia que sobrou de um turno morto no meio não fica no disco.
+                  f"find {stage_dir} -maxdepth 1 -type f -mmin +120 -delete; "
+                  f"install -m 640 -g \"$g\" {remote}/prompt.txt {stage} || {{ echo 97 > {remote}/exit.txt; exit 0; }}; "
                   + OPENCLAW_ENV_PREFIX
                   + f"timeout --kill-after=30s {self.timeout_sec + OPENCLAW_KILL_MARGIN_SEC}s "
                   f"openclaw agent --agent {shlex.quote(self.agent)} "
-                  f"--message-file {remote}/prompt.txt --model {shlex.quote(ref)} "
+                  f"--message-file {stage} --model {shlex.quote(ref)} "
                   f"--thinking {shlex.quote(self.reasoning)} --json "
                   f"--session-id {shlex.quote(session)} --timeout {self.timeout_sec} "
-                  f"> {remote}/result.part 2> {remote}/worker.log; rc=$?; "
+                  f"> {remote}/result.part 2> {remote}/worker.log; rc=$?; rm -f {stage}; "
                   f"if [ $rc -eq 0 ] && [ -s {remote}/result.part ]; then mv {remote}/result.part {remote}/result.txt; "
                   f"else echo $rc > {remote}/exit.txt; fi")
         self._ssh(f"umask 077; nohup flock -n {remote}/job.lock sh -c {shlex.quote(script)} "

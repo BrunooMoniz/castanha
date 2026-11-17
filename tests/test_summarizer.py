@@ -9,6 +9,7 @@ import itertools
 import json
 import re
 import shutil
+import stat
 import tempfile
 import unittest
 import urllib.error
@@ -1208,6 +1209,29 @@ class TestOpenclawSshLlm(unittest.TestCase):
         session = re.search(r"--session-id '?(castanha-[0-9a-f]{64})'?", job["launch"])
         self.assertTrue(session, job["launch"])
         self.assertIn(session.group(1)[len("castanha-"):], job["launch"])
+
+    def test_launch_real_entrega_copia_legivel_do_prompt_e_apaga_no_fim(self):
+        """O prompt da casa de quem chama não existe no isolamento do gateway: a CLI recebe uma cópia de fora dela."""
+        remote = self.temp / "job"
+        remote.mkdir()
+        (remote / "prompt.txt").write_text("prompt de teste")
+        stage = self.temp / "stage"
+        fake = self.temp / "openclaw"
+        fake.write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --message-file ] && f=$2; shift; done\n"
+                        "printf '%s %s %s' \"$f\" \"$(stat -c %a \"$f\")\" \"$(cat \"$f\")\"\n")
+        fake.chmod(0o700)
+        oc = self.openclaw()
+        with patch.object(oc, "_ssh") as ssh, patch.object(S, "OPENCLAW_STAGE_DIR", str(stage)), \
+                patch.object(S, "OPENCLAW_ENV_PREFIX", ""):
+            oc._launch(str(remote), "anthropic", "claude-opus-5")
+        tokens = shlex.split(ssh.call_args.args[0].split("nohup ", 1)[1])
+        env = dict(os.environ, PATH=str(self.temp) + os.pathsep + os.environ["PATH"])
+        done = subprocess.run(tokens[:tokens.index("sh") + 3], cwd=self.temp, env=env, capture_output=True, timeout=10)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((remote / "result.txt").read_text(), f"{stage}/job.txt 640 prompt de teste")
+        self.assertEqual(stat.S_IMODE(stage.stat().st_mode), 0o750)
+        self.assertEqual(list(stage.iterdir()), [])  # a cópia não fica no disco
+        self.assertEqual((remote / "prompt.txt").read_text(), "prompt de teste")
 
     def test_envelope_json_vira_texto(self):
         self.assertEqual(S.OpenclawSshLlm._answer(_envelope("pong")), "pong")

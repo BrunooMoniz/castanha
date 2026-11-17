@@ -20,6 +20,24 @@ def _object(path):
     return value
 
 
+# Gravação recém-terminada: a transcrição roda na VPS (dois canais em série, perto da duração do áudio) e a nota só
+# sai quando esta fila confere de novo. Com a espera dobrando, uma reunião de 30 min ficava mais 15 min parada com
+# a transcrição já pronta. Dentro da janela (30 min + a duração da gravação) a conferência é de minuto em minuto.
+FRESH_POLL_SEC = 60
+FRESH_BASE_SEC = 30 * 60
+
+
+def _fresh(bronze, now):
+    for path in (bronze / ".jobs").glob("*.json"):
+        try:
+            job = _object(path)
+            if 0 <= now - float(job["stopped_at"]) < FRESH_BASE_SEC + float(job.get("duration_seconds") or 0):
+                return True
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return False
+
+
 def drain_queue(storage=None, now=None, limit=5):
     """Uma rodada limitada. Lock global cobre inclusive reinício do daemon.
 
@@ -62,10 +80,14 @@ def drain_queue(storage=None, now=None, limit=5):
                 receipt = _object(receipt_path) if receipt_path.exists() else {}
                 if float(receipt.get("next_attempt_at", 0)) > now:
                     continue
-                attempts = min(max(int(receipt.get("attempts", 0)), 0) + 1, 20)
+                previous = max(int(receipt.get("attempts", 0)), 0)
+                # Erro segue o backoff mesmo em gravação recente; a espera curta não conta tentativa, para o
+                # backoff começar do início (e não do teto) quando a janela acabar.
+                fresh = receipt.get("status") != "error" and _fresh(bronze, now)
+                attempts = previous if fresh else min(previous + 1, 20)
                 # Teto de 1 h: pendência que não avança não pode custar uma
                 # passada completa a cada 15 min para sempre.
-                delay = min(60 * 2 ** (attempts - 1), 3600)
+                delay = FRESH_POLL_SEC if fresh else min(60 * 2 ** (attempts - 1), 3600)
                 receipt = {"attempts": attempts, "last_attempt_at": now,
                            "next_attempt_at": now + delay, "status": "running"}
                 write_json(receipt_path, receipt)
@@ -75,6 +97,8 @@ def drain_queue(storage=None, now=None, limit=5):
                 except Exception as exc:
                     result = {"slug": slug, "status": "error", "error_type": type(exc).__name__}
                 receipt["status"] = result.get("status", "error")
+                if fresh and receipt["status"] == "error":
+                    receipt["attempts"] = min(previous + 1, 20)
                 if receipt["status"] in ("ok", "tombstoned", "skipped"):
                     receipt.update(attempts=0, next_attempt_at=0)
                 write_json(receipt_path, receipt)

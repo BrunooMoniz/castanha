@@ -50,6 +50,30 @@ class TestRetryQueue(unittest.TestCase):
                 now = receipt["next_attempt_at"]
         self.assertEqual(receipt["next_attempt_at"] - receipt["last_attempt_at"], 3600)
 
+    def recent(self, slug, status):
+        from castanha.retry import drain_queue
+        directory = self.meeting(slug)
+        (directory / ".jobs").mkdir()
+        (directory / ".jobs" / "job.json").write_text(
+            json.dumps({"stage": "pending", "stopped_at": 1000.0, "duration_seconds": 600}))
+        waits, now = [], 1000
+        with patch("castanha.retry.sync_meeting", return_value={"status": status}):
+            for _ in range(45):
+                drain_queue(self.storage, now=now)
+                receipt = json.loads((directory / ".sync-retry.json").read_text())
+                waits.append(receipt["next_attempt_at"] - now)
+                now = receipt["next_attempt_at"]
+        return waits
+
+    def test_recent_recording_is_checked_every_minute_then_backs_off_from_the_start(self):
+        waits = self.recent("a", "pending")
+        # Janela de 30 min + 10 min de gravação: 40 conferências de 1 min; depois o backoff começa em 1 min.
+        self.assertEqual(waits[:40], [60] * 40)
+        self.assertEqual(waits[40:], [60, 120, 240, 480, 960])
+
+    def test_recent_recording_that_errors_keeps_the_exponential_backoff(self):
+        self.assertEqual(self.recent("a", "error")[:6], [60, 120, 240, 480, 960, 1920])
+
     def test_crash_keeps_retry_lease_on_disk(self):
         from castanha.retry import drain_queue
         self.meeting("a")
