@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from castanha import echo_cancel as echo_cancel_node
-from castanha.i18n import audio_status_message
 
 @dataclass
 class AudioDeviceInfo:
@@ -501,11 +500,3 @@ def classify_audio(levels: List[ChannelLevels]) -> str:
     if mics and all(ch.silent for ch in mics):
         return "mic_mudo"
     return "ok"
-
-
-AUDIO_STATUS_MESSAGES = {
-    "ok": audio_status_message("ok", locale="pt"),
-    "mic_mudo": audio_status_message("mic_mudo", locale="pt"),
-    "sem_audio": audio_status_message("sem_audio", locale="pt"),
-    "desconhecido": audio_status_message("desconhecido", locale="pt"),
-}

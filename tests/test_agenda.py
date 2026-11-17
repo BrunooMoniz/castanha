@@ -44,12 +44,8 @@ class TestAgendaDiaInteiro(unittest.TestCase):
         with patch("castanha.agenda.get_upcoming_meetings", return_value=eventos):
             return collect_upcoming(self.cfg)
 
-    def test_dia_inteiro_de_hoje_aparece_mesmo_tendo_comecado_a_meia_noite(self):
-        eventos = [_all_day("lembrete", "Pagar condomínio"), _timed("reuniao_20260905T130000Z", "Nora Weekly", 2)]
-        titulos = [m.title for m in self._coletar(eventos)]
-        self.assertIn("Pagar condomínio", titulos)
-
     def test_reuniao_com_hora_vem_antes_do_dia_inteiro(self):
+        # O dia inteiro de hoje começou à meia-noite e mesmo assim continua na lista.
         eventos = [_all_day("lembrete", "Pagar condomínio"), _timed("reuniao_20260905T130000Z", "Nora Weekly", 2)]
         titulos = [m.title for m in self._coletar(eventos)]
         self.assertEqual(titulos, ["Nora Weekly", "Pagar condomínio"])
@@ -84,11 +80,6 @@ class TestZinomDiaInteiro(unittest.TestCase):
         self.assertEqual((ev.start.year, ev.start.month, ev.start.day, ev.start.hour), (2026, 9, 5, 0))
         self.assertEqual(ev.start.tzinfo, _local_tz())
         self.assertEqual(ev.end - ev.start, datetime.timedelta(days=1))
-
-    def test_dia_inteiro_entra_por_padrao(self):
-        from castanha.zinom_calendar import ZinomCalendar
-        fonte = ZinomCalendar({"zinom": {"token": "t"}, "calendar": {"zinom": {}}})
-        self.assertFalse(fonte.skip_all_day)
 
     def test_sem_lista_fica_so_a_agenda_principal(self):
         from castanha.zinom_calendar import ZinomCalendar

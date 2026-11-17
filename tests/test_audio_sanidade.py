@@ -152,8 +152,26 @@ class TestMedicaoReal(unittest.TestCase):
 
 
 class TestMuteDaFonte(unittest.TestCase):
-    def test_devolve_bool_ou_none(self):
-        self.assertIn(is_default_source_muted(), (True, False, None))
+    """O aviso de microfone mudo no início da gravação depende desta leitura do pactl."""
+
+    def _mudo(self, returncode=0, stdout="", erro=None):
+        from unittest.mock import patch
+        resposta = subprocess.CompletedProcess(["pactl"], returncode, stdout, "")
+        with patch("castanha.audio.subprocess.run", side_effect=erro, return_value=resposta) as run:
+            resultado = is_default_source_muted()
+        self.assertEqual(run.call_args.args[0], ["pactl", "get-source-mute", "@DEFAULT_SOURCE@"])
+        return resultado
+
+    def test_pactl_diz_se_a_fonte_padrao_esta_muda(self):
+        self.assertIs(self._mudo(stdout="Mute: yes\n"), True)
+        self.assertIs(self._mudo(stdout="Mute: no\n"), False)
+
+    def test_sem_resposta_confiavel_nao_adivinha(self):
+        # pactl falhou, respondeu outra coisa ou nem existe: None, nunca "não está mudo".
+        self.assertIsNone(self._mudo(returncode=1, stdout="Mute: yes\n"))
+        self.assertIsNone(self._mudo(stdout="Mudo: sim\n"))
+        self.assertIsNone(self._mudo(erro=FileNotFoundError("pactl")))
+        self.assertIsNone(self._mudo(erro=subprocess.TimeoutExpired("pactl", 5)))
 
 
 if __name__ == "__main__":

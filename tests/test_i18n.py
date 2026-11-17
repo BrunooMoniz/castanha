@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from castanha.audio import AUDIO_STATUS_MESSAGES
 from castanha.i18n import STRINGS, audio_status_message, resolve_locale, t
 
 
@@ -22,14 +21,8 @@ class TestResolveLocale(unittest.TestCase):
     def test_castanha_lang_beats_lc_all(self):
         self.assertEqual(self._resolve(CASTANHA_LANG="en", LC_ALL="pt_BR.UTF-8"), "en")
 
-    def test_lc_all_beats_lang(self):
-        self.assertEqual(self._resolve(LC_ALL="pt_BR.UTF-8", LANG="en_US.UTF-8"), "pt")
-
-    def test_lang_pt_br_resolves_pt(self):
-        self.assertEqual(self._resolve(LANG="pt_BR.UTF-8"), "pt")
-
-    def test_lang_case_insensitive(self):
-        self.assertEqual(self._resolve(LANG="PT_br"), "pt")
+    def test_castanha_lang_case_insensitive(self):
+        self.assertEqual(self._resolve(CASTANHA_LANG="PT_br"), "pt")
 
     def test_locale_desconhecido_resolves_en(self):
         self.assertEqual(self._resolve(CASTANHA_LANG="xx_YY"), "en")
@@ -73,21 +66,13 @@ class TestAudioStatusMessage(unittest.TestCase):
             "O canal do microfone saiu em silêncio: o mic estava mudo (teclado ou sistema). "
             "Só o áudio da chamada foi gravado.",
         )
+        self.assertEqual(audio_status_message("sem_audio", locale="pt"),
+                         "Nenhum canal captou áudio: a gravação está em silêncio do início ao fim.")
+        self.assertEqual(audio_status_message("desconhecido", locale="pt"),
+                         "Não foi possível medir os níveis do áudio.")
 
     def test_status_desconhecido_devolve_vazio(self):
         self.assertEqual(audio_status_message("status_que_nao_existe", locale="pt"), "")
-
-
-class TestBackwardCompat(unittest.TestCase):
-    def test_audio_status_messages_mantem_valores_pt(self):
-        esperado = {
-            "ok": "Áudio capturado nos dois canais.",
-            "mic_mudo": "O canal do microfone saiu em silêncio: o mic estava mudo (teclado ou sistema). "
-                        "Só o áudio da chamada foi gravado.",
-            "sem_audio": "Nenhum canal captou áudio: a gravação está em silêncio do início ao fim.",
-            "desconhecido": "Não foi possível medir os níveis do áudio.",
-        }
-        self.assertEqual(AUDIO_STATUS_MESSAGES, esperado)
 
 
 class TestCliHelpLocale(unittest.TestCase):

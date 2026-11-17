@@ -1,4 +1,3 @@
-import inspect
 import json
 from dataclasses import replace
 import os
@@ -960,8 +959,23 @@ class CastanhaEngine:
             self.assertEqual(engine.recorder.start.call_count, 1)
 
     def test_detector_stays_coupled_to_the_capture_output_name(self):
-        self.assertIn(CAPTURE_OUTPUT_PREFIX, inspect.getsource(CastanhaEngine.start_recording),
-                      "Mudou o nome do arquivo de captura: a varredura de /proc fica cega")
+        """O arquivo que o start real entrega ao gravador é o que a varredura de /proc reconhece."""
+        from types import SimpleNamespace
+        engine = CastanhaEngine.__new__(CastanhaEngine)
+        engine.config = {}
+        engine.state_mgr = SimpleNamespace(read=lambda: {"status": "idle"})
+        engine.recorder = Mock()
+        engine.recorder.start.side_effect = RuntimeError("fixture: para antes de gravar")
+        with patch("castanha.capture_gate.get_state_dir", return_value=self.state), \
+                patch("castanha.engine.is_default_source_muted", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "para antes de gravar"):
+                engine.start_recording()
+        saida = str(engine.recorder.start.call_args.args[0])
+        falso = self.base / "proc-captura"
+        (falso / "4321").mkdir(parents=True)
+        (falso / "4321/cmdline").write_bytes(b"ffmpeg\0-f\0pulse\0" + os.fsencode(saida) + b"\0")
+        self.assertEqual(capture_processes(proc=falso), [4321],
+                         f"Mudou o nome do arquivo de captura ({saida}): a varredura de /proc fica cega")
 
 
 if __name__ == "__main__":
